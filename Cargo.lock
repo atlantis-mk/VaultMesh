@@ -5989,6 +5989,7 @@ dependencies = [
  "tauri-plugin-updater",
  "url",
  "uuid",
+ "vaultmesh-core",
  "vaultmesh-ffi",
  "windows-sys 0.61.2",
  "zeroize",

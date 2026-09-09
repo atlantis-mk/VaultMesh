@@ -1,0 +1,42 @@
+schema: "2"
+id: "CHG-2026-044-locked-lan-sync"
+title: "锁定密文同步与多设备事件推送"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "实现锁定密文收发、解锁合并与多副本主动同步并完成平台验收"
+requirements:
+  - "REQ-LAN-SYNC-001"
+  - "NFR-REL-001"
+  - "NFR-COMPAT-001"
+tests:
+  - "CT-LAN-SYNC-001"
+  - "AT-LAN-SYNC-001"
+adrs:
+  - "ADR-0020"
+  - "ADR-0019"
+context_refs:
+  - "docs/04-architecture.md#LAN peer pairing"
+  - "specs/lan-vault-sync.md"
+  - "specs/browser-integration.md"
+  - "docs/05-data-model.md"
+  - "docs/06-security-privacy.md"
+  - "docs/07-test-release-plan.md"
+  - "docs/09-document-governance.md"
+related_changes:
+  - "CHG-2026-043-lan-vault-sync"
+boundaries:
+  - "锁定期密文网络权限"
+  - "逐连接加密队列与密钥"
+  - "同步协议兼容"
+  - "多副本传播与收据"
+  - "系统锁定时 desktop/Browser/Agent 明文授权清理"
+risks:
+  - "锁定收发不等于解锁合并"
+  - "撤销单条连接不阻止其他已授权路径转发"
+  - "平台实机验收尚未执行"
+next:
+  - "完成 packaged macOS↔macOS、Windows↔Windows、macOS↔Windows 的三台以上 AT-LAN-SYNC-001；当前仅本机自动化验证通过"
+  - "在目标 OS 验证冷启动路由证明、系统锁定/睡眠、防火墙、旧授权升级、快速连续编辑的可用延迟和队列满提示"
+  - "平台验收通过后才执行 work:finish；此次不发布"

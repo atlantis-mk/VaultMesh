@@ -608,3 +608,31 @@ fn unix_listener_writes_large_responses_past_the_first_socket_buffer() {
     drop(listener);
     fs::remove_dir_all(root).expect("cleanup");
 }
+
+#[test]
+fn ct_lan_sync_system_lock_clears_browser_unlock_without_revoking_pairing() {
+    let (path, other, mut broker, secret) = setup("system-lock-sync");
+    let result = call(&mut broker, &secret, "vault.unlock", json!({"masterPassword": PASSWORD, "userGestureId": Uuid::new_v4()}), Uuid::new_v4());
+    assert_eq!(result["result"]["status"]["unlocked"], true);
+    broker.lock_for_system();
+    let status = call(&mut broker, &secret, "vault.status", json!({}), Uuid::new_v4());
+    assert_eq!(status["result"]["unlocked"], false);
+    let result = call(&mut broker, &secret, "vault.unlock", json!({"masterPassword": PASSWORD, "userGestureId": Uuid::new_v4()}), Uuid::new_v4());
+    assert_eq!(result["result"]["status"]["unlocked"], true);
+    drop(broker); let _ = std::fs::remove_file(other); std::fs::remove_dir_all(path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn ct_lan_sync_listener_stop_drops_browser_unlock_owner() {
+    let (root, _, mut broker, secret) = setup("listener-owner-sync");
+    let result = call(&mut broker, &secret, "vault.unlock", json!({"masterPassword": PASSWORD, "userGestureId": Uuid::new_v4()}), Uuid::new_v4());
+    assert_eq!(result["result"]["status"]["unlocked"], true);
+    let broker = Arc::new(Mutex::new(broker));
+    let weak = Arc::downgrade(&broker);
+    let socket = std::env::temp_dir().join(format!("vm-test-{}.sock", Uuid::new_v4()));
+    let listener = BrowserBrokerUnixListener::start(socket, broker).unwrap();
+    listener.stop();
+    assert!(weak.upgrade().is_none(), "stopped listener must not retain an unlocked core");
+    std::fs::remove_dir_all(root).unwrap();
+}

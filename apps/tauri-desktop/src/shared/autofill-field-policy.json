@@ -1,0 +1,4 @@
+{
+  "excludedWords": ["search", "query", "filter", "captcha", "coupon", "promo", "discount", "comment", "message", "feedback"],
+  "excludedText": ["搜索", "筛选", "图形验证码", "优惠码", "折扣码", "留言", "评论"]
+}

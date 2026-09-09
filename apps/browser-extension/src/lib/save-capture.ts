@@ -1,4 +1,4 @@
-import { analyzeFormSemantics, isNewPasswordControl, type SupportedControl } from "@/lib/form-discovery";
+import { analyzeFormSemantics, formControls, isNewPasswordControl, type SupportedControl } from "@/lib/form-discovery";
 import type { PageContext } from "@/lib/protocol";
 
 export type CapturedLogin = {
@@ -95,7 +95,7 @@ const cardTokens: Record<string, string> = {
 };
 
 export function captureSubmittedData(root: ParentNode, pageUrl: string, options: CaptureOptions = {}): CapturedSaveData {
-  const controls = controlsWithValues(root);
+  const controls = captureControls(root);
   const context = options.context ?? inferContext(controls);
   return {
     ...(options.includeLogin === false ? {} : captureLogin(controls, context)),
@@ -105,7 +105,7 @@ export function captureSubmittedData(root: ParentNode, pageUrl: string, options:
 }
 
 export function submittedDataContext(root: ParentNode): PageContext {
-  return inferContext(controlsWithValues(root));
+  return inferContext(captureControls(root));
 }
 
 export function capturedDataSignature(data: CapturedSaveData): string {
@@ -128,6 +128,8 @@ function captureLogin(controls: SupportedControl[], context: PageContext): Pick<
     ?? passwords.find((control) => isNewPasswordControl(control))
     ?? passwords[0];
   if (!preferred?.value) return {};
+  const newPasswords = passwords.filter((control) => autocompleteTokens(control).includes("new-password") || isNewPasswordControl(control));
+  if (newPasswords.includes(preferred) && newPasswords.some((control) => control.value !== preferred.value)) return {};
   return { login: { username: accountValue(controls), password: preferred.value } };
 }
 
@@ -229,11 +231,11 @@ function captureCard(controls: SupportedControl[], pageUrl: string): Pick<Captur
   };
 }
 
-function controlsWithValues(root: ParentNode): SupportedControl[] {
-  return Array.from(root.querySelectorAll<SupportedControl>('input,textarea,select,[contenteditable="true"]'))
+function captureControls(root: ParentNode): SupportedControl[] {
+  return formControls(root)
     .filter((control) => !(control instanceof HTMLInputElement && ["button", "submit", "reset", "checkbox", "radio", "file", "hidden"].includes(control.type)))
     .filter((control) => !("disabled" in control) || !control.disabled)
-    .filter((control) => controlValue(control).length > 0);
+    .filter((control) => !control.matches(':disabled,[aria-disabled="true"]') && !control.closest('[inert],[aria-hidden="true"],[hidden]'));
 }
 
 function inferContext(controls: SupportedControl[]): PageContext {

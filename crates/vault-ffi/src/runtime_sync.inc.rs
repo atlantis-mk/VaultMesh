@@ -1,5 +1,26 @@
 // Typed privileged entrypoints. None are registered as generic core operations.
 impl DesktopRuntime {
+    pub fn sync_relay(&self) -> std::sync::Arc<crate::sync_relay::RelayHub> {
+        self.relay.clone()
+    }
+    pub fn sync_channel_offer(&self, peer: &str) -> Result<vaultmesh_core::SyncChannel, DesktopRuntimeError> {
+        if crate::sync_relay::system_locked() {return Err(VAULTMESH_STATUS_LOCKED.into());}
+        self.vault.as_ref().ok_or(DesktopRuntimeError::from(VAULTMESH_STATUS_LOCKED))?
+            .session.sync_channel_offer(peer).map_err(map_runtime_core_error)
+    }
+    pub fn sync_accept_channel(&mut self, peer: &str, fingerprint: &str, remote: Uuid, offer: &vaultmesh_core::SyncChannel) -> Result<(), DesktopRuntimeError> {
+        self.refresh_from_disk()?;
+        let vault = self.vault.as_mut().ok_or(DesktopRuntimeError::from(VAULTMESH_STATUS_LOCKED))?;
+        transaction(vault, |s| {
+            s.sync_accept_channel(peer, fingerprint, remote, offer).map_err(map_core_error)?;
+            Ok(json!({}))
+        })?;
+        Ok(())
+    }
+    pub fn sync_pump(&mut self) -> Result<(), DesktopRuntimeError> {
+        if self.vault.is_none() { return Ok(()); }
+        self.refresh_from_disk()
+    }
     pub fn sync_state(&mut self) -> Result<vaultmesh_core::SyncState, DesktopRuntimeError> {
         self.refresh_from_disk()?;
         let vault = self

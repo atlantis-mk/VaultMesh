@@ -34,6 +34,7 @@ pub(crate) fn transaction_guarded(
             && write_vault(&vault.path, encrypted.as_slice()).is_ok()
         {
             vault.persisted_fingerprint = vault_fingerprint(encrypted.as_slice());
+            crate::sync_relay::publish_committed(vault);
             return result;
         }
     }

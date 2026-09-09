@@ -10,6 +10,8 @@ mod format;
 mod model;
 mod session;
 mod sync;
+mod sync_mailbox;
+pub use sync_mailbox::{SyncChannel, SyncMailboxReceipt, SyncPacket, SyncRoute};
 mod totp;
 pub use sync::{
     SYNC_MAX_BYTES, SYNC_MAX_RECORDS, SyncAuthorization, SyncEntry, SyncManifest, SyncRecord,

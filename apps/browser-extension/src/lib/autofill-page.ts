@@ -1,4 +1,4 @@
-import { accessibleShadowRoot, analyzeControlSemantics, credentialFieldRole, discoverFields, classifyControl, hasLoginFields, isEmailAccountControl, isNewPasswordControl, loginFormSignature, passwordFieldGroup, selectAutofillPageContext, shouldPreserveExistingLoginAccount } from "@/lib/form-discovery";
+import { accessibleShadowRoot, analyzeControlSemantics, credentialFieldRole, discoverFields, classifyControl, formControls, semanticCluster, hasLoginFields, isEmailAccountControl, isNewPasswordControl, loginFormSignature, passwordFieldGroup, selectAutofillPageContext, shouldPreserveExistingLoginAccount } from "@/lib/form-discovery";
 import { InlineAutofillMenu } from "@/lib/inline-autofill";
 import { InlineAutofillTrigger } from "@/lib/inline-autofill-trigger";
 import { fillResultStatus, inlineFillFailureMessage } from "@/lib/autofill-selection";
@@ -9,10 +9,14 @@ import { loadPasswordGeneratorOptions, loadUsernameGeneratorOptions } from "@/li
 import { captureSubmittedData, capturedDataSignature, hasCapturedData, submittedDataContext, type CapturedSaveData } from "@/lib/save-capture";
 import { SaveCapturePrompt } from "@/lib/save-capture-prompt";
 import { createUuid } from "@/lib/uuid";
+import type { AutofillTarget } from "@/lib/protocol";
+import { ShadowHostTracker } from "@/lib/shadow-host-tracker";
 
 type SendMessage = (message: unknown) => Promise<unknown>;
+type DocumentIdSource = string | (() => string);
 
-export function startAutofillPage(document: Document, documentId: string, sendMessage: SendMessage) {
+export function startAutofillPage(document: Document, documentId: DocumentIdSource, sendMessage: SendMessage, captureTarget?: (target: HTMLElement) => AutofillTarget | undefined) {
+  const currentDocumentId = typeof documentId === "function" ? documentId : () => documentId;
   let disposed = false;
   let scanTimer: ReturnType<typeof setTimeout> | null = null;
   let unlockPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -22,7 +26,7 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
   let focusRequest = 0;
   let availabilityRequest = 0;
   let availability: "unknown" | "ready" | "locked" | "unavailable" = "unknown";
-  let generatedCapture: { username?: string; password: string; pageContext: "signup" | "password-change" | "password-reset"; loginId?: string } | null = null;
+  let generatedCapture: { root: ParentNode; pageContext: "signup" | "password-change" | "password-reset"; loginId?: string } | null = null;
   let lastCapture: { signature: string; sentAt: number } | null = null;
   let activeCaptureId: string | null = null;
   type FilledFormState = { loginId?: string; identityId?: string; cardId?: string; loginEdited: boolean; identityEdited: boolean; cardEdited: boolean };
@@ -30,23 +34,29 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
   const pendingCaptureKinds = new Map<string, { login: boolean; identity: boolean; card: boolean; root: ParentNode; state?: FilledFormState }>();
   const observers: MutationObserver[] = [];
   const observedRoots = new WeakSet<Node>();
+  const shadowHosts = new ShadowHostTracker((root) => { observeOpenRoots(root); scheduleScan(); });
+  const shadowEventRoots = new Set<ShadowRoot>();
+  const handledEvents = new WeakSet<Event>();
   const menu = new InlineAutofillMenu(document, (candidate, target) => {
     if (candidate.kind === "email-otp") {
-      void sendMessage({ kind: "vaultmesh.email-otp-select", candidateId: candidate.id });
+      const scope = captureTarget?.(target);
+      if (captureTarget && !scope) return;
+      void sendMessage({ kind: "vaultmesh.email-otp-select", candidateId: candidate.id, ...(scope ? { target: scope } : {}) });
       return;
     }
     void selectCandidate(candidate, target);
   }, (login, target) => {
-    generatedCapture = { username: login.username, password: login.password, pageContext: "signup" };
-    void fillGeneratedLogin(document, documentId, login, target);
+    if (classifyControl(target) !== "login") return;
+    generatedCapture = { root: formRoot(target), pageContext: "signup" };
+    void fillGeneratedLogin(document, currentDocumentId, login, target);
   }, (password, target) => {
     if (target instanceof HTMLInputElement) {
       const context = analyzeControlSemantics(target).context;
       if (context === "signup" || context === "password-change" || context === "password-reset") {
         const loginId = filledFormStates.get(formRoot(target))?.loginId;
-        generatedCapture = { password, pageContext: context, ...(context !== "signup" && loginId ? { loginId } : {}) };
+        generatedCapture = { root: formRoot(target), pageContext: context, ...(context !== "signup" && loginId ? { loginId } : {}) };
       }
-      void fillGeneratedPassword(document, documentId, target, password);
+      void fillGeneratedPassword(document, currentDocumentId, target, password);
     }
   });
   const trigger = new InlineAutofillTrigger(document, (target) => void openCandidates(target));
@@ -75,9 +85,17 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
   });
 
   async function selectCandidate(candidate: AutofillCandidate, target: HTMLElement) {
+    if (classifyControl(target) !== candidate.kind) return;
+    const scope = captureTarget?.(target);
+    if (captureTarget && !scope) return;
+    // The desktop may need to revalidate or request a re-prompt. Do not let
+    // that delayed result replace the UI after the user has moved to another
+    // field (or the page lifecycle has invalidated this interaction).
+    const request = ++focusRequest;
     const replaceExistingAccount = candidate.kind === "login" && !shouldPreserveExistingLoginAccount(target);
     const response = await sendMessage({
       kind: "vaultmesh.autofill-select",
+      ...(scope ? { target: scope } : {}),
       selectedItem: {
         kind: candidate.kind,
         id: candidate.id,
@@ -86,7 +104,7 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
       },
       ...(replaceExistingAccount ? { replaceExistingAccount: true } : {}),
     }).catch(() => null);
-    if (disposed || !target.isConnected) return;
+    if (disposed || request !== focusRequest || !target.isConnected) return;
     if (fillResultStatus(response) === "unlock-required") {
       availability = "locked";
       trigger.setLocked(true);
@@ -148,12 +166,21 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
   const scan = () => {
     if (disposed || document.visibilityState === "hidden") return;
     observeOpenRoots(document);
-    const { descriptors } = discoverFields(document);
+    if (trigger.target && !classifyControl(trigger.target)) {
+      focusRequest += 1;
+      menu.hide();
+      trigger.hide();
+    }
+    const { descriptors, handles } = discoverFields(document);
     if (!hasLoginFields(descriptors)) return;
     const pageContext = selectAutofillPageContext(descriptors);
     if (pageContext !== "login" && pageContext !== "otp") return;
-    const signature = loginFormSignature(descriptors);
-    if (signature) void sendMessage({ kind: "vaultmesh.autofill-page-ready", documentId, signature, pageContext });
+    const eligible = [...handles.values()].find((control) => classifyControl(control) === "login" && analyzeControlSemantics(control).context === pageContext);
+    const target = eligible ? captureTarget?.(eligible) : undefined;
+    if (captureTarget && !target) return;
+    const cluster = eligible ? new Set([eligible, ...formControls(semanticCluster(eligible).root)]) : null;
+    const signature = loginFormSignature(cluster ? descriptors.filter((field) => cluster.has(handles.get(field.handle)!)) : descriptors);
+    if (signature) void sendMessage({ kind: "vaultmesh.autofill-page-ready", documentId: currentDocumentId(), signature, pageContext, ...(target ? { target } : {}) });
   };
 
   const scheduleScan = () => {
@@ -176,18 +203,33 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
         // label or editable role can make the next one-shot fill eligible.
         // Values are deliberately excluded: rescans must never be driven by
         // page secrets and discovery continues to expose only `isEmpty`.
-        observer.observe(current, { subtree: true, childList: true, attributes: true, attributeFilter: ["autocomplete", "type", "name", "id", "placeholder", "disabled", "readonly", "contenteditable", "role", "aria-label", "aria-labelledby", "aria-hidden", "hidden", "class", "style"] });
+        observer.observe(current, { subtree: true, childList: true, attributes: true, attributeFilter: ["autocomplete", "type", "name", "id", "placeholder", "disabled", "readonly", "contenteditable", "role", "aria-label", "aria-labelledby", "aria-disabled", "aria-readonly", "aria-hidden", "hidden", "inert", "class", "style", "form"] });
         observers.push(observer);
         observedRoots.add(current);
+        if (current instanceof ShadowRoot) {
+          // Native submit is not composed; closed roots also retarget focus
+          // and input. Subscribe at the root and deduplicate composed events.
+          current.addEventListener("submit", onSubmit as EventListener, true);
+          current.addEventListener("formdata", onFormData, true);
+          current.addEventListener("keydown", onSubmissionKeyDown as EventListener, true);
+          current.addEventListener("click", onClick as EventListener, true);
+          current.addEventListener("focusin", onFocusIn as EventListener, true);
+          current.addEventListener("input", onInput, true);
+          shadowEventRoots.add(current);
+        }
       }
       for (const element of current.querySelectorAll<HTMLElement>("*")) {
+        if (element.matches("[data-vaultmesh-autofill],[data-vaultmesh-autofill-trigger]")) continue;
         const shadowRoot = accessibleShadowRoot(element);
         if (shadowRoot) roots.push(shadowRoot);
+        else shadowHosts.watch(element);
       }
     }
   }
 
   async function openCandidates(target: HTMLElement) {
+    const fieldKind = classifyControl(target);
+    if (!fieldKind) { menu.hide(); trigger.hide(); return; }
     if (availability === "locked") return openUnlock();
     if (target instanceof HTMLInputElement && isNewPasswordControl(target)) {
       const request = ++focusRequest;
@@ -196,8 +238,6 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
       menu.show(target, [], "password", { passwordGeneratorOptions: options });
       return;
     }
-    const fieldKind = classifyControl(target);
-    if (!fieldKind) return;
     const pageContext = analyzeControlSemantics(target).context;
     // Signup account fields create a new credential. Never offer existing
     // vault logins here; show the local random account/password generator.
@@ -217,7 +257,7 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
     }
     const request = ++focusRequest;
     const response = AutofillCandidatesResponseSchema.safeParse(await sendMessage({ kind: "vaultmesh.autofill-candidates", fieldKind, pageContext }).catch(() => null));
-    if (disposed || request !== focusRequest || trigger.target !== target || !target.isConnected) return;
+    if (disposed || request !== focusRequest || trigger.target !== target || classifyControl(target) !== fieldKind) return;
     if (response.success && response.data.status === "locked") {
       availability = "locked";
       trigger.setLocked(true);
@@ -249,6 +289,7 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
   }
 
   const onFocusIn = (event: FocusEvent) => {
+    if (handledEvents.has(event)) return;
     const target = event.composedPath()[0];
     if (menu.owns(event.target) || trigger.owns(event.target)) return;
     if (!(target instanceof Element)) {
@@ -256,6 +297,7 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
       return trigger.hide();
     }
     const fieldKind = classifyControl(target);
+    if (fieldKind) handledEvents.add(event);
     focusRequest += 1;
     menu.hide();
     if (!fieldKind) return trigger.hide();
@@ -270,12 +312,7 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
     // script alive. Do not permanently detach its discovery lifecycle, but
     // discard every page-scoped secret or UI state before the document is
     // frozen. The next pageshow performs a fresh, value-free discovery.
-    generatedCapture = null;
-    lastCapture = null;
-    focusRequest += 1;
-    menu.hide();
-    trigger.hide();
-    savePrompt.hide();
+    clearPageScopedState();
   };
   const onPageShow = (event: PageTransitionEvent) => {
     if (!event.persisted || disposed) return;
@@ -283,17 +320,25 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
     void refreshAvailability();
     if (document.defaultView?.top === document.defaultView) void resumePendingCapture();
   };
+  const invalidatePageContext = () => {
+    if (disposed) return;
+    clearPageScopedState();
+    scheduleScan();
+    void refreshAvailability();
+  };
   const captureSubmission = (root: ParentNode) => {
+    if (disposed) return;
     const pageUrl = document.defaultView?.location.href ?? "";
     const inferredContext = submittedDataContext(root);
-    const pageContext = generatedCapture?.pageContext ?? inferredContext;
+    const generated = generatedCapture?.root === root ? generatedCapture : null;
+    const pageContext = generated?.pageContext ?? inferredContext;
     const data: CapturedSaveData = captureSubmittedData(root, pageUrl, { context: pageContext });
     const filledState = filledFormStates.get(root);
-    if (generatedCapture) {
+    if (generated && data.login) {
       data.login = {
-        username: generatedCapture.username ?? accountValue(root),
-        password: generatedCapture.password,
-        ...(generatedCapture.loginId ? { loginId: generatedCapture.loginId } : {}),
+        username: data.login.username,
+        password: data.login.password,
+        ...(generated.loginId ? { loginId: generated.loginId } : {}),
       };
     } else if (data.login) {
       if (filledState?.loginId && !filledState.loginEdited) delete data.login;
@@ -317,7 +362,7 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
     const signature = capturedDataSignature(data);
     if (lastCapture?.signature === signature && Date.now() - lastCapture.sentAt < 2_000) return;
     lastCapture = { signature, sentAt: Date.now() };
-    generatedCapture = null;
+    if (generated) generatedCapture = null;
     const captureId = createUuid();
     const supersededCaptureId = activeCaptureId;
     activeCaptureId = captureId;
@@ -376,22 +421,51 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
         savePrompt.showQueueFailure(captureId, "background-unavailable");
       });
   };
-  const onSubmit = (event: SubmitEvent) => captureSubmission(event.target instanceof HTMLFormElement ? event.target : document);
+  const onSubmit = (event: SubmitEvent) => {
+    const target = event.composedPath()[0];
+    if (handledEvents.has(event) || !(target instanceof HTMLFormElement)) return;
+    handledEvents.add(event);
+    captureSubmission(target);
+  };
+  const onFormData = (event: Event) => {
+    // The browser constructs form data even for form.submit(), which bypasses
+    // submit listeners. Inspect only the associated DOM form, never serialize
+    // arbitrary FormData entries (uploads and unrelated fields included).
+    const target = event.composedPath()[0];
+    if (handledEvents.has(event) || !(target instanceof HTMLFormElement)) return;
+    handledEvents.add(event);
+    captureSubmission(target);
+  };
+  const onSubmissionKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== "Enter" || event.isComposing || event.defaultPrevented || menu.visible || handledEvents.has(event)) return;
+    const target = event.composedPath()[0];
+    if (!(target instanceof HTMLInputElement) || !classifyControl(target) || analyzeControlSemantics(target).context === "otp") return;
+    const root = formRoot(target);
+    if (root instanceof HTMLFormElement && !root.checkValidity() || root.querySelector('[aria-invalid="true"]')) return;
+    handledEvents.add(event);
+    captureSubmission(root);
+  };
   const onClick = (event: MouseEvent) => {
+    if (handledEvents.has(event)) return;
     const target = event.composedPath()[0];
     if (!(target instanceof Element)) return;
-    const button = target.closest<HTMLElement>('button,input[type="submit"],[role="button"]');
+    const button = target.closest<HTMLElement>('button,input[type="submit"],input[type="button"],[role="button"]');
     if (!button) return;
+    handledEvents.add(event);
     if (event.isTrusted && isOtpRequestAction(button)) void sendMessage({ kind: "vaultmesh.otp-watch-requested" }).catch(() => undefined);
     if (!isSaveAction(button)) return;
-    const root = button.closest("form,[role='form']") ?? document;
+    const root = submissionRoot(button);
+    if (!root) return;
     if (root instanceof HTMLFormElement && !root.checkValidity() || root.querySelector('[aria-invalid="true"]')) return;
-    queueMicrotask(() => captureSubmission(root));
+    // Read while the submitting controls still exist: SPA click handlers can
+    // synchronously unmount them. This only queues a confirmation, never save.
+    captureSubmission(root);
   };
   const onInput = (event: Event) => {
     const target = event.composedPath()[0];
-    if (!event.isTrusted || !(target instanceof Element)) return;
+    if (!event.isTrusted || !(target instanceof Element) || handledEvents.has(event)) return;
     const kind = classifyControl(target);
+    if (kind) handledEvents.add(event);
     recordEditedItem(kind, target);
   };
   const recordEditedItem = (kind: string | null | undefined, target?: Element | ParentNode) => {
@@ -415,10 +489,15 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
   };
   document.addEventListener("focusin", onFocusIn, true);
   document.addEventListener("submit", onSubmit, true);
+  document.addEventListener("formdata", onFormData, true);
+  document.addEventListener("keydown", onSubmissionKeyDown, true);
   document.addEventListener("click", onClick, true);
   document.addEventListener("input", onInput, true);
   document.addEventListener("visibilitychange", onVisibilityChange);
-  document.defaultView?.addEventListener("pagehide", onPageHide, { once: true });
+  // `pagehide` can fire once for a BFCache suspension and again when the
+  // restored document really navigates away. It must remain subscribed after
+  // the first event so the latter path still tears down page-owned UI.
+  document.defaultView?.addEventListener("pagehide", onPageHide);
   document.defaultView?.addEventListener("pageshow", onPageShow);
   observeOpenRoots(document);
   scheduleScan();
@@ -429,11 +508,23 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
     if (disposed) return;
     disposed = true;
     if (scanTimer) clearTimeout(scanTimer);
+    shadowHosts.reset();
     if (unlockPollTimer) clearTimeout(unlockPollTimer);
     if (pendingCaptureResumeTimer) clearTimeout(pendingCaptureResumeTimer);
     for (const observer of observers) observer.disconnect();
+    for (const root of shadowEventRoots) {
+      root.removeEventListener("submit", onSubmit as EventListener, true);
+      root.removeEventListener("formdata", onFormData, true);
+      root.removeEventListener("keydown", onSubmissionKeyDown as EventListener, true);
+      root.removeEventListener("click", onClick as EventListener, true);
+      root.removeEventListener("focusin", onFocusIn as EventListener, true);
+      root.removeEventListener("input", onInput, true);
+    }
+    shadowEventRoots.clear();
     document.removeEventListener("focusin", onFocusIn, true);
     document.removeEventListener("submit", onSubmit, true);
+    document.removeEventListener("formdata", onFormData, true);
+    document.removeEventListener("keydown", onSubmissionKeyDown, true);
     document.removeEventListener("click", onClick, true);
     document.removeEventListener("input", onInput, true);
     document.removeEventListener("visibilitychange", onVisibilityChange);
@@ -442,6 +533,28 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
     menu.destroy();
     trigger.destroy();
     savePrompt.destroy();
+  }
+
+  function clearPageScopedState() {
+    generatedCapture = null;
+    lastCapture = null;
+    // Invalidate pending UI and availability work before a BFCache freeze.
+    // A capture confirmation is desktop-owned and may survive navigation, so
+    // its opaque id is intentionally not cancelled here.
+    focusRequest += 1;
+    availabilityRequest += 1;
+    unlockPollRemaining = 0;
+    pendingCaptureResumeAttempts = 0;
+    if (scanTimer) clearTimeout(scanTimer);
+    shadowHosts.reset();
+    if (unlockPollTimer) clearTimeout(unlockPollTimer);
+    if (pendingCaptureResumeTimer) clearTimeout(pendingCaptureResumeTimer);
+    scanTimer = null;
+    unlockPollTimer = null;
+    pendingCaptureResumeTimer = null;
+    menu.hide();
+    trigger.hide();
+    savePrompt.hide();
   }
 
   function recordFilledItem(item: { kind: string; id: string }, controls: Iterable<Element> = []) {
@@ -457,6 +570,7 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
 
   async function completePasswordChange(item: { kind: string; id: string }, controls: Iterable<Element> = []) {
     if (item.kind !== "login" || disposed) return { status: "not-applicable" as const };
+    const requestDocumentId = currentDocumentId();
     const currentPassword = Array.from(controls).find((control): control is HTMLInputElement => {
       if (!(control instanceof HTMLInputElement) || control.type !== "password") return false;
       const semantics = analyzeControlSemantics(control);
@@ -472,14 +586,14 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
 
     try {
       const options = await loadPasswordGeneratorOptions();
-      if (disposed || !currentPassword.isConnected) return { status: "cancelled" as const };
+      if (disposed || currentDocumentId() !== requestDocumentId || !currentPassword.isConnected) return { status: "cancelled" as const };
       newPasswordFields = emptyNewPasswordFields();
       if (newPasswordFields.length === 0) return { status: "not-applicable" as const };
       if (newPasswordFields.some((control) => control.value !== "")) return { status: "preserved-existing" as const };
 
       const password = generatePassword(options);
-      generatedCapture = { password, pageContext: "password-change", loginId: item.id };
-      const result = await fillGeneratedPassword(document, documentId, newPasswordFields[0]!, password);
+      generatedCapture = { root: formRoot(currentPassword), pageContext: "password-change", loginId: item.id };
+      const result = await fillGeneratedPassword(document, currentDocumentId, newPasswordFields[0]!, password);
       if (result.results.length !== newPasswordFields.length || result.results.some((entry) => entry.status !== "filled")) {
         generatedCapture = null;
         return { status: "failed" as const };
@@ -491,7 +605,7 @@ export function startAutofillPage(document: Document, documentId: string, sendMe
     }
   }
 
-  return { dispose, menu, trigger, savePrompt, scan: scheduleScan, refreshOtpCandidates, recordFilledItem, completePasswordChange, recordEditedItem, showPendingCapture };
+  return { dispose, menu, trigger, savePrompt, scan: scheduleScan, invalidatePageContext, refreshOtpCandidates, recordFilledItem, completePasswordChange, recordEditedItem, showPendingCapture };
 }
 
 function segmentedOtpAnchor(target: HTMLElement) {
@@ -506,7 +620,18 @@ function segmentedOtpAnchor(target: HTMLElement) {
 }
 
 function formRoot(element: Element): ParentNode {
-  return element.closest("form,[role='form']") ?? element.ownerDocument;
+  return semanticCluster(element as HTMLElement).root;
+}
+
+function submissionRoot(button: HTMLElement): ParentNode | null {
+  if ((button instanceof HTMLButtonElement || button instanceof HTMLInputElement) && button.form) return button.form;
+  const explicit = button.closest("form,[role='form']");
+  if (explicit) return explicit;
+  for (let root: ParentNode | null = button.parentNode; root && root !== button.ownerDocument.body && root !== button.ownerDocument; root = root.parentNode) {
+    const controls = formControls(root);
+    if (controls.length) return semanticCluster(controls[0]!).root;
+  }
+  return null;
 }
 
 function capturePromptDetails(captureId: string, pageUrl: string, data: CapturedSaveData) {
@@ -521,18 +646,18 @@ function isResponseStatus(response: unknown, status: string): boolean {
 }
 
 function accountValue(root: ParentNode): string {
-  const controls = Array.from(root.querySelectorAll<HTMLInputElement>('input:not([type="password"])'));
+  const controls = formControls(root).filter((control): control is HTMLInputElement => control instanceof HTMLInputElement && control.type !== "password");
   const explicit = controls.find((control) => {
     const metadata = `${control.autocomplete} ${control.name} ${control.id} ${control.placeholder}`;
     return /username|email|account|login|phone|mobile|用户名|账号|邮箱|手机/i.test(metadata);
   });
-  return explicit?.value ?? controls.find((control) => control.value)?.value ?? "";
+  return explicit?.value ?? "";
 }
 
 function isSaveAction(button: HTMLElement) {
   if (button instanceof HTMLInputElement && button.type === "submit") return true;
   if (button instanceof HTMLButtonElement && button.type === "submit") return true;
-  const text = `${button.textContent ?? ""} ${button.getAttribute("aria-label") ?? ""}`;
+  const text = `${button instanceof HTMLInputElement ? button.value : button.textContent ?? ""} ${button.getAttribute("aria-label") ?? ""}`;
   return /sign\s*in|log\s*in|sign\s*up|register|create|continue|next|save|submit|update|change.{0,12}(?:password|passcode)|checkout|pay|登录|注册|创建|继续|下一步|保存|提交|更新|修改.{0,8}(?:密码|口令)|结账|支付/i.test(text);
 }
 

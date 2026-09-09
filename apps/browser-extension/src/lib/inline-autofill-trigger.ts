@@ -8,12 +8,15 @@ export class InlineAutofillTrigger {
   readonly #onActivate: (target: HTMLElement) => void;
   readonly #button: HTMLButtonElement;
   readonly #iconRoot: Root;
+  readonly #resizeObserver: ResizeObserver | null;
   #target: HTMLElement | null = null;
   #action: "autofill" | "generate-password" = "autofill";
   #locked = false;
 
   constructor(document: Document, onActivate: (target: HTMLElement) => void) {
     this.#document = document;
+    const Observer = document.defaultView?.ResizeObserver;
+    this.#resizeObserver = Observer ? new Observer(this.#position) : null;
     this.#onActivate = onActivate;
     this.#host = document.createElement("div");
     this.#host.dataset.vaultmeshAutofillTrigger = "";
@@ -55,6 +58,8 @@ export class InlineAutofillTrigger {
   owns(target: EventTarget | null) { return target === this.#host; }
 
   show(target: HTMLElement, action: "autofill" | "generate-password" = "autofill", locked = false) {
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver?.observe(target);
     this.#target = target;
     this.#action = action;
     this.setLocked(locked);
@@ -66,6 +71,7 @@ export class InlineAutofillTrigger {
   }
 
   hide() {
+    this.#resizeObserver?.disconnect();
     this.#host.style.display = "none";
     this.#target = null;
   }

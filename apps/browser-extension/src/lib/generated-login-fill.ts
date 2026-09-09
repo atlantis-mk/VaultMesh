@@ -1,14 +1,19 @@
-import { applyAssignments, discoverFields, documentHttpOrigin, isNewPasswordControl, passwordFieldGroup } from "@/lib/form-discovery";
+import { applyAssignments, discoverFields, documentHttpOrigin, isNewPasswordControl, passwordFieldGroup, semanticCluster, formControls } from "@/lib/form-discovery";
 import type { GeneratedLogin } from "@/lib/generated-credentials";
 import { createUuid } from "@/lib/uuid";
 
-export async function fillGeneratedLogin(document: Document, documentId: string, login: GeneratedLogin, target?: HTMLElement) {
+type DocumentIdSource = string | (() => string);
+
+export async function fillGeneratedLogin(document: Document, documentId: DocumentIdSource, login: GeneratedLogin, target?: HTMLElement) {
+  const assignedDocumentId = resolveDocumentId(documentId);
   const { handles, descriptors } = discoverFields(document);
-  const container = target?.closest<HTMLElement>('form,[role="form"],dialog,[role="dialog"]');
-  const scopedDescriptors = container
+  const seed = target ?? [...handles.values()].find((control) => isNewPasswordControl(control));
+  const container = seed ? semanticCluster(seed).root : null;
+  const scopedControls = container ? new Set(formControls(container)) : null;
+  const scopedDescriptors = scopedControls
     ? descriptors.filter((field) => {
         const control = handles.get(field.handle);
-        return Boolean(control && container.contains(control));
+        return Boolean(control && scopedControls.has(control));
       })
     : descriptors;
   const passwordFields = scopedDescriptors.filter((field) => {
@@ -31,13 +36,14 @@ export async function fillGeneratedLogin(document: Document, documentId: string,
 
   const currentOrigin = documentHttpOrigin(document);
   return applyAssignments({
-    documentId,
+    documentId: assignedDocumentId,
+    currentDocumentId: () => resolveDocumentId(documentId),
     fields: handles,
     currentOrigin,
     message: {
       kind: "vaultmesh.apply-assignments",
       requestId: createUuid(),
-      documentId,
+      documentId: assignedDocumentId,
       frameOrigin: currentOrigin,
       expiresAt: new Date(Date.now() + 30_000).toISOString(),
       assignments: [
@@ -48,7 +54,8 @@ export async function fillGeneratedLogin(document: Document, documentId: string,
   });
 }
 
-export async function fillGeneratedPassword(document: Document, documentId: string, target: HTMLInputElement, password: string) {
+export async function fillGeneratedPassword(document: Document, documentId: DocumentIdSource, target: HTMLInputElement, password: string) {
+  const assignedDocumentId = resolveDocumentId(documentId);
   const { handles, descriptors } = discoverFields(document);
   const group = new Set(passwordFieldGroup(target));
   const passwordFields = descriptors.filter((field) => {
@@ -62,13 +69,14 @@ export async function fillGeneratedPassword(document: Document, documentId: stri
 
   const currentOrigin = documentHttpOrigin(document);
   return applyAssignments({
-    documentId,
+    documentId: assignedDocumentId,
+    currentDocumentId: () => resolveDocumentId(documentId),
     fields: handles,
     currentOrigin,
     message: {
       kind: "vaultmesh.apply-assignments",
       requestId: createUuid(),
-      documentId,
+      documentId: assignedDocumentId,
       frameOrigin: currentOrigin,
       expiresAt: new Date(Date.now() + 30_000).toISOString(),
       assignments: passwordFields.map((field) => ({ handle: field.handle, value: password, overwrite: true })),
@@ -82,4 +90,8 @@ function isUsernameField(field: { control: string; inputType?: string }) {
 
 function fieldMetadata(field: { label: string; name: string; id: string; placeholder: string }) {
   return [field.label, field.name, field.id, field.placeholder].join(" ");
+}
+
+function resolveDocumentId(documentId: DocumentIdSource) {
+  return typeof documentId === "function" ? documentId() : documentId;
 }

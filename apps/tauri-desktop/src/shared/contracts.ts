@@ -746,7 +746,7 @@ export const LanSyncStatusSchema = z.object({
   peers: z.array(z.object({
     peerRef: z.string().regex(/^lan-peer-[a-f0-9]{32}$/),
     enabled: z.boolean(),
-    state: z.enum(['disabled', 'offline', 'waiting-unlock', 'syncing', 'synced', 'failed']),
+    state: z.enum(['disabled', 'offline', 'waiting-unlock', 'syncing', 'delivered', 'synced', 'failed']),
     lastSuccessAt: z.number().int().nonnegative().nullable(),
   }).strict()).max(32),
   conflictCount: z.number().int().nonnegative(),

@@ -578,8 +578,8 @@ pub(super) fn lock_runtime_on_window_blur(
 }
 
 pub(super) fn finish_policy_lock(app: &AppHandle, state: &RuntimeState) {
-    if let Ok(mut sync) = state.lan_sync.lock() {
-        sync.stop();
+    if let Ok(sync) = state.lan_sync.lock() {
+        sync.lock_sensitive();
     }
     if let Ok(mut pairing) = state.lan_pairing.lock() {
         pairing.stop();

@@ -7,6 +7,7 @@ import {
   type ContentMessage,
   type DiscoveryFrame,
   type FillRequest,
+  type AutofillTarget,
 } from "@/lib/protocol";
 import { backgroundDesktopRpc, DesktopRpcError } from "@/lib/desktop-rpc";
 import { rememberedLoginSelection, rememberLoginSelection } from "@/lib/autofill-preferences";
@@ -54,6 +55,8 @@ type StartFillOptions = {
   skipLoginPairWait?: boolean;
   preserveExistingAccount?: boolean;
   masterPassword?: string;
+  target?: AutofillTarget;
+  targetFrameId?: number;
 };
 
 export async function startFillForTab(tabId: number, selectedItem?: FillRequest["selectedItem"], options: StartFillOptions = {}) {
@@ -68,10 +71,12 @@ export async function startFillForTab(tabId: number, selectedItem?: FillRequest[
   if (getHttpOrigin(targetPageUrl) !== targetOrigin) return { status: "unsupported-page" as const };
 
   const requestId = crypto.randomUUID();
-  const frames = await getSameOriginFrameIds(tabId, targetOrigin);
+  const sameOriginFrames = await getSameOriginFrameIds(tabId, targetOrigin);
+  const frames = options.targetFrameId == null ? sameOriginFrames : sameOriginFrames.filter((id) => id === options.targetFrameId);
+  if (options.target && options.targetFrameId == null) return { status: "document-changed" as const };
   const waitForLoginForm = shouldWaitForLoginPair(mode, selectedItem?.kind, options.skipLoginPairWait);
   const discoveries = await Promise.all(
-    frames.map(async (frameId) => discoverFrame(tabId, frameId, requestId, waitForLoginForm)),
+    frames.map(async (frameId) => discoverFrame(tabId, frameId, requestId, waitForLoginForm, options.target)),
   );
   const discoveredFrames = discoveries.filter(
     (frame): frame is DiscoveryFrame => frame != null && frame.fields.length > 0,
@@ -148,15 +153,17 @@ export async function fillEmailOtpForActiveTab(candidateId: string) {
   return fillEmailOtpForTab(tab.id, topOrigin, targetPageUrl, candidateId);
 }
 
-export async function fillEmailOtpForTab(tabId: number, topOrigin: string, targetPageUrl: string, candidateId: string) {
+export async function fillEmailOtpForTab(tabId: number, topOrigin: string, targetPageUrl: string, candidateId: string, target?: AutofillTarget, targetFrameId?: number) {
   const tab = await browser.tabs.get(tabId);
   if (getHttpOrigin(tab.url) !== topOrigin || getHttpOrigin(targetPageUrl) !== topOrigin) {
     return { status: "unsupported-page" as const };
   }
 
   const requestId = crypto.randomUUID();
-  const frames = await getSameOriginFrameIds(tabId, topOrigin);
-  const discoveries = await Promise.all(frames.map((frameId) => discoverFrame(tabId, frameId, requestId)));
+  const sameOriginFrames = await getSameOriginFrameIds(tabId, topOrigin);
+  const frames = targetFrameId == null ? sameOriginFrames : sameOriginFrames.filter((id) => id === targetFrameId);
+  if (target && targetFrameId == null) return { status: "document-changed" as const };
+  const discoveries = await Promise.all(frames.map((frameId) => discoverFrame(tabId, frameId, requestId, false, target)));
   let remainingFields = MAX_FIELDS_PER_REQUEST;
   const validFrames = discoveries.flatMap((frame) => {
     if (!frame || remainingFields <= 0) return [];
@@ -222,7 +229,7 @@ function isEmptyEmailOtpField(field: import("@/lib/protocol").FieldDescriptor): 
     || /otp|2fa|mfa|one[-_\s]*time|verification.?code|security.?code|验证码|校验码|动态码/i.test(metadata);
 }
 
-export async function startAutomaticFillForTab(tabId: number, topOrigin: string, pageContext: "login" | "otp" = "login", detectedPageUrl?: string) {
+export async function startAutomaticFillForTab(tabId: number, topOrigin: string, pageContext: "login" | "otp" = "login", detectedPageUrl?: string, target?: AutofillTarget, targetFrameId?: number) {
   const tab = await browser.tabs.get(tabId);
   const pageUrl = detectedPageUrl ?? getHttpPageUrl(tab.url) ?? topOrigin;
   const response = await getAutofillCandidates(topOrigin, "login", pageUrl, pageContext);
@@ -236,7 +243,7 @@ export async function startAutomaticFillForTab(tabId: number, topOrigin: string,
   if (!choice) return { status: "selection-required" as const, candidates: response.candidates };
   const candidate = choice.candidate;
   const result = await startFillForTab(tabId, { kind: "login", id: candidate.id, title: candidate.title }, {
-    mode: choice.mode, targetOrigin: topOrigin, targetPageUrl: pageUrl, skipLoginPairWait: pageContext === "otp",
+    mode: choice.mode, targetOrigin: topOrigin, targetPageUrl: pageUrl, skipLoginPairWait: pageContext === "otp", target, targetFrameId,
   });
   if (result.status === "filled") {
     await rememberLoginSelection(topOrigin, candidate.id).catch(() => undefined);
@@ -298,7 +305,7 @@ async function getSameOriginFrameIds(tabId: number, topOrigin: string) {
   return sameOriginFrameIds(frames, topOrigin);
 }
 
-async function discoverFrame(tabId: number, frameId: number, requestId: string, waitForLoginForm = false) {
+async function discoverFrame(tabId: number, frameId: number, requestId: string, waitForLoginForm = false, target?: AutofillTarget) {
   const deadline = Date.now() + (waitForLoginForm ? LOGIN_DISCOVERY_TIMEOUT_MS : 0);
   let latest: DiscoveryFrame | null = null;
 
@@ -306,14 +313,14 @@ async function discoverFrame(tabId: number, frameId: number, requestId: string, 
     try {
       const response = await browser.tabs.sendMessage(
         tabId,
-        { kind: "vaultmesh.discover-fields", requestId } satisfies Extract<
+        { kind: "vaultmesh.discover-fields", requestId, ...(target ? { target } : {}) } satisfies Extract<
           ContentMessage,
           { kind: "vaultmesh.discover-fields" }
         >,
         { frameId },
       );
       const parsed = DiscoveryFrameResponseSchema.safeParse(response);
-      latest = parsed.success ? { ...parsed.data, frameId } : null;
+      latest = parsed.success && (!target || parsed.data.documentId === target.documentId) ? { ...parsed.data, frameId } : null;
       if (!waitForLoginForm || latest && hasVisibleLoginPair(latest.fields)) return latest;
     } catch {
       latest = null;

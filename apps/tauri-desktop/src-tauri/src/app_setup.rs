@@ -666,6 +666,7 @@ pub fn run() {
             // The OS suspends application threads during sleep. Tear down any
             // sockets and ephemeral material before accepting post-resume work.
             stop_lan_pairing(&state);
+            lock_system_authorizations(handle, &state);
         }
     });
 }
@@ -679,18 +680,45 @@ fn stop_lan_pairing(state: &RuntimeState) {
     }
 }
 
+fn lock_system_authorizations(app: &AppHandle, state: &RuntimeState) {
+    if let Ok(mut runtime) = state.runtime.lock() {
+        runtime.lock();
+    }
+    finish_policy_lock(app, state);
+    finish_agent_boundary_lock(state);
+    #[cfg(unix)]
+    if let Some(listener) = &state._browser_listener {
+        listener.lock_vault();
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(integration) = state.browser_integration.lock() {
+        integration.lock_vault();
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn monitor_lan_session_lock(app: AppHandle, state: RuntimeState) {
+    let mut was_system_locked = false;
     loop {
         std::thread::sleep(Duration::from_millis(250));
-        let unlocked = state
-            .runtime
-            .lock()
-            .ok()
-            .is_some_and(|r| r.status().unlocked);
-        if system_session_locked() || !unlocked {
-            stop_lan_pairing(&state);
-            continue;
+        let system_locked = system_session_locked();
+        vaultmesh_ffi::sync_relay::set_system_locked(system_locked);
+        if system_locked {
+            if let Ok(sync) = state.lan_sync.lock() {
+                sync.lock_sensitive();
+            }
+            if !was_system_locked {
+                lock_system_authorizations(&app, &state);
+            }
+        }
+        was_system_locked = system_locked;
+        let unlocked = state.runtime.lock().ok().is_some_and(|r| r.is_unlocked());
+        if system_locked || !unlocked {
+            if let Ok(mut pairing) = state.lan_pairing.lock() {
+                pairing.stop();
+            }
+            // Ciphertext transport is independent of desktop unlock. No core
+            // key or renderer capability is retained by this service.
         }
         let authorizations = if let Ok(mut pairing) = state.lan_pairing.lock() {
             if pairing.is_active() {

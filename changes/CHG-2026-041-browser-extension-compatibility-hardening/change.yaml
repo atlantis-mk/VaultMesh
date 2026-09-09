@@ -1,9 +1,11 @@
+schema: "2"
 id: "CHG-2026-041-browser-extension-compatibility-hardening"
 title: "浏览器扩展兼容性与交互韧性增强"
 type: "feature"
-status: "Implementing"
+status: "Active"
 spec_revision: "0.1.50-active"
 target_release: null
+goal: "在不改变 VaultMesh 的 desktop-owned 授权、一次性 assignment 与显式确认边界下，系统性补足动态页面、异步交互、填充和捕获的浏览器兼容性。"
 requirements:
   - "REQ-BROWSER-001"
   - "REQ-BROWSER-002"
@@ -33,19 +35,14 @@ context_refs:
   - "specs/browser-integration.md#Discovery 与 fill"
   - "specs/browser-integration.md#Capture"
   - "docs/07-test-release-plan.md#GATE-4 Browser"
-  - "docs/08-traceability.md#REQ-AUTOFILL-001"
-  - "docs/08-traceability.md#REQ-AUTOFILL-002"
 related_changes:
-  - "CHG-2026-038-form-semantic-classification"
   - "BUG-2026-020-inline-autofill-reprompt-feedback"
-affected_surfaces:
-  - "browser-extension-content"
-  - "browser-extension-background"
-  - "browser-extension-popup"
-  - "browser-rpc-policy"
-  - "tauri-browser-broker"
-affected_formats: []
-affected_versions: []
-security_impact: "high: compatibility work may alter page discovery, secret assignment and capture paths; extension remains a transient remote UI and all existing authorization, origin/document binding and user-confirmation gates remain mandatory."
-migration: "none"
-supersedes: []
+boundaries:
+  - "extension remains transient and does not persist Vault responses or assignments"
+  - "no automatic form submission or unconfirmed save"
+  - "no Browser RPC, native-host ABI, Vault format, or pairing identity change without a separate approved Change/ADR"
+risks:
+  - "dynamic page lifecycle work can leave stale UI or page-scoped state after navigation, lock, expiry, or BFCache restoration"
+  - "compatibility changes can accidentally broaden disclosure or overwrite behavior"
+next:
+  - "User deferred installed-browser testing; retain Chrome/Firefox acceptance for field qualification, exact form/frame targeting through re-prompt, delayed custom-element hydration, native form.submit/formdata and SPA capture, short-frame menus, route/BFCache invalidation and save/update confirmation before declaring full browser parity."

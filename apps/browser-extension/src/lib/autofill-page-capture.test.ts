@@ -23,6 +23,39 @@ afterEach(async () => {
 });
 
 describe("startAutofillPage save capture", () => {
+  it("captures keyboard SPA submission before the target handler unmounts its form", async () => {
+    document.body.innerHTML = '<form><input autocomplete="username" value="ada"><input type="password" value="test-password"></form>';
+    document.querySelectorAll<HTMLInputElement>("input").forEach(makeVisible);
+    const sendMessage = vi.fn(async () => ({}));
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    const password = document.querySelector<HTMLInputElement>('input[type="password"]')!;
+    password.addEventListener("keydown", () => document.querySelector("form")!.remove());
+    password.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: "vaultmesh.save-capture", data: { login: { username: "ada", password: "test-password" } } }));
+    controller.dispose();
+  });
+
+  it("ignores composition Enter and observes formdata without reading arbitrary entries", () => {
+    document.body.innerHTML = '<form><input autocomplete="username" value="ada"><input type="password" value="test-password"><input name="unrelated" value="never-capture"></form>';
+    document.querySelectorAll<HTMLInputElement>("input").forEach(makeVisible);
+    const sendMessage = vi.fn(async () => ({}));
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    document.querySelector("input")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }));
+    expect(sendMessage.mock.calls.some(([message]: unknown[]) => (message as {kind?:string}).kind === "vaultmesh.save-capture")).toBe(false);
+    // jsdom does not implement native form.submit(); exercise its formdata event boundary.
+    document.querySelector("form")!.dispatchEvent(new Event("formdata", { bubbles: true }));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: "vaultmesh.save-capture", data: { login: { username: "ada", password: "test-password" } } }));
+    expect(JSON.stringify(sendMessage.mock.calls)).not.toContain("never-capture");
+    controller.dispose();
+  });
+
+  it("recognizes input type=button save actions", () => {
+    document.body.innerHTML = '<div role="form"><input autocomplete="given-name" value="Ada"><input type="button" value="保存"></div>';
+    const sendMessage = vi.fn(async () => ({})); const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    document.querySelector<HTMLInputElement>('input[type="button"]')!.click();
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: "vaultmesh.save-capture", data: { identity: expect.objectContaining({ firstName: "Ada" }) } }));
+    controller.dispose();
+  });
   it("captures profile data from SPA save buttons that do not submit a native form", async () => {
     document.body.innerHTML = `<div role="form"><input autocomplete="given-name" value="Ada"><button type="button">保存</button></div>`;
     const sendMessage = vi.fn(async () => ({}));
@@ -88,6 +121,40 @@ describe("startAutofillPage save capture", () => {
       kind: "vaultmesh.save-capture",
       pageContext: "password-change",
       data: { login: { username: "", password: generatedPassword, loginId } },
+    }));
+    controller.dispose();
+  });
+
+  it("does not carry a generated password capture across same-document navigation", async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = `
+      <form id="change"><input id="old" type="password" name="old_password" value="stored-password"><input id="new" type="password" name="password"><input id="confirm" type="password" name="re_password"></form>
+    `;
+    document.querySelectorAll<HTMLInputElement>("input").forEach(makeVisible);
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const value = message as { kind?: string; captureId?: string };
+      return value.kind === "vaultmesh.save-capture"
+        ? { status: "queued", captureId: value.captureId, hostname: "example.test", labels: ["登录信息"], update: false, expiresAt: Date.now() + 10_000 }
+        : {};
+    });
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    const oldPassword = document.querySelector<HTMLInputElement>("#old")!;
+    const loginId = crypto.randomUUID();
+    controller.recordFilledItem({ kind: "login", id: loginId }, [oldPassword]);
+    const completion = controller.completePasswordChange({ kind: "login", id: loginId }, [oldPassword]);
+    await vi.runAllTimersAsync();
+    expect(await completion).toEqual({ status: "generated" });
+
+    document.body.innerHTML = `<form id="login" action="/login"><input autocomplete="username" value="next@example.test"><input type="password" autocomplete="current-password" value="next-password"></form>`;
+    controller.invalidatePageContext();
+    sendMessage.mockClear();
+    document.querySelector("form")!.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "vaultmesh.save-capture",
+      pageContext: "login",
+      data: { login: { username: "next@example.test", password: "next-password" } },
     }));
     controller.dispose();
   });

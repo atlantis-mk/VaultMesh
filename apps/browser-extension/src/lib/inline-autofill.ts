@@ -3,6 +3,8 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { InlineAutofillView } from "@/lib/inline-autofill-view";
+import { classifyControl } from "@/lib/form-discovery";
+import { inlineMenuLayout } from "@/lib/inline-menu-layout";
 import type { GeneratedLogin, PasswordGeneratorOptions, UsernameGeneratorOptions } from "@/lib/generated-credentials";
 import { DEFAULT_PASSWORD_GENERATOR_OPTIONS, DEFAULT_USERNAME_GENERATOR_OPTIONS } from "@/lib/generator-preferences";
 import type { InlineAutofillCandidate } from "@/lib/protocol";
@@ -12,6 +14,7 @@ export class InlineAutofillMenu {
   readonly #shadow: ShadowRoot;
   readonly #root: Root;
   readonly #document: Document;
+  readonly #resizeObserver: ResizeObserver | null;
   readonly #onSelect: (candidate: InlineAutofillCandidate, target: HTMLElement) => void;
   readonly #onGeneratedSelect: (login: GeneratedLogin, target: HTMLElement) => void;
   readonly #onGeneratedPasswordSelect: (password: string, target: HTMLElement) => void;
@@ -32,6 +35,8 @@ export class InlineAutofillMenu {
     onGeneratedPasswordSelect: (password: string, target: HTMLElement) => void,
   ) {
     this.#document = document;
+    const Observer = document.defaultView?.ResizeObserver;
+    this.#resizeObserver = Observer ? new Observer(this.#position) : null;
     this.#onSelect = onSelect;
     this.#onGeneratedSelect = onGeneratedSelect;
     this.#onGeneratedPasswordSelect = onGeneratedPasswordSelect;
@@ -43,9 +48,9 @@ export class InlineAutofillMenu {
     style.textContent = `
       :host { color-scheme: light dark; }
       * { box-sizing: border-box; }
-      .panel { width:100%; max-height:min(280px,calc(100vh - 16px)); overflow:hidden; border:1px solid rgba(127,127,127,.35); border-radius:10px; background:Canvas; color:CanvasText; box-shadow:0 12px 32px rgba(0,0,0,.22); font:13px/1.35 system-ui,sans-serif; }
+      .panel { box-sizing:border-box;width:100%; max-height:var(--vaultmesh-menu-max-height,280px); overflow:auto; border:1px solid rgba(127,127,127,.35); border-radius:10px; background:Canvas; color:CanvasText; box-shadow:0 12px 32px rgba(0,0,0,.22); font:13px/1.35 system-ui,sans-serif; }
       .mark { display:grid;place-items:center;width:22px;height:22px;border-radius:6px;background:#6d5dfc;color:white;font-weight:800; }
-      .candidate-scroll { position:relative;max-height:min(280px,calc(100vh - 16px));overflow:hidden; }
+      .candidate-scroll { position:relative;max-height:var(--vaultmesh-menu-max-height,280px);overflow:hidden; }
       [data-slot="scroll-area-viewport"] { width:100%;max-height:inherit;overflow-x:hidden;overflow-y:auto;scrollbar-width:none; }
       [data-slot="scroll-area-content"] { width:100%;min-width:0; }
       [data-slot="scroll-area-scrollbar"] { position:absolute;top:3px;right:2px;bottom:3px;display:flex;width:8px;padding:1px;touch-action:none;user-select:none; }
@@ -75,6 +80,8 @@ export class InlineAutofillMenu {
     document.addEventListener("pointerdown", this.#onPointerDown, true);
     document.defaultView?.addEventListener("resize", this.#position);
     document.defaultView?.addEventListener("scroll", this.#position, true);
+    document.defaultView?.visualViewport?.addEventListener("resize", this.#position);
+    document.defaultView?.visualViewport?.addEventListener("scroll", this.#position);
     document.defaultView?.addEventListener("blur", this.#onWindowBlur);
   }
 
@@ -97,6 +104,8 @@ export class InlineAutofillMenu {
   ) {
     this.#target = target;
     this.#anchor = options.anchor ?? target;
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver?.observe(this.#anchor);
     this.#candidates = candidates;
     this.#generatedMode = generatedMode === "login" && candidates.length > 0 ? "none" : generatedMode;
     this.#statusMessage = null;
@@ -112,6 +121,8 @@ export class InlineAutofillMenu {
   showStatus(target: HTMLElement, message: string) {
     this.#target = target;
     this.#anchor = target;
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver?.observe(target);
     this.#candidates = [];
     this.#generatedMode = "none";
     this.#generatedEmailRequired = false;
@@ -122,6 +133,7 @@ export class InlineAutofillMenu {
   }
 
   hide() {
+    this.#resizeObserver?.disconnect();
     this.#host.style.display = "none";
     this.#target = null;
     this.#anchor = null;
@@ -138,23 +150,33 @@ export class InlineAutofillMenu {
     this.#document.removeEventListener("pointerdown", this.#onPointerDown, true);
     this.#document.defaultView?.removeEventListener("resize", this.#position);
     this.#document.defaultView?.removeEventListener("scroll", this.#position, true);
+    this.#document.defaultView?.visualViewport?.removeEventListener("resize", this.#position);
+    this.#document.defaultView?.visualViewport?.removeEventListener("scroll", this.#position);
     this.#document.defaultView?.removeEventListener("blur", this.#onWindowBlur);
     this.#root.unmount();
     this.#host.remove();
   }
 
   readonly #position = () => {
-    if (!this.#target || !this.visible || !this.#target.isConnected) return this.hide();
+    if (!this.#target || !this.visible || !classifyControl(this.#target)) return this.hide();
     const rect = this.#anchor?.isConnected ? this.#anchor.getBoundingClientRect() : this.#target.getBoundingClientRect();
-    const availableBelow = (this.#document.defaultView?.innerHeight ?? 640) - rect.bottom;
-    this.#host.style.left = `${rect.left}px`;
-    this.#host.style.width = `${rect.width}px`;
-    this.#host.style.top = availableBelow >= 180 ? `${rect.bottom + 4}px` : "auto";
-    this.#host.style.bottom = availableBelow >= 180 ? "auto" : `${Math.max(8, (this.#document.defaultView?.innerHeight ?? 640) - rect.top + 4)}px`;
+    const view = this.#document.defaultView;
+    const visual = view?.visualViewport;
+    const layout = inlineMenuLayout(rect, {
+      width: visual?.width ?? view?.innerWidth ?? 640, height: visual?.height ?? view?.innerHeight ?? 640,
+      left: visual?.offsetLeft, top: visual?.offsetTop,
+    });
+    if (!layout) return this.hide();
+    this.#host.style.left = `${layout.left}px`;
+    this.#host.style.width = `${layout.width}px`;
+    this.#host.style.setProperty("--vaultmesh-menu-max-height", `${layout.maxHeight}px`);
+    this.#host.style.top = layout.top === undefined ? "auto" : `${layout.top}px`;
+    this.#host.style.bottom = layout.bottom === undefined ? "auto" : `${(view?.innerHeight ?? 640) - layout.bottom}px`;
   };
 
   readonly #onKeyDown = (event: KeyboardEvent) => {
-    if (!this.visible) return;
+    if (!this.visible || event.isComposing) return;
+    if (event.key === "Tab") { this.hide(); return; }
     if (event.key === "Escape") {
       event.preventDefault();
       const target = this.#target;

@@ -215,14 +215,17 @@ fn map_field(kind: &str, values: &FillValues, field: &DiscoveredField) -> Option
         .iter()
         .map(|value| value.as_str())
         .collect::<Vec<_>>();
-    let metadata = normalize(&format!(
+    let metadata = format!(
         "{} {} {} {} {}",
         field.label,
         field.name,
         field.id,
         field.placeholder,
         field.autocomplete.join(" ")
-    ));
+    );
+    if field.input_type.as_deref() == Some("search") || excluded_fill_field(&metadata) {
+        return None;
+    }
     match kind {
         "login" => {
             if autocomplete.contains(&"new-password")
@@ -266,9 +269,11 @@ fn map_field(kind: &str, values: &FillValues, field: &DiscoveredField) -> Option
                 || field.context == "otp"
             {
                 "totpCode"
-            } else if contains_any(&metadata, &["password", "passcode", "密码"]) {
+            } else if contains_any(&metadata, &["password", "passcode", "密码"])
+                || (field.input_type.as_deref() == Some("password") && matches!(field.context.as_str(), "login" | "password-change"))
+            {
                 "password"
-            } else if contains_any(
+            } else if matches!(field.input_type.as_deref(), Some("email" | "tel")) || contains_any(
                 &metadata,
                 &[
                     "username",
@@ -290,7 +295,7 @@ fn map_field(kind: &str, values: &FillValues, field: &DiscoveredField) -> Option
                     .iter()
                     .filter(|(label, _)| {
                         let label = normalize(label);
-                        label.chars().count() > 1 && metadata.contains(&label)
+                        label.chars().count() > 1 && contains_any(&metadata, &[&label])
                     })
                     .collect::<Vec<_>>();
                 return (matches.len() == 1 && field.context != "signup")
@@ -462,7 +467,9 @@ fn map_field(kind: &str, values: &FillValues, field: &DiscoveredField) -> Option
                 &["sshuser", "username", "login", "账号", "用户名"],
             ) {
                 "username"
-            } else if contains_any(&metadata, &["hostname", "server", "服务器", "主机"]) {
+            } else if contains_any(&metadata, &["hostname", "sshhost", "server", "服务器", "主机"])
+                || field.name.eq_ignore_ascii_case("host") || field.id.eq_ignore_ascii_case("host")
+            {
                 "host"
             } else if contains_any(&metadata, &["port", "端口"]) {
                 "port"
@@ -711,7 +718,38 @@ fn value_string(value: &Value, key: &str) -> Result<String, BrowserPlatformError
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| value.contains(needle))
+    let words = field_words(value);
+    needles.iter().any(|needle| {
+        if !needle.is_ascii() { return value.contains(needle); }
+        let needle = normalize(needle);
+        words.iter().enumerate().any(|(index, _)| {
+            let mut combined = String::new();
+            for word in &words[index..] {
+                combined.push_str(word);
+                if combined.len() >= needle.len() { return combined == needle; }
+            }
+            false
+        })
+    })
+}
+
+fn field_words(value: &str) -> Vec<String> {
+    let mut separated = String::new();
+    let mut previous_lower = false;
+    for character in value.chars() {
+        if previous_lower && character.is_ascii_uppercase() { separated.push(' '); }
+        previous_lower = character.is_ascii_lowercase();
+        separated.push(character.to_ascii_lowercase());
+    }
+    separated.split(|c: char| !c.is_ascii_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_owned).collect()
+}
+
+fn excluded_fill_field(metadata: &str) -> bool {
+    static POLICY: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let policy = POLICY.get_or_init(|| serde_json::from_str(include_str!("../../src/shared/autofill-field-policy.json")).expect("bundled field policy"));
+    let words = field_words(metadata);
+    policy["excludedWords"].as_array().is_some_and(|entries| entries.iter().filter_map(Value::as_str).any(|word| words.iter().any(|entry| entry == word))) ||
+        policy["excludedText"].as_array().is_some_and(|entries| entries.iter().filter_map(Value::as_str).any(|word| metadata.contains(word)))
 }
 fn normalize(value: &str) -> String {
     value

@@ -92,6 +92,46 @@ describe("startAutofillPage", () => {
     controller.dispose();
   });
 
+  it("uses a fresh document identity after same-document navigation invalidation", async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = `<form action="/login"><input autocomplete="username"><input type="password"></form>`;
+    document.querySelectorAll<HTMLElement>("input").forEach(makeVisible);
+    let documentId = crypto.randomUUID();
+    const sendMessage = vi.fn(async (_message: unknown) => ({}));
+    const controller = startAutofillPage(document, () => documentId, sendMessage);
+    await vi.advanceTimersByTimeAsync(160);
+
+    const nextDocumentId = crypto.randomUUID();
+    documentId = nextDocumentId;
+    controller.invalidatePageContext();
+    await vi.advanceTimersByTimeAsync(160);
+
+    const ready = sendMessage.mock.calls.filter(([message]) => (message as { kind?: string }).kind === "vaultmesh.autofill-page-ready");
+    expect(ready).toHaveLength(2);
+    expect((ready[1]![0] as { documentId: string }).documentId).toBe(nextDocumentId);
+    controller.dispose();
+  });
+
+  it("still disposes page-owned UI when a BFCache-restored document later navigates away", async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = `<form action="/login"><input autocomplete="username"><input type="password"></form>`;
+    const account = document.querySelector<HTMLInputElement>("input")!;
+    document.querySelectorAll<HTMLElement>("input").forEach(makeVisible);
+    const controller = startAutofillPage(document, crypto.randomUUID(), vi.fn(async () => ({ status: "ready" })));
+
+    account.focus();
+    await Promise.resolve();
+    expect(controller.trigger.visible).toBe(true);
+
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    await vi.advanceTimersByTimeAsync(160);
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+
+    expect(document.querySelectorAll("[data-vaultmesh-autofill]")).toHaveLength(0);
+    expect(document.querySelectorAll("[data-vaultmesh-autofill-trigger]")).toHaveLength(0);
+  });
+
   it("places a bare password trigger at the trailing edge and loads candidates only after it is clicked", async () => {
     document.body.innerHTML = `<input id="password" type="password">`;
     const password = document.querySelector<HTMLInputElement>("input")!;
@@ -443,6 +483,41 @@ describe("startAutofillPage", () => {
     controller.dispose();
   });
 
+  it("does not show a stale selection failure after focus moves to another field", async () => {
+    document.body.innerHTML = `<form><input id="account" autocomplete="username"><input id="password" type="password"></form>`;
+    const account = document.querySelector<HTMLInputElement>("#account")!;
+    const password = document.querySelector<HTMLInputElement>("#password")!;
+    [account, password].forEach(makeVisible);
+    const candidate = { id: crypto.randomUUID(), kind: "login", title: "Example", subtitle: "ada@example.test", masterPasswordReprompt: false } as const;
+    let resolveSelection: ((response: unknown) => void) | undefined;
+    const sendMessage = vi.fn((message: unknown) => {
+      const kind = (message as { kind?: string }).kind;
+      if (kind === "vaultmesh.autofill-candidates") return Promise.resolve({ status: "ready", candidates: [candidate] });
+      if (kind === "vaultmesh.autofill-select") return new Promise<unknown>((resolve) => { resolveSelection = resolve; });
+      return Promise.resolve({ status: "ready" });
+    });
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+
+    account.focus();
+    await Promise.resolve();
+    document.querySelector<HTMLElement>("[data-vaultmesh-autofill-trigger]")!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await Promise.resolve();
+    expect(resolveSelection).toBeTypeOf("function");
+
+    password.focus();
+    resolveSelection!({ status: "document-changed" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(controller.menu.visible).toBe(false);
+    expect(controller.trigger.visible).toBe(true);
+    controller.dispose();
+  });
+
   it("generates and fills both empty new-password fields after a successful rcvps-style Login assignment", async () => {
     vi.useFakeTimers();
     document.body.innerHTML = `
@@ -735,6 +810,28 @@ describe("startAutofillPage", () => {
     await vi.advanceTimersByTimeAsync(160);
 
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: "vaultmesh.autofill-page-ready" }));
+    controller.dispose();
+  });
+
+  it("discovers a shadow root attached after its custom-element host without another DOM mutation", async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = `<vaultmesh-login></vaultmesh-login>`;
+    const sendMessage = vi.fn(async (_message: unknown) => ({}));
+    const controller = startAutofillPage(document, "353370ec-4dc7-4c77-a6e0-f2a4f6e37f03", sendMessage);
+    await vi.advanceTimersByTimeAsync(160);
+
+    const host = document.querySelector<HTMLElement>("vaultmesh-login")!;
+    const shadow = host.attachShadow({ mode: "open" });
+    const password = document.createElement("input");
+    password.type = "password";
+    makeVisible(password);
+    shadow.append(password);
+    await vi.advanceTimersByTimeAsync(410);
+
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "vaultmesh.autofill-page-ready",
+      documentId: "353370ec-4dc7-4c77-a6e0-f2a4f6e37f03",
+    }));
     controller.dispose();
   });
 

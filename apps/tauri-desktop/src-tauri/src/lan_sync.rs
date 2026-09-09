@@ -2,11 +2,37 @@
 use super::*;
 use uuid::Uuid;
 use vaultmesh_ffi::DesktopRuntime;
-use vaultmesh_ffi::{SYNC_MAX_BYTES, SYNC_MAX_RECORDS, SyncManifest, SyncRecord};
+#[cfg(test)]
+use vaultmesh_ffi::SYNC_MAX_BYTES;
 
 const SYNC_SERVICE: &str = "_vaultmesh-sync._tcp.local.";
-const SYNC_PROTOCOL: u8 = 1;
-const RETRY_DELAY: Duration = Duration::from_secs(3);
+const SYNC_PROTOCOL: u8 = 2;
+#[path = "lan_sync_session.rs"]
+mod persistent;
+const RETRY_DELAY: Duration = Duration::from_secs(1);
+struct Retry {
+    failures: u32,
+    next: Instant,
+}
+impl Retry {
+    fn new() -> Self {
+        Self {
+            failures: 0,
+            next: Instant::now(),
+        }
+    }
+    fn failed(&mut self, was_healthy: bool) {
+        self.failures = if was_healthy {
+            1
+        } else {
+            self.failures.saturating_add(1).min(7)
+        };
+        let seconds = (1u64 << self.failures.saturating_sub(1)).min(60);
+        let jitter =
+            u16::from_le_bytes(Uuid::new_v4().as_bytes()[..2].try_into().unwrap()) as u64 % 1_000;
+        self.next = Instant::now() + RETRY_DELAY * seconds as u32 + Duration::from_millis(jitter);
+    }
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,19 +50,15 @@ pub(crate) struct SyncStatus {
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(test)]
 struct SyncHello {
     version: u8,
     instance: String,
     nonce: String,
     vault: Uuid,
+    sending: Uuid,
+    receiving: Option<Uuid>,
 }
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Receipt {
-    version: u8,
-    committed: bool,
-}
-
 #[derive(Clone)]
 struct Context {
     runtime: Arc<Mutex<DesktopRuntime>>,
@@ -49,6 +71,12 @@ struct Context {
     sessions: Arc<SessionRegistry>,
     states: Arc<Mutex<HashMap<String, SyncPeerStatus>>>,
     changes: Arc<AtomicU64>,
+    hub: Arc<vaultmesh_ffi::sync_relay::RelayHub>,
+    active_peers: Arc<Mutex<HashSet<String>>>,
+    handshakes: Arc<AtomicUsize>,
+    bootstraps: Arc<SessionRegistry>,
+    #[cfg(test)]
+    drop_receipt: Arc<AtomicBool>,
 }
 struct Running {
     local: Uuid,
@@ -56,6 +84,7 @@ struct Running {
     sessions: Arc<SessionRegistry>,
     daemon: ServiceDaemon,
     fullname: String,
+    bootstraps: Arc<SessionRegistry>,
 }
 pub(crate) struct LanSyncService {
     runtime: Arc<Mutex<DesktopRuntime>>,
@@ -63,8 +92,17 @@ pub(crate) struct LanSyncService {
     running: Option<Running>,
     states: Arc<Mutex<HashMap<String, SyncPeerStatus>>>,
     changes: Arc<AtomicU64>,
+    verified_proof: Option<String>,
+    pumped_generation: u64,
+    observed_file: Option<(Option<std::time::SystemTime>, u64, bool)>,
+    merged_generation: u64,
 }
 impl LanSyncService {
+    pub(crate) fn lock_sensitive(&self) {
+        if let Some(running) = &self.running {
+            running.bootstraps.shutdown_all();
+        }
+    }
     pub(crate) fn new(runtime: Arc<Mutex<DesktopRuntime>>, trust_path: PathBuf) -> Self {
         Self {
             runtime,
@@ -72,6 +110,10 @@ impl LanSyncService {
             running: None,
             states: Arc::new(Mutex::new(HashMap::new())),
             changes: Arc::new(AtomicU64::new(0)),
+            verified_proof: None,
+            pumped_generation: 0,
+            observed_file: None,
+            merged_generation: 0,
         }
     }
     pub(crate) fn stop(&mut self) {
@@ -101,11 +143,13 @@ impl LanSyncService {
         self.changes.swap(0, Ordering::AcqRel)
     }
     pub(crate) fn retry(&mut self) {
+        self.pumped_generation = 0;
         self.stop();
     }
     pub(crate) fn status(&self) -> Result<SyncStatus, String> {
         let mut runtime = self.runtime.lock().map_err(|_| "同步暂时不可用。")?;
         let state = runtime.sync_state().map_err(|_| "请先解锁保险库。")?;
+        let cache_failed = runtime.sync_relay().failed();
         let trusted = self.trust.load().map_err(|_| "设备信任不可用。")?;
         let states = self.states.lock().map_err(|_| "同步暂时不可用。")?;
         let peers = trusted
@@ -113,6 +157,7 @@ impl LanSyncService {
             .map(|peer| {
                 let enabled = state.authorizations.iter().any(|a| {
                     a.enabled
+                        && a.outgoing.is_some()
                         && a.peer == peer.pairing_ref
                         && a.fingerprint == peer.certificate_fingerprint
                 });
@@ -128,12 +173,8 @@ impl LanSyncService {
                 value.enabled = enabled;
                 if !enabled {
                     value.state = "disabled".into();
-                } else if value.state == "synced"
-                    && value
-                        .last_success_at
-                        .is_some_and(|t| SystemTimeMillis::now().saturating_sub(t) > 10_000)
-                {
-                    value.state = "offline".into();
+                } else if cache_failed {
+                    value.state = "failed".into();
                 }
                 value
             })
@@ -144,25 +185,97 @@ impl LanSyncService {
         })
     }
     pub(crate) fn tick(&mut self) {
-        let state = self
-            .runtime
-            .lock()
-            .ok()
-            .and_then(|mut r| r.sync_state().ok());
-        let trusted = self.trust.load().unwrap_or_default();
-        let enabled = state.as_ref().is_some_and(|s| {
-            s.authorizations.iter().any(|a| {
-                a.enabled
-                    && trusted.iter().any(|p| {
-                        p.pairing_ref == a.peer && p.certificate_fingerprint == a.fingerprint
-                    })
-            })
-        });
-        if !enabled {
+        let Ok(mut runtime) = self.runtime.lock() else {
+            return;
+        };
+        let hub = runtime.sync_relay();
+        let generation = hub.generation();
+        if generation != self.pumped_generation {
+            let _ = runtime.sync_pump();
+            self.pumped_generation = hub.generation();
+        }
+        drop(runtime);
+        let merged = hub.merged_generation();
+        if self.merged_generation != merged {
+            self.merged_generation = merged;
+            self.notify_change();
+        }
+        let Ok((profile, from_core)) = hub.profile() else {
+            self.stop();
+            return;
+        };
+        let Ok(proof) = hub.proof() else {
+            self.stop();
+            return;
+        };
+        let path = self.runtime.lock().unwrap().current_path();
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            self.stop();
+            return;
+        };
+        let stamp = (metadata.modified().ok(), metadata.len());
+        if self.verified_proof.as_ref() != Some(&proof)
+            || self
+                .observed_file
+                .as_ref()
+                .is_none_or(|(t, n, _)| (*t, *n) != stamp)
+        {
+            self.observed_file = Some((stamp.0, stamp.1, hub.matches_vault()));
+        }
+        if !self
+            .observed_file
+            .as_ref()
+            .is_some_and(|(_, _, valid)| *valid)
+        {
             self.stop();
             return;
         }
-        let local = state.unwrap().vault_id;
+        if self.verified_proof.as_ref() != Some(&proof) {
+            let account = format!(
+                "lan-sync-route-{}",
+                hex_digest(
+                    self.runtime
+                        .lock()
+                        .unwrap()
+                        .current_path()
+                        .to_string_lossy()
+                        .as_bytes()
+                )
+            );
+            let valid = if from_core {
+                self.trust
+                    .credentials
+                    .set(&account, proof.as_bytes())
+                    .is_ok()
+            } else {
+                self.trust
+                    .credentials
+                    .get(&account)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|p| p.as_slice() == proof.as_bytes())
+                    && hub.matches_vault()
+            };
+            if !valid {
+                self.stop();
+                return;
+            }
+            self.verified_proof = Some(proof);
+        }
+        let trusted = self.trust.load().unwrap_or_default();
+        let local = profile
+            .routes
+            .iter()
+            .find(|r| {
+                trusted
+                    .iter()
+                    .any(|p| p.pairing_ref == r.peer && p.certificate_fingerprint == r.fingerprint)
+            })
+            .map(|r| r.local);
+        let Some(local) = local else {
+            self.stop();
+            return;
+        };
         if self.running.as_ref().is_some_and(|r| r.local != local) {
             self.stop();
         }
@@ -177,7 +290,7 @@ impl LanSyncService {
         let instance = random_token();
         let nonce = random_token();
         let hostname = format!("{}.local.", random_token());
-        let props = [("v", "1"), ("i", instance.as_str()), ("n", nonce.as_str())];
+        let props = [("v", "2"), ("i", instance.as_str()), ("n", nonce.as_str())];
         let mut info = ServiceInfo::new(
             SYNC_SERVICE,
             &instance,
@@ -206,6 +319,7 @@ impl LanSyncService {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let sessions = Arc::new(SessionRegistry::default());
+        let bootstraps = Arc::new(SessionRegistry::default());
         let context = Context {
             runtime: self.runtime.clone(),
             identity,
@@ -217,9 +331,16 @@ impl LanSyncService {
             sessions: sessions.clone(),
             states: self.states.clone(),
             changes: self.changes.clone(),
+            hub: self.runtime.lock().map_err(|_| ())?.sync_relay(),
+            active_peers: Arc::new(Mutex::new(HashSet::new())),
+            handshakes: Arc::new(AtomicUsize::new(0)),
+            bootstraps: bootstraps.clone(),
+            #[cfg(test)]
+            drop_receipt: Arc::new(AtomicBool::new(false)),
         };
         thread::spawn(move || run_discovery(listener, browse, context));
         self.running = Some(Running {
+            bootstraps,
             local,
             stop,
             sessions,
@@ -237,18 +358,19 @@ impl Drop for LanSyncService {
 
 fn run_discovery(listener: TcpListener, browse: mdns_sd::Receiver<ServiceEvent>, context: Context) {
     let mut endpoints = HashMap::<String, Endpoint>::new();
-    let mut attempted = HashMap::<String, Instant>::new();
+    let attempted = Arc::new(Mutex::new(HashMap::<String, Retry>::new()));
     let busy = Arc::new(Mutex::new(HashSet::new()));
     let workers = Arc::new(AtomicUsize::new(0));
     while !context.stop.load(Ordering::Acquire) {
-        while let Ok(event) = browse.try_recv() {
+        for _ in 0..64 {
+            let Ok(event) = browse.try_recv() else { break };
             match event {
                 ServiceEvent::ServiceResolved(info) => {
                     let props = info.get_properties();
                     let instance = props.get_property_val_str("i").unwrap_or("");
                     let nonce = props.get_property_val_str("n").unwrap_or("");
                     if props.len() != 3
-                        || props.get_property_val_str("v") != Some("1")
+                        || props.get_property_val_str("v") != Some("2")
                         || !valid_token(instance)
                         || !valid_token(nonce)
                         || instance == context.instance
@@ -279,11 +401,14 @@ fn run_discovery(listener: TcpListener, browse: mdns_sd::Receiver<ServiceEvent>,
                 }
                 ServiceEvent::ServiceRemoved(_, fullname) => {
                     endpoints.retain(|_, e| e.fullname != fullname);
+                    if let Ok(mut retries) = attempted.lock() {
+                        retries.retain(|id, _| endpoints.contains_key(id));
+                    }
                 }
                 _ => {}
             }
         }
-        if workers.load(Ordering::Acquire) < MAX_HANDSHAKES {
+        if workers.load(Ordering::Acquire) < MAX_PEERS + MAX_HANDSHAKES {
             if let Ok((socket, addr)) = listener.accept() {
                 if same_link(addr.ip()) {
                     spawn_worker(socket, false, None, context.clone(), workers.clone());
@@ -292,10 +417,11 @@ fn run_discovery(listener: TcpListener, browse: mdns_sd::Receiver<ServiceEvent>,
         }
         for ep in endpoints.values() {
             if context.instance >= ep.instance
-                || workers.load(Ordering::Acquire) >= MAX_HANDSHAKES
+                || workers.load(Ordering::Acquire) >= MAX_PEERS + MAX_HANDSHAKES
                 || attempted
-                    .get(&ep.instance)
-                    .is_some_and(|t| t.elapsed() < RETRY_DELAY)
+                    .lock()
+                    .map(|r| r.get(&ep.instance).is_some_and(|r| Instant::now() < r.next))
+                    .unwrap_or(true)
             {
                 continue;
             }
@@ -306,14 +432,20 @@ fn run_discovery(listener: TcpListener, browse: mdns_sd::Receiver<ServiceEvent>,
                 continue;
             }
             drop(locked);
-            attempted.insert(ep.instance.clone(), Instant::now());
+            if let Ok(mut retries) = attempted.lock() {
+                retries
+                    .entry(ep.instance.clone())
+                    .or_insert_with(Retry::new);
+            }
             // Bounded connection workers keep the discovery/stop loop responsive.
             let ep = ep.clone();
             let context = context.clone();
             let workers = workers.clone();
             let busy = busy.clone();
+            let attempted = attempted.clone();
             workers.fetch_add(1, Ordering::AcqRel);
             thread::spawn(move || {
+                let started = Instant::now();
                 for ip in &ep.addresses {
                     if context.stop.load(Ordering::Acquire) {
                         break;
@@ -322,13 +454,19 @@ fn run_discovery(listener: TcpListener, browse: mdns_sd::Receiver<ServiceEvent>,
                         &SocketAddr::new(*ip, ep.port),
                         Duration::from_secs(1),
                     ) {
-                        let _ = exchange(
+                        let _ = persistent::exchange(
                             socket,
                             true,
                             Some((ep.instance.clone(), ep.nonce.clone())),
                             &context,
                         );
                         break;
+                    }
+                }
+                if let Ok(mut retries) = attempted.lock() {
+                    // Removed advertisements cannot reinsert stale retry state.
+                    if let Some(retry) = retries.get_mut(&ep.instance) {
+                        retry.failed(started.elapsed() > Duration::from_secs(30));
                     }
                 }
                 if let Ok(mut locked) = busy.lock() {
@@ -349,7 +487,7 @@ fn spawn_worker(
 ) {
     workers.fetch_add(1, Ordering::AcqRel);
     thread::spawn(move || {
-        let _ = exchange(socket, client, expected, &context);
+        let _ = persistent::exchange(socket, client, expected, &context);
         workers.fetch_sub(1, Ordering::AcqRel);
     });
 }
@@ -363,14 +501,10 @@ fn trusted(context: &Context, fingerprint: &str) -> Result<String, ()> {
         .into_iter()
         .find(|p| p.certificate_fingerprint == fingerprint)
         .ok_or(())?;
-    let mut runtime = context.runtime.lock().map_err(|_| ())?;
-    let s = runtime.sync_state().map_err(|_| ())?;
-    if s.vault_id != context.local
-        || !s
-            .authorizations
-            .iter()
-            .any(|a| a.peer == peer.pairing_ref && a.fingerprint == fingerprint && a.enabled)
-    {
+    let (profile, _) = context.hub.profile()?;
+    if !profile.routes.iter().any(|r| {
+        r.local == context.local && r.peer == peer.pairing_ref && r.fingerprint == fingerprint
+    }) {
         return Err(());
     }
     Ok(peer.pairing_ref)
@@ -401,161 +535,9 @@ impl SystemTimeMillis {
             .as_millis() as u64
     }
 }
-fn exchange(
-    mut socket: TcpStream,
-    client: bool,
-    expected: Option<(String, String)>,
-    context: &Context,
-) -> Result<(), ()> {
-    if context.stop.load(Ordering::Acquire) {
-        return Err(());
-    }
-    let session = context.sessions.register(&socket)?;
-    // Absolute session deadline prevents slow-frame peers from occupying a
-    // bounded worker indefinitely by making tiny progress before each timeout.
-    let deadline_socket = socket.try_clone().map_err(|_| ())?;
-    let (_deadline_cancel, deadline_wait) = mpsc::channel::<()>();
-    thread::spawn(move || {
-        if matches!(
-            deadline_wait.recv_timeout(Duration::from_secs(30)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ) {
-            let _ = deadline_socket.shutdown(std::net::Shutdown::Both);
-        }
-    });
-    socket.set_nonblocking(false).map_err(|_| ())?;
-    socket.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
-    socket.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
-    let cert = if client {
-        write_cert(&mut socket, &context.identity.cert)?;
-        read_cert(&mut socket)?
-    } else {
-        let cert = read_cert(&mut socket)?;
-        write_cert(&mut socket, &context.identity.cert)?;
-        cert
-    };
-    let fingerprint = hex_digest(&cert);
-    // Pin the certificate BEFORE sending a Vault identifier or any sync frame.
-    let peer = trusted(context, &fingerprint)?;
-    let mut tls = if client {
-        client_tls(socket, &context.identity, &cert)?
-    } else {
-        server_tls(socket, &context.identity, &cert)?
-    };
-    tls.complete_handshake()?;
-    context.sessions.bind_peer(&session, &peer)?;
-    update(context, &peer, "syncing", false);
-    let result = (|| {
-        let local = SyncHello {
-            version: SYNC_PROTOCOL,
-            instance: context.instance.clone(),
-            nonce: context.nonce.clone(),
-            vault: context.local,
-        };
-        let remote: SyncHello = exchange_frame(&mut tls, client, &local)?;
-        if remote.version != SYNC_PROTOCOL
-            || !valid_token(&remote.instance)
-            || !valid_token(&remote.nonce)
-            || remote.vault.is_nil()
-            || expected
-                .as_ref()
-                .is_some_and(|(i, n)| i != &remote.instance || n != &remote.nonce)
-        {
-            return Err(());
-        }
-        trusted(context, &fingerprint)?;
-        context
-            .runtime
-            .lock()
-            .map_err(|_| ())?
-            .sync_bind(&peer, &fingerprint, remote.vault, context.local)
-            .map_err(|_| ())?;
-        let manifest = context
-            .runtime
-            .lock()
-            .map_err(|_| ())?
-            .sync_manifest(&peer, &fingerprint, remote.vault, context.local)
-            .map_err(|_| ())?;
-        let theirs: SyncManifest = exchange_frame(&mut tls, client, &manifest)?;
-        if theirs.len() > SYNC_MAX_RECORDS {
-            return Err(());
-        }
-        trusted(context, &fingerprint)?;
-        context
-            .runtime
-            .lock()
-            .map_err(|_| ())?
-            .sync_confirm_manifest(&peer, &fingerprint, remote.vault, context.local, &theirs)
-            .map_err(|_| ())?;
-        let outgoing = context
-            .runtime
-            .lock()
-            .map_err(|_| ())?
-            .sync_export(&peer, &fingerprint, remote.vault, context.local, &theirs)
-            .map_err(|_| ())?;
-        let incoming: Vec<SyncRecord> = exchange_frame(&mut tls, client, &outgoing)?;
-        trusted(context, &fingerprint)?;
-        if !incoming.is_empty() {
-            let changed = context
-                .runtime
-                .lock()
-                .map_err(|_| ())?
-                .sync_merge_cancellable(
-                    &peer,
-                    &fingerprint,
-                    remote.vault,
-                    context.local,
-                    &incoming,
-                    &context.stop,
-                )
-                .map_err(|_| ())?;
-            if changed > 0 {
-                context.changes.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-        let receipt: Receipt = exchange_frame(
-            &mut tls,
-            client,
-            &Receipt {
-                version: SYNC_PROTOCOL,
-                committed: true,
-            },
-        )?;
-        if receipt.version != SYNC_PROTOCOL || !receipt.committed {
-            return Err(());
-        }
-        trusted(context, &fingerprint)?;
-        context
-            .runtime
-            .lock()
-            .map_err(|_| ())?
-            .sync_mark_backed_up(&peer, &fingerprint, remote.vault, context.local, &outgoing)
-            .map_err(|_| ())?;
-        Ok(())
-    })();
-    update(
-        context,
-        &peer,
-        if result.is_ok() { "synced" } else { "failed" },
-        result.is_ok(),
-    );
-    result
-}
-fn exchange_frame<T: Serialize, R: for<'de> Deserialize<'de>>(
-    tls: &mut TlsStream,
-    client: bool,
-    local: &T,
-) -> Result<R, ()> {
-    if client {
-        send(tls, local)?;
-        receive(tls)
-    } else {
-        let remote = receive(tls)?;
-        send(tls, local)?;
-        Ok(remote)
-    }
-}
+#[cfg(test)]
 struct BoundedFrame(Zeroizing<Vec<u8>>);
+#[cfg(test)]
 impl Write for BoundedFrame {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if self.0.len().saturating_add(bytes.len()) > SYNC_MAX_BYTES {
@@ -571,6 +553,7 @@ impl Write for BoundedFrame {
         Ok(())
     }
 }
+#[cfg(test)]
 fn send<T: Serialize>(tls: &mut TlsStream, value: &T) -> Result<(), ()> {
     let mut frame = BoundedFrame(Zeroizing::new(Vec::with_capacity(SYNC_MAX_BYTES)));
     serde_json::to_writer(&mut frame, value).map_err(|_| ())?;
@@ -580,21 +563,203 @@ fn send<T: Serialize>(tls: &mut TlsStream, value: &T) -> Result<(), ()> {
     tls.write_all(&bytes).map_err(|_| ())?;
     tls.flush().map_err(|_| ())
 }
-fn receive<T: for<'de> Deserialize<'de>>(tls: &mut TlsStream) -> Result<T, ()> {
-    let mut size = [0; 4];
-    tls.read_exact(&mut size).map_err(|_| ())?;
-    let size = u32::from_be_bytes(size) as usize;
-    if size == 0 || size > SYNC_MAX_BYTES {
-        return Err(());
-    }
-    let mut bytes = Zeroizing::new(vec![0; size]);
-    tls.read_exact(&mut bytes).map_err(|_| ())?;
-    serde_json::from_slice(&bytes).map_err(|_| ())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn live(a: &Context, b: &Context) -> Vec<thread::JoinHandle<Result<(), ()>>> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = b.clone();
+        let client = a.clone();
+        let expected = (b.instance.clone(), b.nonce.clone());
+        vec![
+            thread::spawn(move || {
+                persistent::exchange(listener.accept().unwrap().0, false, None, &server)
+            }),
+            thread::spawn(move || {
+                persistent::exchange(
+                    TcpStream::connect(addr).unwrap(),
+                    true,
+                    Some(expected),
+                    &client,
+                )
+            }),
+        ]
+    }
+    fn until(mut condition: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !condition() {
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "persistent sync did not converge"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    fn stop_live(contexts: &[&Context], handles: Vec<thread::JoinHandle<Result<(), ()>>>) {
+        for c in contexts {
+            c.stop.store(true, Ordering::Release);
+            c.sessions.shutdown_all();
+        }
+        for h in handles {
+            let _ = h.join().unwrap();
+        }
+    }
+    #[test]
+    fn ct_lan_sync_v2_three_devices_push_while_locked_and_merge_on_unlock() {
+        let a = context("live-a");
+        let b = context("live-b");
+        let c = context("live-c");
+        for (x, y) in [(&a, &b), (&b, &a), (&b, &c), (&c, &b), (&a, &c), (&c, &a)] {
+            trust(x, y);
+        }
+        let mut handles = live(&a, &b);
+        handles.extend(live(&b, &c));
+        handles.extend(live(&a, &c));
+        until(|| {
+            [&a, &b, &c].iter().all(|x| {
+                x.hub
+                    .profile()
+                    .unwrap()
+                    .0
+                    .routes
+                    .iter()
+                    .all(|r| r.incoming.is_some())
+            })
+        });
+        c.runtime.lock().unwrap().lock();
+        add(&a, "pushed after lock");
+        until(|| b.runtime.lock().unwrap().status().item_count == 1);
+        until(|| {
+            c.hub
+                .profile()
+                .unwrap()
+                .0
+                .routes
+                .iter()
+                .any(|r| c.hub.summary(&r.peer).unwrap().received.is_some())
+        });
+        assert!(!c.runtime.lock().unwrap().status().unlocked);
+        let path = c.runtime.lock().unwrap().current_path();
+        let bytes = std::fs::read(path.with_file_name(format!(
+            "{}.lan-mailbox",
+            path.file_name().unwrap().to_string_lossy()
+        )))
+        .unwrap();
+        assert!(
+            !String::from_utf8(bytes)
+                .unwrap()
+                .contains("synthetic password")
+        );
+        c.runtime
+            .lock()
+            .unwrap()
+            .unlock("test master live-c".into())
+            .unwrap();
+        until(|| c.runtime.lock().unwrap().status().item_count == 1);
+        add(&c, "third device edit");
+        until(|| {
+            [&a, &b, &c]
+                .iter()
+                .all(|x| x.runtime.lock().unwrap().status().item_count == 2)
+        });
+        let versions = a.runtime.lock().unwrap().sync_state().unwrap().entries;
+        until(|| {
+            [&b, &c]
+                .iter()
+                .all(|x| x.runtime.lock().unwrap().sync_state().unwrap().entries == versions)
+        });
+        stop_live(&[&a, &b, &c], handles);
+        for x in [&a, &b, &c] {
+            cleanup(x);
+        }
+    }
+    #[test]
+    fn ct_lan_sync_v2_reconnects_locked_and_browser_edits_push_without_desktop_unlock() {
+        let a = context("browser-a");
+        let b = context("browser-b");
+        trust(&a, &b);
+        trust(&b, &a);
+        assert_eq!(connect(&a, &b), (Ok(()), Ok(())));
+        a.runtime.lock().unwrap().lock();
+        b.runtime.lock().unwrap().lock();
+        let mut browser = DesktopRuntime::new(a.runtime.lock().unwrap().current_path()).unwrap();
+        browser
+            .unlock_for_browser("test master browser-a".into())
+            .unwrap();
+        browser.execute("items.add", serde_json::json!({"title":"plugin synthetic edit","username":"u","password":"synthetic password","url":"https://example.test","notes":null,"folder":null,"favorite":false,"totpSecret":null,"recoveryCodes":[],"additionalUrls":[],"autofillOnPageLoad":false,"masterPasswordReprompt":false,"customFields":[]})).unwrap();
+        browser.lock();
+        let handles = live(&a, &b);
+        until(|| {
+            b.hub
+                .profile()
+                .unwrap()
+                .0
+                .routes
+                .iter()
+                .any(|r| b.hub.summary(&r.peer).unwrap().received.is_some())
+        });
+        assert!(!a.runtime.lock().unwrap().status().unlocked);
+        assert!(!b.runtime.lock().unwrap().status().unlocked);
+        let mut receiver = DesktopRuntime::new(b.runtime.lock().unwrap().current_path()).unwrap();
+        receiver
+            .unlock_for_browser("test master browser-b".into())
+            .unwrap();
+        assert_eq!(receiver.status().item_count, 1);
+        assert!(!b.runtime.lock().unwrap().status().unlocked);
+        stop_live(&[&a, &b], handles);
+        cleanup(&a);
+        cleanup(&b);
+    }
+    #[test]
+    fn ct_lan_sync_v2_large_first_merge_is_chunked_and_committed_atomically() {
+        let a = context("large-a");
+        let b = context("large-b");
+        trust(&a, &b);
+        trust(&b, &a);
+        let path = a.runtime.lock().unwrap().current_path();
+        let mut fixture = vaultmesh_core::VaultSession::unlock(
+            "test master large-a",
+            &std::fs::read(&path).unwrap(),
+        )
+        .unwrap();
+        for i in 0..1_650 {
+            fixture.add_item(serde_json::from_value(serde_json::json!({"title":format!("synthetic record {i}"),"username":"u","password":"synthetic password","url":"https://example.test","notes":"x".repeat(10_000),"folder":null,"favorite":false,"totp_secret":null,"recovery_codes":[],"additional_urls":[],"autofill_on_page_load":false,"master_password_reprompt":false,"custom_fields":[]})).unwrap()).unwrap();
+        }
+        fixture.sync_checkpoint(1).unwrap();
+        let export = fixture.sync_export(&Default::default()).unwrap();
+        assert!(serde_json::to_vec(&export).unwrap().len() > 16 * 1024 * 1024);
+        drop(export);
+        let encrypted = fixture.save().unwrap();
+        assert!(
+            encrypted.len() <= 64 * 1024 * 1024,
+            "fixture must fit the existing Vault file limit"
+        );
+        std::fs::write(&path, encrypted).unwrap();
+        drop(fixture);
+        a.runtime.lock().unwrap().sync_pump().unwrap();
+        let handles = live(&a, &b);
+        let start = Instant::now();
+        while b.runtime.lock().unwrap().status().item_count == 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(120),
+                "large batch stalled"
+            );
+            assert!(
+                !handles.iter().any(|h| h.is_finished()),
+                "persistent transport closed early"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(b.runtime.lock().unwrap().status().item_count, 1_650);
+        assert_eq!(
+            a.runtime.lock().unwrap().sync_state().unwrap().entries,
+            b.runtime.lock().unwrap().sync_state().unwrap().entries
+        );
+        stop_live(&[&a, &b], handles);
+        cleanup(&a);
+        cleanup(&b);
+    }
     fn context(name: &str) -> Context {
         let path = std::env::temp_dir().join(format!(
             "vaultmesh-sync-test-{name}-{}.vault",
@@ -603,6 +768,7 @@ mod tests {
         let mut runtime = DesktopRuntime::new(path).unwrap();
         runtime.create(format!("test master {name}")).unwrap();
         let local = runtime.sync_state().unwrap().vault_id;
+        let hub = runtime.sync_relay();
         Context {
             runtime: Arc::new(Mutex::new(runtime)),
             identity: super::super::tests::identity(),
@@ -614,6 +780,12 @@ mod tests {
             sessions: Arc::new(SessionRegistry::default()),
             states: Arc::new(Mutex::new(HashMap::new())),
             changes: Arc::new(AtomicU64::new(0)),
+            hub,
+            active_peers: Arc::new(Mutex::new(HashSet::new())),
+            handshakes: Arc::new(AtomicUsize::new(0)),
+            bootstraps: Arc::new(SessionRegistry::default()),
+            #[cfg(test)]
+            drop_receipt: Arc::new(AtomicBool::new(false)),
         }
     }
     fn trust(a: &Context, b: &Context) {
@@ -637,20 +809,40 @@ mod tests {
         context.runtime.lock().unwrap().execute("items.add",serde_json::json!({"title":title,"username":"synthetic user","password":"synthetic password","url":"https://example.test","notes":null,"folder":null,"favorite":false,"totpSecret":null,"recoveryCodes":[],"additionalUrls":[],"autofillOnPageLoad":false,"masterPasswordReprompt":false,"customFields":[]})).unwrap();
     }
     fn connect(a: &Context, b: &Context) -> (Result<(), ()>, Result<(), ()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = b.clone();
-        let worker = thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            exchange(socket, false, None, &server)
-        });
-        let client = exchange(
-            TcpStream::connect(addr).unwrap(),
-            true,
-            Some((b.instance.clone(), b.nonce.clone())),
-            a,
-        );
-        (client, worker.join().unwrap())
+        let mut handles = live(a, b);
+        let start = Instant::now();
+        loop {
+            if handles.iter().any(|h| h.is_finished()) {
+                break;
+            }
+            let settled = [a, b].iter().all(|c| {
+                c.hub.profile().unwrap().0.routes.iter().all(|r| {
+                    r.incoming.is_some()
+                        && c.hub
+                            .summary(&r.peer)
+                            .is_ok_and(|s| s.data.is_none() && s.received == s.applied)
+                })
+            });
+            if settled && start.elapsed() > Duration::from_millis(200) {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "TLS exchange failed to settle"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        // Give a rejected peer time to observe the closed socket as well.
+        if handles.iter().any(|h| h.is_finished()) {
+            thread::sleep(Duration::from_millis(100));
+        }
+        a.stop.store(true, Ordering::Release);
+        b.stop.store(true, Ordering::Release);
+        let client = handles.pop().unwrap().join().unwrap();
+        let server = handles.pop().unwrap().join().unwrap();
+        a.stop.store(false, Ordering::Release);
+        b.stop.store(false, Ordering::Release);
+        (client, server)
     }
     fn cleanup(c: &Context) {
         c.stop.store(true, Ordering::Release);
@@ -688,6 +880,35 @@ mod tests {
             a.runtime.lock().unwrap().sync_state().unwrap().entries,
             before
         );
+        cleanup(&a);
+        cleanup(&b);
+    }
+    #[test]
+    fn ct_lan_sync_reenable_rotates_channel_and_rejects_old_packets() {
+        let a = context("epoch-a");
+        let b = context("epoch-b");
+        trust(&a, &b);
+        trust(&b, &a);
+        assert_eq!(connect(&a, &b), (Ok(()), Ok(())));
+        add(&a, "before revoke");
+        let peer = format!("lan-peer-{}", b.identity.device_id);
+        let reverse = format!("lan-peer-{}", a.identity.device_id);
+        let old = a.hub.peer(&peer).unwrap().outgoing.unwrap();
+        let fp = hex_digest(&b.identity.cert);
+        a.runtime
+            .lock()
+            .unwrap()
+            .sync_authorize(&peer, &fp, false)
+            .unwrap();
+        assert!(a.hub.route(&peer).is_err());
+        a.runtime
+            .lock()
+            .unwrap()
+            .sync_authorize(&peer, &fp, true)
+            .unwrap();
+        assert_eq!(connect(&a, &b), (Ok(()), Ok(())));
+        assert!(b.hub.store(&reverse, old, false).is_err());
+        assert_eq!(b.runtime.lock().unwrap().status().item_count, 1);
         cleanup(&a);
         cleanup(&b);
     }
@@ -730,55 +951,9 @@ mod tests {
         trust(&a, &b);
         trust(&b, &a);
         add(&a, "committed once");
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = b.clone();
-        let worker = thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            exchange(socket, false, None, &server)
-        });
-        let mut socket = TcpStream::connect(addr).unwrap();
-        socket.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
-        socket.set_write_timeout(Some(IO_TIMEOUT)).unwrap();
-        write_cert(&mut socket, &a.identity.cert).unwrap();
-        let cert = read_cert(&mut socket).unwrap();
-        let fp = hex_digest(&cert);
-        let peer = trusted(&a, &fp).unwrap();
-        let mut tls = client_tls(socket, &a.identity, &cert).unwrap();
-        tls.complete_handshake().unwrap();
-        let hello: SyncHello = exchange_frame(
-            &mut tls,
-            true,
-            &SyncHello {
-                version: 1,
-                instance: a.instance.clone(),
-                nonce: a.nonce.clone(),
-                vault: a.local,
-            },
-        )
-        .unwrap();
-        a.runtime
-            .lock()
-            .unwrap()
-            .sync_bind(&peer, &fp, hello.vault, a.local)
-            .unwrap();
-        let manifest = a
-            .runtime
-            .lock()
-            .unwrap()
-            .sync_manifest(&peer, &fp, hello.vault, a.local)
-            .unwrap();
-        let remote: SyncManifest = exchange_frame(&mut tls, true, &manifest).unwrap();
-        let records = a
-            .runtime
-            .lock()
-            .unwrap()
-            .sync_export(&peer, &fp, hello.vault, a.local, &remote)
-            .unwrap();
-        add(&b, "concurrent local edit after manifest");
-        let _: Vec<SyncRecord> = exchange_frame(&mut tls, true, &records).unwrap();
-        drop(tls);
-        assert!(worker.join().unwrap().is_err());
+        add(&b, "concurrent local edit");
+        b.drop_receipt.store(true, Ordering::Release);
+        assert!(connect(&a, &b).1.is_err());
         assert_eq!(b.runtime.lock().unwrap().status().item_count, 2);
         assert_eq!(connect(&a, &b), (Ok(()), Ok(())));
         assert_eq!(b.runtime.lock().unwrap().status().item_count, 2);
@@ -798,7 +973,7 @@ mod tests {
             let server = b.clone();
             let worker = thread::spawn(move || {
                 let (socket, _) = listener.accept().unwrap();
-                exchange(socket, false, None, &server)
+                persistent::exchange(socket, false, None, &server)
             });
             let mut socket = TcpStream::connect(addr).unwrap();
             socket.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
@@ -812,6 +987,8 @@ mod tests {
                     &mut tls,
                     &SyncHello {
                         version: 99,
+                        sending: Uuid::new_v4(),
+                        receiving: None,
                         instance: a.instance.clone(),
                         nonce: a.nonce.clone(),
                         vault: a.local,
@@ -847,10 +1024,10 @@ mod tests {
         let server = b.clone();
         let worker = thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
-            exchange(socket, false, None, &server)
+            persistent::exchange(socket, false, None, &server)
         });
         assert!(
-            exchange(
+            persistent::exchange(
                 TcpStream::connect(addr).unwrap(),
                 true,
                 Some((b.instance.clone(), random_token())),

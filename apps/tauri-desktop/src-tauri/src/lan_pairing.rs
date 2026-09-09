@@ -381,8 +381,15 @@ struct SessionGuard {
 }
 impl SessionRegistry {
     fn register(self: &Arc<Self>, socket: &TcpStream) -> Result<SessionGuard, ()> {
+        self.register_with_limit(socket, MAX_HANDSHAKES)
+    }
+    fn register_with_limit(
+        self: &Arc<Self>,
+        socket: &TcpStream,
+        limit: usize,
+    ) -> Result<SessionGuard, ()> {
         let mut sockets = self.sockets.lock().map_err(|_| ())?;
-        if sockets.len() >= MAX_HANDSHAKES {
+        if sockets.len() >= limit {
             return Err(());
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);

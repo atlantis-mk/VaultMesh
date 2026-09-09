@@ -7,7 +7,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const SYNC_MAX_RECORDS: usize = 100_000;
-pub const SYNC_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const SYNC_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +54,16 @@ pub struct SyncAuthorization {
     pub fingerprint: String,
     pub remote_vault: Option<Uuid>,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outgoing: Option<crate::SyncChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incoming: Option<crate::SyncChannel>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub confirmed: SyncManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_packet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_packet: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, Eq, PartialEq)]
@@ -678,8 +688,16 @@ impl VaultSession {
             }
             if enabled && !auth.enabled {
                 auth.remote_vault = None;
+                auth.incoming = None;
+                auth.outgoing = None;
+                auth.confirmed.clear();
+                auth.applied_packet = None;
+                auth.confirmed_packet = None;
             }
             auth.enabled = enabled;
+            if enabled && auth.outgoing.is_none() {
+                auth.outgoing = Some(crate::SyncChannel::new());
+            }
         } else {
             if s.authorizations.len() >= 32 {
                 return invalid();
@@ -689,6 +707,11 @@ impl VaultSession {
                 fingerprint: fingerprint.into(),
                 remote_vault: None,
                 enabled,
+                outgoing: enabled.then(crate::SyncChannel::new),
+                incoming: None,
+                confirmed: BTreeMap::new(),
+                applied_packet: None,
+                confirmed_packet: None,
             });
         }
         Ok(())

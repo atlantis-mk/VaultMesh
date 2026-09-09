@@ -36,8 +36,8 @@
 | PIN quick unlock | Required |
 | macOS Touch ID quick unlock | Required |
 | Windows Hello/DPAPI quick unlock | Partial，受 `OPEN-001` 阻塞 |
-| 局域网已授权桌面设备解锁期间自动双向同步 | Required；CHG-2026-043 实施与平台验收中 |
-| 账号、服务器/跨网络/锁定期间同步、分享、恢复后门 | Out |
+| 局域网已授权设备事件同步、锁定密文收发与解锁合并 | Required；CHG-2026-044 实施与平台验收中 |
+| 账号、服务器/跨网络同步、分享、恢复后门 | Out |
 
 ## Browser 能力
 

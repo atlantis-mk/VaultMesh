@@ -378,6 +378,11 @@ pub fn record_agent_audit(
         session
             .record_unlock_event(unlock_source)
             .map_err(map_runtime_core_error)?;
+        // Revoke the old mailbox while the restored file is still under its
+        // writer lock. `replace` then acquires that lock to publish the new
+        // epoch; retaining this guard would deadlock the restore path.
+        self.relay.invalidate();
+        drop(_guard);
         self.replace(session, canonical.as_slice());
         Ok(self.status())
     }
@@ -395,13 +400,19 @@ pub fn record_agent_audit(
         VAULTMESH_ITEM_KIND_SECRET
     }
 
-    fn replace(&mut self, session: VaultSession, encrypted: &[u8]) {
+    fn replace(&mut self, mut session: VaultSession, encrypted: &[u8]) {
         self.lock();
+        self.relay = crate::sync_relay::RelayHub::for_path(&self.path);
+        if crate::sync_relay::system_locked() { session.lock(); return; }
         self.vault = Some(VaultmeshVault {
             session,
             path: self.path.clone(),
             persisted_fingerprint: vault_fingerprint(encrypted),
         });
+        if let Some(vault) = self.vault.as_mut() {
+            crate::sync_relay::publish(vault);
+            let _ = crate::sync_relay::pump(vault);
+        }
     }
 }
 

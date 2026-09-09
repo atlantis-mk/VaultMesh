@@ -3,14 +3,19 @@
 pub struct DesktopRuntime {
     path: PathBuf,
     vault: Option<VaultmeshVault>,
+    relay: std::sync::Arc<crate::sync_relay::RelayHub>,
 }
 
 impl DesktopRuntime {
+    pub fn is_unlocked(&self) -> bool {
+        self.vault.as_ref().is_some_and(|v| !v.session.is_locked())
+    }
     pub fn new(path: PathBuf) -> Result<Self, DesktopRuntimeError> {
         if path.as_os_str().is_empty() || path.file_name().is_none() {
             return Err(VAULTMESH_STATUS_INVALID_ARGUMENT.into());
         }
         Ok(Self {
+            relay: crate::sync_relay::RelayHub::for_path(&path),
             path,
             vault: None,
         })
@@ -264,6 +269,19 @@ impl DesktopRuntime {
     /// Reloads a newer atomic Vault file through the current session key.
     /// A replacement with a different Vault Key invalidates this authorization.
     pub fn refresh_from_disk(&mut self) -> Result<(), DesktopRuntimeError> {
+        if crate::sync_relay::system_locked() {
+            self.lock();
+            return Err(VAULTMESH_STATUS_LOCKED.into());
+        }
+        self.refresh_vault_file()?;
+        if let Some(vault) = self.vault.as_mut().filter(|v| !v.session.is_locked()) {
+            // Invalid/oversized network updates fail sync, not ordinary Vault use.
+            let _ = crate::sync_relay::pump(vault);
+        }
+        Ok(())
+    }
+
+    fn refresh_vault_file(&mut self) -> Result<(), DesktopRuntimeError> {
         let Some(vault) = self.vault.as_mut() else {
             return Ok(());
         };

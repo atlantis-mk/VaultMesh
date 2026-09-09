@@ -66,7 +66,7 @@ Agent audit、ConnectorDefinition 与 ApiEnvironment 始终写入 format 4；不
 
 Service 与 ApiEnvironment collections 必须保留其 exact relationship、revision 与 policy digest。缺失/已删除关系必须由 live validation 拒绝，不能复用旧 target 或权限。format-3 兼容理由见 ADR-0014/0015；当前 format-4 同步与迁移由 ADR-0019 所有。
 
-`sync` 是加密 payload 内的同步状态：Vault 身份、副本 epoch、HLC/已见版本、记录摘要、永久 tombstone、加密冲突历史和本机 peer 授权。它不得出现在非秘密索引或同步 payload 投影中；线上只发送 allowlisted 记录与版本清单。协议与删除语义见 `specs/lan-vault-sync.md`。所有数据入口必须在原子保存前更新版本。
+`sync` 是加密 payload 内的同步状态：Vault 身份、副本 epoch、HLC/已见版本、记录摘要、永久 tombstone、加密冲突历史和本机 peer 授权。完整状态不得出现在非秘密索引或可移植投影中；ADR-0020 仅允许经 OS-protected 证明保护的本机路由事实与密文缓存存在于 sidecar，条目清单与秘密仍在加密边界内。协议与删除语义见 `specs/lan-vault-sync.md`。所有数据入口必须在原子保存前更新版本。ADR-0020 扩展本地同步授权为独立方向通道；通道密钥、已确认版本基线和已合并包身份仅保存在加密 payload，不进入可移植投影。新增私有字段必须由旧 format-4 reader 的严格解析拒绝，禁止旧 writer 改写。
 
 旧 Agent 账号配置、其权限规则与 format-2 compatibility 不属于当前数据模型，也不存在读取或投影路径。
 当前设备的 persistent Agent authorization 使用独立本地加密规则库：随机 256-bit key 由

@@ -20,6 +20,7 @@ import { persistentNativeConnection } from "@/lib/native-connection";
 import { AutofillAttemptRegistry } from "@/lib/autofill-attempts";
 import { presentBrowserSaveConfirmation } from "@/lib/browser-save-confirmation";
 import { SAVE_CAPTURE_DECISION_TIMEOUT_MS } from "@/lib/save-capture-countdown";
+import { runCaptureSaveOnce } from "@/lib/capture-save-gate";
 import { SAVE_CONFIRMATION_WINDOW_HEIGHT, SAVE_CONFIRMATION_WINDOW_WIDTH, saveConfirmationWindowPosition } from "@/lib/save-confirmation-window";
 import { rememberedLoginSelection, rememberLoginSelection } from "@/lib/autofill-preferences";
 import { chooseAutomaticLogin, fieldsForLoginSelection, rankLoginCandidates, requiresFillConfirmation, shouldQueueFillConfirmation, shouldReplaceExistingFields, shouldWaitForLoginPair } from "@/lib/autofill-selection";
@@ -69,6 +70,9 @@ type PendingPluginFill = {
   selectedItem: NonNullable<FillRequest["selectedItem"]>;
   requiresPassword: boolean;
   expiresAt: number;
+  target?: import("@/lib/protocol").AutofillTarget;
+  targetFrameId?: number;
+  preserveExistingAccount?: boolean;
 };
 let pendingPluginFill: PendingPluginFill | null = null;
 let activePluginSecurityPolicy = DEFAULT_PLUGIN_SECURITY_POLICY;
@@ -132,8 +136,10 @@ export default defineBackground(() => {
   browser.webNavigation.onHistoryStateUpdated.addListener((details) => {
     if (details.frameId === 0) {
       automaticAttempts.reset(details.tabId);
-      void browser.tabs.sendMessage(details.tabId, { kind: "vaultmesh.autofill-rescan" }, { frameId: 0 }).catch(() => undefined);
     }
+    // Same-origin iframe routes keep their content script and document id too.
+    // Every affected frame must retire discovery handles before the next scan.
+    void browser.tabs.sendMessage(details.tabId, { kind: "vaultmesh.autofill-rescan" }, { frameId: details.frameId }).catch(() => undefined);
   });
   browser.webNavigation.onCompleted.addListener((details) => {
     if (details.frameId === 0) void presentPendingSavePromptForTab(details.tabId);
@@ -268,6 +274,9 @@ export default defineBackground(() => {
           targetOrigin: pending.targetOrigin,
           targetPageUrl: pending.targetPageUrl,
           masterPassword: parsed.data.masterPassword,
+          target: pending.target,
+          targetFrameId: pending.targetFrameId,
+          preserveExistingAccount: pending.preserveExistingAccount,
         });
         if (result.status === "filled" && pending.selectedItem.kind === "login") {
           await rememberLoginSelection(pending.targetOrigin, pending.selectedItem.id).catch(() => undefined);
@@ -302,7 +311,7 @@ export default defineBackground(() => {
     }
     if (parsed.data.kind === "vaultmesh.email-otp-select") {
       if (page.fillOrigin !== page.topOrigin) return { status: "unsupported-page" as const };
-      return fillEmailOtpForTab(page.tabId, page.topOrigin, page.framePageUrl, parsed.data.candidateId);
+      return fillEmailOtpForTab(page.tabId, page.topOrigin, page.framePageUrl, parsed.data.candidateId, parsed.data.target, sender.frameId ?? 0);
     }
     if (parsed.data.kind === "vaultmesh.save-capture-pending") return pendingSaveCaptureForPage(page, sender.frameId);
     if (parsed.data.kind === "vaultmesh.otp-watch-requested") {
@@ -323,6 +332,8 @@ export default defineBackground(() => {
           targetOrigin: page.fillOrigin,
           targetPageUrl: page.framePageUrl,
           preserveExistingAccount: parsed.data.replaceExistingAccount !== true,
+          target: parsed.data.target,
+          targetFrameId: sender.frameId ?? 0,
         });
         if (result.status === "filled" && parsed.data.selectedItem.kind === "login") {
           await rememberLoginSelection(page.fillOrigin, parsed.data.selectedItem.id).catch(() => undefined);
@@ -340,6 +351,9 @@ export default defineBackground(() => {
         selectedItem: parsed.data.selectedItem,
         requiresPassword: true,
         expiresAt: Date.now() + 60_000,
+        target: parsed.data.target,
+        targetFrameId: sender.frameId ?? 0,
+        preserveExistingAccount: parsed.data.replaceExistingAccount !== true,
       };
       await extensionAction?.openPopup();
       return { status: "confirmation-required" as const };
@@ -353,7 +367,7 @@ export default defineBackground(() => {
     if (parsed.data.kind === "vaultmesh.save-capture-decision") return decideSaveCapture(parsed.data, page);
     if (parsed.data.kind === "vaultmesh.save-capture") return queueSaveCapture(parsed.data, page);
     if (!automaticAttempts.begin(page.tabId, page.fillOrigin, parsed.data.signature, parsed.data.documentId)) return { status: "already-attempted" as const };
-    return startAutomaticFillForTab(page.tabId, page.fillOrigin, parsed.data.pageContext === "otp" ? "otp" : "login", page.framePageUrl);
+    return startAutomaticFillForTab(page.tabId, page.fillOrigin, parsed.data.pageContext === "otp" ? "otp" : "login", page.framePageUrl, parsed.data.target, sender.frameId ?? 0);
   });
 });
 
@@ -776,7 +790,13 @@ async function decideSaveCapture(
   return saveCapture(decision.captureId);
 }
 
-async function saveCapture(captureId: string, options: { notify?: boolean } = {}) {
+const savingCaptures = new Map<string, ReturnType<typeof performSaveCapture>>();
+
+function saveCapture(captureId: string, options: { notify?: boolean } = {}) {
+  return runCaptureSaveOnce(savingCaptures, captureId, () => performSaveCapture(captureId, options));
+}
+
+async function performSaveCapture(captureId: string, options: { notify?: boolean } = {}) {
   const pending = pendingCredentialCaptures.get(captureId);
   if (!pending || pending.expiresAt <= Date.now()) {
     discardSaveCapture(captureId);

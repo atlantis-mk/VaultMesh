@@ -18,12 +18,20 @@ describe('CT-LAN-SYNC-001 desktop sync authorization and history', () => {
     } } as unknown as VaultMeshApi });
   });
   afterEach(cleanup);
+  it('distinguishes delivered ciphertext from an applied update', async () => {
+    vi.mocked(window.vaultMesh.lan.syncStatus).mockResolvedValue({ peers: [{ peerRef: peer.pairingRef, enabled: true, state: 'delivered', lastSuccessAt: null }], conflictCount: 0 });
+    render(<LanSyncPanel trusted={[peer]} />);
+    await screen.findByText('密文已送达，等待对端合并');
+    expect(screen.queryByText('已合并')).toBeNull();
+    expect(screen.getByText(/隔离某台设备须撤销所有通向它的连接/)).toBeTruthy();
+  });
   it('requires explicit confirmation for legacy pairing and does not revoke on navigation', async () => {
     const view = render(<LanSyncPanel trusted={[peer]} />);
     await screen.findByText('自动同步已关闭');
     fireEvent.click(screen.getByRole('button', { name: '开启 Test peer 自动同步' }));
     expect(window.vaultMesh.lan.enableSync).not.toHaveBeenCalled();
-    expect(screen.getByText(/旧配对设备也需要在对端确认一次/)).toBeTruthy();
+    expect(screen.getByText(/旧版同步授权需要双方各升级确认一次/)).toBeTruthy();
+    expect(screen.getByText(/锁定期间也允许后台收发加密更新，解锁后才合并生效/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '授权并启用' }));
     await waitFor(() => expect(window.vaultMesh.lan.enableSync).toHaveBeenCalledWith(peer.pairingRef));
     view.unmount();

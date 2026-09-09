@@ -49,6 +49,11 @@ pub struct WindowsBrowserIntegration {
 }
 
 impl WindowsBrowserIntegration {
+    pub(crate) fn lock_vault(&self) {
+        if let Some(listener) = &self.listener {
+            listener.lock_vault();
+        }
+    }
     pub fn new(app_data: PathBuf, broker_factory: BrokerFactory) -> Self {
         Self {
             app_data,

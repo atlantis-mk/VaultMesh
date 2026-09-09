@@ -82,6 +82,7 @@ impl Drop for SecurityDescriptor {
 }
 
 pub struct BrowserBrokerWindowsListener {
+    broker: std::sync::Weak<Mutex<BrowserBrokerCore>>,
     pipe_name: String,
     stopping: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
@@ -108,6 +109,7 @@ impl BrowserBrokerWindowsListener {
         let first_pipe = create_pipe(&pipe_name, true)?;
         let stopping = Arc::new(AtomicBool::new(false));
         let worker_stopping = Arc::clone(&stopping);
+        let owned_broker = Arc::downgrade(&broker);
         let healthy = Arc::new(AtomicBool::new(true));
         let worker_healthy = Arc::clone(&healthy);
         let worker_pipe_name = pipe_name.clone();
@@ -155,6 +157,7 @@ impl BrowserBrokerWindowsListener {
             worker_healthy.store(false, Ordering::Release);
         });
         Ok(Self {
+            broker: owned_broker,
             pipe_name,
             stopping,
             healthy,
@@ -174,6 +177,13 @@ impl BrowserBrokerWindowsListener {
             && let Some(thread) = thread.take()
         {
             let _ = thread.join();
+        }
+    }
+    pub(crate) fn lock_vault(&self) {
+        if let Some(broker) = self.broker.upgrade() {
+            if let Ok(mut b) = broker.lock() {
+                b.lock_for_system();
+            }
         }
     }
 }

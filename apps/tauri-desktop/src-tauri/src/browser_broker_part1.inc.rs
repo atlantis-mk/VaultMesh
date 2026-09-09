@@ -346,6 +346,7 @@ pub struct BrowserBrokerCore {
     seen_request_ids: HashMap<Uuid, i64>,
     events: Vec<BrowserEvent>,
     event_sequence: u64,
+    sync_merge_generation: u64,
     confirmations: HashMap<Uuid, Confirmation>,
     fill: BrowserFillService,
     unlock_history: Value,
@@ -354,6 +355,13 @@ pub struct BrowserBrokerCore {
 }
 
 impl BrowserBrokerCore {
+    pub(crate) fn lock_for_system(&mut self) {
+        self.runtime.lock();
+        self.platform.clear();
+        self.confirmations.clear();
+        self.fill.clear();
+        self.record_event("vault-locked", Utc::now().timestamp_millis());
+    }
     pub fn new(
         vault_path: PathBuf,
         pairing_secret: Zeroizing<[u8; 32]>,
@@ -376,6 +384,7 @@ impl BrowserBrokerCore {
             seen_request_ids: HashMap::new(),
             events: Vec::new(),
             event_sequence: 0,
+            sync_merge_generation: 0,
             confirmations: HashMap::new(),
             fill: BrowserFillService::default(),
             unlock_history: json!([]),
@@ -500,6 +509,12 @@ impl BrowserBrokerCore {
             && let Err(error) = self.runtime.refresh_from_disk()
         {
             return runtime_failure(envelope_request_id, error);
+        }
+        if self.runtime.sync_relay().merged_generation() != self.sync_merge_generation {
+            self.sync_merge_generation = self.runtime.sync_relay().merged_generation();
+            self.fill.clear();
+            self.confirmations.clear();
+            self.record_event("vault-changed", now_millis);
         }
         if requires_unlock(&request.operation) && !self.runtime.status().unlocked {
             return rpc_failure(

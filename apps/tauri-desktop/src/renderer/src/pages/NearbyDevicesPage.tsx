@@ -135,7 +135,7 @@ export function NearbyDevicesPage() {
           }}>
             <CardHeader>
               <CardTitle>输入另一台设备的配对码</CardTitle>
-              <CardDescription>请输入设备 {shortPeer(pairingPeer)} 当前显示的六码。正确后自动配对并授权同步全部适用凭据，双方解锁时自动合并。</CardDescription>
+              <CardDescription>请输入设备 {shortPeer(pairingPeer)} 当前显示的六码。正确后自动配对并授权同步全部适用凭据，首次连接须双方解锁，之后锁定也可收发密文，解锁后合并。</CardDescription>
             </CardHeader>
             <CardContent>
               <Input

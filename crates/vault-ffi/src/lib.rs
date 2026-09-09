@@ -5,6 +5,7 @@ mod privileged;
 mod runtime;
 mod status;
 mod storage;
+pub mod sync_relay;
 mod vault;
 
 pub use privileged::{
@@ -42,3 +43,5 @@ pub const VAULTMESH_ITEM_KIND_PAYMENT_CARD: u32 = 2;
 pub const VAULTMESH_ITEM_KIND_IDENTITY: u32 = 3;
 pub const VAULTMESH_ITEM_KIND_SSH_CREDENTIAL: u32 = 4;
 pub const VAULTMESH_ITEM_KIND_SECRET: u32 = 5;
+
+pub use vaultmesh_core::{SyncChannel, SyncPacket, SyncRoute};

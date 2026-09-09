@@ -54,6 +54,7 @@ Native Messaging 使用浏览器特定 manifest，不能共享一份宽松 allow
 - Protocol v2 message 必须 size-bounded、UUID-correlated、HMAC-authenticated、expiring、replay-protected。
 - Background worker 是 long-lived native-messaging port 的唯一所有者；popup 关闭不终止 desktop connection。
 - Desktop 和 extension unlock 独立；revoke 立即使 browser session/pending work 失效。
+- 系统锁定必须清除 Browser 解锁与待执行确认，保留配对身份；睡眠恢复必须先清除各入口明文授权。普通 desktop 锁定不替代 Browser 独立锁定。LAN 密文收发不授予 Browser 权限，解锁会话接收合并后必须使 fill/confirmation 缓存失效并通知界面刷新。
 - Operation 必须分类；mutation 需要 fresh gesture，destructive operation 还需要 command-bound one-use confirmation。
 - Import/SSH content 保持在 expiring main-process session，只向扩展返回 opaque ID 和安全 preview；response 不含 local path。
 - 普通 list/detail metadata 必须省略 protected value。Login `items.detail` 因包含 custom-field value，明确分类为 fresh-gesture `pageDisclosure`，不是普通 metadata；其 response 只用于当前 popup 操作，不得进入 extension storage、持久化 UI state、日志或 crash data。
@@ -92,9 +93,17 @@ Extension local storage 只可以保存 schema-validated、renderer-safe 的用�
 
 Discovery 只允许 field metadata、origin/document identity、handle 和 empty bit，禁止当前 value。Top-page origin 与 target-frame origin 必须在 discovery、authorization 和 assignment 全程分离绑定。
 
+页内选择与页面自动填充必须携带仅在当前 content script 内可解析的 document/target 引用；本地引用最多 64 个，60 秒失效，只保存 DOM 归属、不保存字段值。Background 必须限定发送者 frame，二次确认必须保留该引用及已有账号覆盖策略；失效引用必须返回空 discovery，禁止扩大到其他表单或 frame。最终写入过程中必须重验目标资格、文档和原表单归属。Popup 无页内目标的显式选择仍使用既有当前 tab discovery；这些引用不改变 native Browser RPC。
+
 场景识别必须以字段角色和表单簇为先：content script 在同一真实 form，或无 form 时的最小可见伪表单容器内识别 account、current-password、new-password、confirmation-password 和 OTP；再按显式 `autocomplete`/直接字段元数据、同簇密码结构、form action/page path/submit 语义、排除导航链接后的弱上下文分层判定。弱页面文案不得跨表单覆盖局部强信号，尤其“注册/创建账户”导航链接不得把账号 + 当前密码 + 登录提交按钮的簇判为 signup。冲突或低置信度必须保守回落；只有可靠 new-password 角色可以展示密码生成器。可靠 password-change 簇内的显式 Login 选择成功填入 current-password 后，content script 可以按本地生成器设置生成一次新密码，并且必须只同步写入同簇、仍为空的 new-password/confirmation-password；任一目标已有值时不得自动生成或覆盖。诊断结果只能包含有限理由代码和分数，不得包含字段 value。
 
 Content script 可以处理标准 input、textarea、select、contenteditable、open shadow root、extension 可访问的 closed root 以及允许执行的 same/cross-origin frame。DOM mutation 和 same-document navigation 后 debounce rescan。Canvas-only control 和不可访问 closed root 为 unsupported。
+
+内联资格判断必须先排除非填充用途和不可交互字段，再检查字段自身的标准 autocomplete、词语边界和同簇角色；不得仅以 checkout、SSH 或 developer-secret 场景为整个表单授予同一填充类型。Discovery 可以保留供显式 custom-field 匹配的未知字段，但这不自动赋予其页内图标。Mutation 后与候选响应落地前必须重验资格。菜单必须支持 Escape、Tab、方向键与输入法组合输入，位置必须限制在当前 frame 视口内。
+
+Content 与 Rust 字段排除词必须共享 `apps/tauri-desktop/src/shared/autofill-field-policy.json`；英文启发式必须尊重词语边界，允许 camelCase、下划线和空格分词，不得以 `statement` 包含 `state` 等子串推导字段。小尺寸 frame 内菜单必须限制宽高并可滚动；上下均不足时可以覆盖当前 frame 内的字段，不得向其他 frame 转发候选或受保护值。菜单必须随 visual viewport 平移或缩放重新定位。
+
+自定义元素延迟 attachShadow 必须使用有数量和期限上限的追踪：最多 256 个待处理宿主、每批 64 个轮转，未注册阶段最多 60 秒，注册后等待 root 最多 30 秒；轮询间隔必须限制在 250–2000 毫秒。超时宿主不得因普通重复扫描无限重启计时，页面上下文更新可以重新开始。Shadow root 内的 submit/formdata/keydown/focus/input/click 监听必须在卸载时清理，composed 事件必须去重。Assignment 开始前必须消费对应 handle 集；旧填充结束不得清除后续 discovery。History、hash、BFCache 和最终写入前的 URL 检查必须使旧文档身份失效。
 
 写入必须使用 native value setter 并 dispatch `input`/`change`。Page-load fill 仅限 login/OTP context、stored preference、one-shot 和 empty field；signup、password change/reset、card、identity、secret、SSH、re-prompt 和 overwrite 均禁止自动 disclosure。排序：exact path > exact origin > same-protocol host，remembered login 优先。
 
@@ -108,11 +117,17 @@ Content script 只在可信用户点击语义明确的获取/发送/重发验证
 
 插件 popup 打开或用户点击 OTP 字段页内图标时可以通过 `email.otp.candidates` 查询当前 HTTP(S) origin。Rust Email OTP service 必须拥有候选和 expiry，验证 origin 是有效 HTTP(S) origin 后返回全部未过期候选的有界 code/source/received/expiry 摘要，不得按当前网站与 sender domain 过滤；account address、subject、message ID、Provider credential 和邮件正文不得进入 Browser RPC。Popup 或页内候选关闭、隐藏、导航、锁定或断开清除对应组件内候选，禁止写入 background cache 或 extension storage；跨 origin frame 的页内查询必须 fail closed。
 
-用户在 popup 或 OTP 字段页内列表点击候选时调用 `email.otp.fill`；页内选择消息只可携带 candidate ID，不得回传 code。Background 重新 discovery 选择来源 tab 的当前 same-origin frame，desktop 按 candidate ID、expiry、origin、tab/frame/document/handle 重验，但 origin 只绑定 assignment、不用于候选过滤，并只为 empty、text-compatible OTP control 返回短时单次 assignment；不得覆盖非空字段、填入非 OTP control、记录 code/audit 或提交表单。Navigation、重复 discovery、candidate expiry、lock、revoke、disconnect、失败和成功后的重复执行必须 fail closed。
+用户在 popup 或 OTP 字段页内列表点击候选时调用 `email.otp.fill`；页内选择消息只可携带 candidate ID 与本地目标引用，不得回传 code。Background 重新 discovery 选择来源 tab 的当前 same-origin frame，页内选择必须进一步限定来源 frame 和表单簇；desktop 按 candidate ID、expiry、origin、tab/frame/document/handle 重验，但 origin 只绑定 assignment、不用于候选过滤，并只为 empty、text-compatible OTP control 返回短时单次 assignment；不得覆盖非空字段、填入非 OTP control、记录 code/audit 或提交表单。Navigation、重复 discovery、candidate expiry、lock、revoke、disconnect、失败和成功后的重复执行必须 fail closed。
 
 ## Capture
 
 Submission observation 可以对新生成或用户编辑的 login/card/identity 显示 Save/Ignore。只有用户确认才写入；观察到 submit 不等于 server success。未修改的 autofilled password 不得重复 capture。
+
+Capture 与生成填充必须复用局部表单归属，包含 `form=` 关联控件和可访问 Shadow DOM；非 composed submit 在对应 root 内监听。SPA 保存点击必须在页面处理器可能同步销毁输入框前提取候选，捕获仍仅触发用户确认。生成记录必须绑定所属表单，不能在相邻表单提交时使用；字段实际提交的新密码优先于先前生成记录。
+
+原生 `form.submit()` 绕过 submit 事件时可以观察 formdata，但只能从关联 DOM 表单提取支持的候选，不得序列化任意 FormData 项；脚本构造 FormData 也可能产生该事件，因此仍不得推断登录成功。Enter 观察必须排除 IME、已取消事件、打开的候选菜单、OTP 和无效表单；input 型保存按钮必须按其 value 判定动作。多个新密码/确认字段存在空值或不一致时必须拒绝密码候选。
+
+同一 capture 从 popup、通知和独立确认窗口并发确认时必须共享一次正在进行的保存；完成或失败后清除该请求引用。过期、已消费或已取消的 capture 不得重新执行 mutation。
 
 插件从网页识别出的 developer/service secret 只有在用户确认后才可以通过 desktop privileged operation 写入加密 Vault，创建时 `masterPasswordReprompt` 必须默认为 `false`；用户可以在项目编辑器中显式开启二次验证，既有项目不得被改写。
 

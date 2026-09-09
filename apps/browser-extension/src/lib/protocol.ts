@@ -90,6 +90,9 @@ export const ApprovedFillSchema = z.object({
   frames: z.array(ApprovedFillFrameSchema).min(1).max(16),
 });
 
+export const AutofillTargetSchema = z.object({ documentId: z.string().uuid(), targetId: z.string().uuid() });
+export type AutofillTarget = z.infer<typeof AutofillTargetSchema>;
+
 export const ContentMessageSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("vaultmesh.detect-page-information") }),
   z.object({ kind: z.literal("vaultmesh.scan-totp-qr") }),
@@ -102,6 +105,7 @@ export const ContentMessageSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("vaultmesh.discover-fields"),
     requestId: z.string().uuid(),
+    target: AutofillTargetSchema.optional(),
   }),
   z.object({ kind: z.literal("vaultmesh.autofill-rescan") }),
   z.object({
@@ -277,14 +281,15 @@ export const PopupMessageSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("vaultmesh.open-unlock") }),
   z.object({ kind: z.literal("vaultmesh.security-policy.updated") }),
   z.object({ kind: z.literal("vaultmesh.email-otp-fill"), candidateId: z.string().uuid() }),
-  z.object({ kind: z.literal("vaultmesh.autofill-page-ready"), documentId: z.string().uuid(), signature: boundedText(512), pageContext: PageContextSchema }),
+  z.object({ kind: z.literal("vaultmesh.autofill-page-ready"), documentId: z.string().uuid(), signature: boundedText(512), pageContext: PageContextSchema, target: AutofillTargetSchema.optional() }),
   z.object({ kind: z.literal("vaultmesh.otp-watch-requested") }),
   z.object({ kind: z.literal("vaultmesh.autofill-candidates"), fieldKind: AutofillItemKindSchema, pageContext: PageContextSchema }),
-  z.object({ kind: z.literal("vaultmesh.email-otp-select"), candidateId: z.string().uuid() }),
+  z.object({ kind: z.literal("vaultmesh.email-otp-select"), candidateId: z.string().uuid(), target: AutofillTargetSchema.optional() }),
   z.object({
     kind: z.literal("vaultmesh.autofill-select"),
     selectedItem: selectedItemSchema,
     replaceExistingAccount: z.boolean().optional(),
+    target: AutofillTargetSchema.optional(),
   }),
   z.object({ kind: z.literal("vaultmesh.save-capture-pending") }),
   z.object({

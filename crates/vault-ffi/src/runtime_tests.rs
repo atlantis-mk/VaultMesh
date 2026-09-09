@@ -898,3 +898,92 @@ fn ct_lan_sync_related_records_merge_together_and_invalidate_credential_policy()
     assert_eq!(a.sync_state().unwrap().entries,b.sync_state().unwrap().entries);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+fn mailbox_test_pair() -> (DesktopRuntime, DesktopRuntime) {
+    let mut a = DesktopRuntime::new(unique_path("mail-a")).unwrap();
+    let mut b = DesktopRuntime::new(unique_path("mail-b")).unwrap();
+    a.create("mailbox synthetic master".into()).unwrap();
+    b.create("mailbox synthetic master".into()).unwrap();
+    a.sync_authorize("lan-peer-b", &"b".repeat(64), true).unwrap();
+    b.sync_authorize("lan-peer-a", &"a".repeat(64), true).unwrap();
+    let a_id = a.sync_state().unwrap().vault_id; let b_id = b.sync_state().unwrap().vault_id;
+    let ak = a.sync_channel_offer("lan-peer-b").unwrap(); let bk = b.sync_channel_offer("lan-peer-a").unwrap();
+    a.sync_accept_channel("lan-peer-b", &"b".repeat(64), b_id, &bk).unwrap();
+    b.sync_accept_channel("lan-peer-a", &"a".repeat(64), a_id, &ak).unwrap();
+    (a,b)
+}
+fn mailbox_add(runtime: &mut DesktopRuntime, title: &str) {
+    runtime.execute("items.add", json!({"title":title,"username":"synthetic","password":"mailbox-secret-canary","url":"https://example.test","notes":null,"folder":null,"favorite":false,"totpSecret":null,"recoveryCodes":[],"additionalUrls":[],"autofillOnPageLoad":false,"masterPasswordReprompt":false,"customFields":[]})).unwrap();
+}
+fn mailbox_cleanup(runtime: DesktopRuntime) {
+    let path = runtime.current_path(); drop(runtime);
+    let _ = std::fs::remove_file(path.with_file_name(format!("{}.lan-mailbox",path.file_name().unwrap().to_string_lossy())));
+    let _ = std::fs::remove_file(path);
+}
+#[test]
+fn ct_lan_sync_mailbox_cold_cache_and_browser_unlock_keep_desktop_locked() {
+    let (mut a, mut b) = mailbox_test_pair();
+    mailbox_add(&mut a, "queued while offline");
+    let packet = a.sync_relay().peer("lan-peer-b").unwrap().outgoing.unwrap();
+    let path = b.current_path();
+    b.lock(); b.sync_relay().store("lan-peer-a", packet, false).unwrap();
+    assert!(!b.status().unlocked);
+    let proof = b.sync_relay().proof().unwrap(); drop(b);
+    let mut desktop = DesktopRuntime::new(path.clone()).unwrap();
+    assert!(!desktop.sync_relay().profile().unwrap().1);
+    assert!(desktop.sync_relay().matches_vault());
+    assert_eq!(desktop.sync_relay().proof().unwrap(), proof);
+    let mut browser = DesktopRuntime::new(path).unwrap();
+    browser.unlock_for_browser("mailbox synthetic master".into()).unwrap();
+    assert_eq!(browser.status().item_count, 1);
+    assert!(!desktop.status().unlocked);
+    mailbox_add(&mut browser, "plugin-only update");
+    assert!(desktop.sync_relay().summary("lan-peer-a").unwrap().data.is_some());
+    let before = std::fs::read(browser.current_path()).unwrap();
+    browser.sync_pump().unwrap();
+    assert_eq!(std::fs::read(browser.current_path()).unwrap(), before, "repeat receipt must not rewrite Vault");
+    desktop.lock(); drop(desktop); mailbox_cleanup(a); mailbox_cleanup(browser);
+}
+#[test]
+fn ct_lan_sync_mailbox_disk_failures_never_ack_or_lose_committed_edits() {
+    let (mut a, mut b) = mailbox_test_pair();
+    crate::sync_relay::FAIL_CACHE.with(|v| v.set(true));
+    mailbox_add(&mut a, "saved despite unavailable outbox");
+    assert_eq!(a.status().item_count, 1);
+    assert!(a.sync_relay().failed());
+    crate::sync_relay::FAIL_CACHE.with(|v| v.set(false));
+    a.sync_pump().unwrap();
+    let packet = a.sync_relay().peer("lan-peer-b").unwrap().outgoing.unwrap();
+    crate::sync_relay::FAIL_CACHE.with(|v| v.set(true));
+    assert!(b.sync_relay().store("lan-peer-a", packet.clone(), false).is_err());
+    assert!(b.sync_relay().summary("lan-peer-a").unwrap().received.is_none());
+    crate::sync_relay::FAIL_CACHE.with(|v| v.set(false));
+    crate::sync_relay::TEST_CACHE_LIMIT.with(|v| v.set(1));
+    assert!(b.sync_relay().store("lan-peer-a", packet.clone(), false).is_err());
+    assert!(b.sync_relay().summary("lan-peer-a").unwrap().received.is_none());
+    crate::sync_relay::TEST_CACHE_LIMIT.with(|v| v.set(crate::sync_relay::RELAY_MAX_BYTES));
+    b.sync_relay().store("lan-peer-a", packet, false).unwrap();
+    let before = std::fs::read(b.current_path()).unwrap();
+    crate::storage::FAIL_WRITE.with(|n| n.set(1));
+    b.sync_pump().unwrap(); // Local reads survive a failed network merge.
+    assert_eq!(std::fs::read(b.current_path()).unwrap(), before);
+    assert_eq!(b.status().item_count, 0);
+    assert!(b.sync_relay().summary("lan-peer-a").unwrap().receipt.is_none());
+    b.sync_pump().unwrap();
+    assert_eq!(b.status().item_count, 1);
+    assert!(b.sync_relay().summary("lan-peer-a").unwrap().receipt.is_some());
+    mailbox_cleanup(a); mailbox_cleanup(b);
+}
+
+#[test]
+fn ct_lan_sync_stale_runtime_cannot_republish_revoked_authority() {
+    let (mut a,b) = mailbox_test_pair();
+    let mut stale = DesktopRuntime::new(a.current_path()).unwrap();
+    stale.unlock("mailbox synthetic master".into()).unwrap();
+    a.sync_authorize("lan-peer-b", &"b".repeat(64), false).unwrap();
+    let before = std::fs::read(a.current_path()).unwrap();
+    crate::sync_relay::publish(stale.vault.as_ref().unwrap());
+    assert!(a.sync_relay().route("lan-peer-b").is_err());
+    assert_eq!(std::fs::read(a.current_path()).unwrap(), before);
+    drop(stale); mailbox_cleanup(a); mailbox_cleanup(b);
+}

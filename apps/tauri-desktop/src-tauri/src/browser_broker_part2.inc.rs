@@ -3,6 +3,7 @@
 /// platform slice.
 #[cfg(unix)]
 pub struct BrowserBrokerUnixListener {
+    broker: std::sync::Weak<Mutex<BrowserBrokerCore>>,
     endpoint: PathBuf,
     stopping: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -21,6 +22,7 @@ impl BrowserBrokerUnixListener {
         listener.set_nonblocking(true)?;
         let stopping = Arc::new(AtomicBool::new(false));
         let worker_stopping = Arc::clone(&stopping);
+        let owned_broker = Arc::downgrade(&broker);
         let thread = thread::spawn(move || {
             while !worker_stopping.load(Ordering::Acquire) {
                 match listener.accept() {
@@ -65,6 +67,7 @@ impl BrowserBrokerUnixListener {
             }
         });
         Ok(Self {
+            broker: owned_broker,
             endpoint,
             stopping,
             thread: Mutex::new(Some(thread)),
@@ -80,6 +83,7 @@ impl BrowserBrokerUnixListener {
         }
         let _ = fs::remove_file(&self.endpoint);
     }
+    pub(crate) fn lock_vault(&self) { if let Some(broker) = self.broker.upgrade() { if let Ok(mut b) = broker.lock() { b.lock_for_system(); } } }
 }
 
 #[cfg(unix)]

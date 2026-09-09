@@ -26,7 +26,7 @@ describe("Email OTP popup contract", () => {
     const content = readFileSync(resolve(process.cwd(), "src/lib/autofill-page.ts"), "utf8");
     expect(background).toContain('emailOtpCandidates: emailOtp.status === "ready" ? emailOtp.candidates : []');
     expect(background).toContain('page.fillOrigin !== page.topOrigin');
-    expect(background).toContain('fillEmailOtpForTab(page.tabId, page.topOrigin, page.framePageUrl, parsed.data.candidateId)');
+    expect(background).toContain('fillEmailOtpForTab(page.tabId, page.topOrigin, page.framePageUrl, parsed.data.candidateId, parsed.data.target, sender.frameId ?? 0)');
     expect(content).toContain('kind: "vaultmesh.email-otp-select", candidateId: candidate.id');
     expect(content).not.toContain('kind: "vaultmesh.email-otp-select", candidateId: candidate.id, code: candidate.code');
   });

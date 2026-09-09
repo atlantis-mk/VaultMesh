@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn maps_qualified_bare_login_controls_and_ssh_host_without_inventing_metadata() {
+    let mut values = FillValues::default();
+    values.values.insert("username".into(), "synthetic-user".into());
+    values.values.insert("password".into(), "synthetic-password".into());
+    values.values.insert("host".into(), "server.example.test".into());
+    let mut field = DiscoveredField {
+        handle: Uuid::new_v4(), control: "input".into(), input_type: Some("password".into()),
+        max_length: None, is_empty: true, autocomplete: vec![], label: String::new(),
+        name: String::new(), id: String::new(), placeholder: String::new(), context: "login".into(), options: None,
+    };
+    assert_eq!(map_field("login", &values, &field), Some("synthetic-password".into()));
+    field.context = "password-reset".into();
+    assert_eq!(map_field("login", &values, &field), None);
+    field.context = "login".into();
+    field.input_type = Some("email".into());
+    assert_eq!(map_field("login", &values, &field), Some("synthetic-user".into()));
+    field.input_type = Some("text".into());
+    field.context = "ssh-console".into();
+    field.name = "host".into();
+    assert_eq!(map_field("ssh", &values, &field), Some("server.example.test".into()));
+    field.name = "ghost".into();
+    assert_eq!(map_field("ssh", &values, &field), None);
+}
+
+#[test]
 fn maps_account_name_field_to_login_username() {
     let mut values = FillValues::default();
     values
@@ -32,6 +57,22 @@ fn identity_heuristic_handles_zero_or_ambiguous_matches_without_panicking() {
     assert_eq!(identity_heuristic("save button"), None);
     assert_eq!(identity_heuristic("email field"), Some("email"));
     assert_eq!(identity_heuristic("email phone field"), None);
+}
+
+#[test]
+fn field_word_boundaries_and_shared_exclusions_prevent_substring_matches() {
+    for name in ["statement", "hometown", "transport", "timezone"] {
+        assert_eq!(identity_heuristic(name), None, "{name}");
+    }
+    for name in ["firstName", "first_name", "First name", "firstname"] {
+        assert_eq!(identity_heuristic(name), Some("firstName"), "{name}");
+    }
+    for name in ["searchEmail", "coupon_code", "feedback message", "图形验证码"] {
+        assert!(excluded_fill_field(name), "{name}");
+    }
+    for name in ["researcherEmail", "discountedName", "username", "one-time-code"] {
+        assert!(!excluded_fill_field(name), "{name}");
+    }
 }
 
 #[test]

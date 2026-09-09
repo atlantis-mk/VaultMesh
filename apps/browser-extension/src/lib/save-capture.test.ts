@@ -5,6 +5,13 @@ import { captureSubmittedData } from "./save-capture";
 afterEach(() => { document.body.innerHTML = ""; });
 
 describe("captureSubmittedData", () => {
+  it("does not offer a mismatched or empty new-password confirmation for saving", () => {
+    for (const confirmation of ["different password", ""]) {
+      document.body.innerHTML = `<form><input type="password" autocomplete="current-password" value="old password"><input type="password" autocomplete="new-password" value="new password"><input type="password" autocomplete="new-password"></form>`;
+      document.querySelectorAll<HTMLInputElement>("input")[2]!.value = confirmation;
+      expect(captureSubmittedData(document.querySelector("form")!, "https://example.test/settings", { context: "password-change" }).login).toBeUndefined();
+    }
+  });
   it("captures a newly submitted login without exposing unrelated fields", () => {
     document.body.innerHTML = `<form>
       <input autocomplete="username" value="ada@example.test">

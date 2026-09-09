@@ -98,8 +98,8 @@ pnpm typecheck
 
 ## LAN 同步验收
 
-- `CT-LAN-SYNC-001`：Core 版本/墓碑/合并/历史、format 3→4 安全升级与恢复、真实 Rust 双实例 TLS、授权与锁定清理、重试与原子回滚、renderer-safe contracts。
-- `AT-LAN-SYNC-001`：packaged macOS↔macOS、Windows↔Windows、macOS↔Windows，双端独立主密码、离线修改与删除、重连、系统锁定/睡眠、防火墙、备份升级恢复及新旧 Passkey。
+- `CT-LAN-SYNC-001`：Core 版本/墓碑/合并/历史、format 3→4 安全升级与恢复、真实 Rust 双实例 TLS、授权与锁定清理、重试与原子回滚、renderer-safe contracts。同步还必须覆盖锁定密文收发、逐设备合并收据、错通道/重放/篡改、队列满与缓存失败、三台以上并发及乱序收敛、持续 TLS 推送与退避。
+- `AT-LAN-SYNC-001`：packaged macOS↔macOS、Windows↔Windows、macOS↔Windows，双端独立主密码、离线修改与删除、重连、系统锁定/睡眠、防火墙、备份升级恢复及新旧 Passkey；至少三台设备覆盖锁定接收后插件解锁、睡眠恢复、逐边撤销与在线秒级生效延迟。
 
 ## 发布门禁
 

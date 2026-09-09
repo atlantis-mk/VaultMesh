@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { analyzeControlSemantics, applyAssignments, classifyControl, discoverFields, hasLoginFields, isNewPasswordControl, loginFormSignature, selectAutofillPageContext, shouldPreserveExistingLoginAccount } from "./form-discovery";
+import { analyzeControlSemantics, applyAssignments, classifyControl, discardFieldHandles, discoverFields, hasLoginFields, isNewPasswordControl, loginFormSignature, selectAutofillPageContext, shouldPreserveExistingLoginAccount } from "./form-discovery";
 
 function makeVisible(element: HTMLElement) {
   Object.defineProperty(element, "getClientRects", {
@@ -110,9 +110,12 @@ describe("discoverFields", () => {
     document.body.innerHTML = `
       <div hidden><input id="hidden-attribute"></div>
       <div aria-hidden="true"><input id="aria-hidden"></div>
+      <div inert><input id="inert"></div>
       <div style="display:none"><input id="display-none"></div>
       <div style="visibility:hidden"><input id="visibility-hidden"></div>
+      <div style="opacity:0"><input id="transparent"></div>
       <div style="height:0;overflow:hidden"><input id="clipped"></div>
+      <input id="aria-disabled" aria-disabled="true">
       <div><input id="visible" autocomplete="username"></div>
     `;
     document.querySelectorAll<HTMLElement>("input").forEach(makeVisible);
@@ -406,6 +409,22 @@ describe("discoverFields", () => {
     expect(result.results).toEqual([{ handle: descriptors[0]!.handle, status: "missing" }]);
   });
 
+  it("retires discovered handles on same-document navigation before a delayed assignment arrives", async () => {
+    document.body.innerHTML = `<input id="account" autocomplete="username">`;
+    const input = document.querySelector<HTMLInputElement>("#account")!;
+    makeVisible(input);
+    const { handles, descriptors } = discoverFields(document);
+    discardFieldHandles(handles);
+
+    const result = await applyAssignments({
+      documentId: "953370ec-4dc7-4c77-a6e0-f2a4f6e37f03", currentOrigin: "https://example.test", fields: handles,
+      message: { kind: "vaultmesh.apply-assignments", requestId: "a5370ec1-4dc7-4c77-a6e0-f2a4f6e37f03", documentId: "953370ec-4dc7-4c77-a6e0-f2a4f6e37f03", frameOrigin: "https://example.test", expiresAt: new Date(Date.now() + 10_000).toISOString(), assignments: [{ handle: descriptors[0]!.handle, value: "synthetic-account", overwrite: true }] },
+    });
+
+    expect(result.results).toEqual([{ handle: descriptors[0]!.handle, status: "missing" }]);
+    expect(input.value).toBe("");
+  });
+
   it("rejects origin, document, and expiration races without touching the page", async () => {
     document.body.innerHTML = `<input id="username">`;
     makeVisible(document.querySelector("input")!);
@@ -489,5 +508,28 @@ describe("discoverFields", () => {
     const result = await pending;
     expect(result.results).toEqual([{ handle: descriptors[0]!.handle, status: "filled" }]);
     expect(input.value).toBe("ab");
+  });
+
+  it("stops a pending assignment when its document identity changes", async () => {
+    document.body.innerHTML = `<input id="account" autocomplete="username">`;
+    const input = document.querySelector<HTMLInputElement>("#account")!;
+    let visible = true;
+    Object.defineProperty(input, "getClientRects", { value: () => visible ? [{ width: 10, height: 10 }] : [] });
+    const { handles, descriptors } = discoverFields(document);
+    visible = false;
+    const documentId = "953370ec-4dc7-4c77-a6e0-f2a4f6e37f03";
+    let activeDocumentId = documentId;
+
+    const pending = applyAssignments({
+      documentId, currentDocumentId: () => activeDocumentId, currentOrigin: "https://example.test", fields: handles,
+      message: { kind: "vaultmesh.apply-assignments", requestId: "a5370ec1-4dc7-4c77-a6e0-f2a4f6e37f03", documentId, frameOrigin: "https://example.test", expiresAt: new Date(Date.now() + 10_000).toISOString(), assignments: [{ handle: descriptors[0]!.handle, value: "synthetic-account", overwrite: true }] },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    activeDocumentId = crypto.randomUUID();
+    visible = true;
+
+    const result = await pending;
+    expect(result).toEqual({ status: "stale-document", results: [] });
+    expect(input.value).toBe("");
   });
 });

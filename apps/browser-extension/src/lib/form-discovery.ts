@@ -1,5 +1,6 @@
 import type { ContentMessage, FieldDescriptor, PageContext } from "@/lib/protocol";
 import { createUuid } from "@/lib/uuid";
+import fieldPolicy from "../../../tauri-desktop/src/shared/autofill-field-policy.json";
 
 type NativeControl = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 export type SupportedControl = NativeControl | HTMLElement;
@@ -63,6 +64,16 @@ export function discoverFields(root: DiscoveryRoot) {
   return { handles, descriptors };
 }
 
+/**
+ * History-state navigation keeps a content script alive, but changes the
+ * page context in which its discovery handles were issued. Clear those
+ * handles before a replacement scan so an approval for the old route cannot
+ * write into a reused same-document control.
+ */
+export function discardFieldHandles(handles: Map<string, SupportedControl>) {
+  handles.clear();
+}
+
 function discoveryPriority(control: SupportedControl) {
   if (classifyControl(control)) return 3;
   if (control.closest('form,[role="form"],dialog,[role="dialog"]')) return 2;
@@ -84,16 +95,31 @@ export function classifyControl(control: Element): AutofillFieldKind | null {
   if (!isControlElement(control) || !isSupportedControl(control)) return null;
   const metadata = getMetadata(control);
   const tokens = metadata.autocomplete;
-  const text = [metadata.label, metadata.name, metadata.id, metadata.placeholder].join(" ");
+  const text = qualificationText(metadata);
+  if (isNonAutofillControl(control, text)) return null;
   const semantics = analyzeControlSemantics(control);
   const context = semantics.context;
-  if (context === "developer-secret") return "secret";
-  if (context === "ssh-console") return "ssh";
-  if (context === "checkout") return "card";
+  if (context === "developer-secret" && !(control instanceof HTMLSelectElement) && /\b(?:api key|access token|client secret|webhook secret|password|credential|secret|token|key|account|project|tenant|organization|username|provider|vendor)\b|密码|凭据|密钥|令牌|账号|项目|租户|服务商|平台/i.test(text)) return "secret";
+  if (context === "ssh-console" && !(control instanceof HTMLSelectElement) && /\b(?:private key|public key|authorized keys?|ssh key|passphrase|key password|ssh password|login password|ssh user|username|login|host|hostname|server|port)\b|私钥|公钥|口令|密码|账号|用户名|服务器|主机|端口/i.test(text)) return "ssh";
+  if (tokens.some((token) => CARD_AUTOCOMPLETE.has(token)) || /\b(?:card number|cc num|cardholder|name on card|cvv|cvc|security code|billing address)\b|卡号|持卡人|安全码|账单地址/i.test(text) || context === "checkout" && /\b(?:expiration|expiry)\b|有效期|到期/i.test(text)) return "card";
   if (["login", "signup", "password-change", "password-reset", "otp"].includes(context) && semantics.role !== "other") return "login";
-  if (tokens.some((token) => IDENTITY_AUTOCOMPLETE.has(token)) || /name|e-?mail|phone|tel|address|city|state|province|postal|zip|country|department|姓名|邮箱|电话|手机|地址|城市|省|邮编|国家|部门/i.test(text)) return "identity";
+  if (tokens.some((token) => IDENTITY_AUTOCOMPLETE.has(token)) || /\b(?:first name|given name|middle name|last name|family name|surname|full name|e ?mail|phone|mobile|telephone|birthday|birth date|organization|company|employer|department|job title|website|street|address line [12]|city|province|postal|zip|country)\b|姓名|名字|姓氏|邮箱|电话|手机|城市|邮编|国家|部门|出生日期|公司/i.test(text)) return "identity";
+  if (context === "profile" && /\b(?:state|region|suite|unit|apartment|position|team)\b|省|州|地区/i.test(text)) return "identity";
   return null;
 }
+
+function qualificationText(metadata: ReturnType<typeof getMetadata>) {
+  return metadataText(metadata).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ");
+}
+
+function isNonAutofillControl(control: SupportedControl, text = qualificationText(getMetadata(control))) {
+  const words = new Set(text.toLowerCase().split(/[^a-z0-9]+/));
+  return control instanceof HTMLInputElement && control.type === "search" ||
+    Boolean(control.closest('[role="search"],search')) ||
+    fieldPolicy.excludedWords.some((word) => words.has(word)) || fieldPolicy.excludedText.some((word) => text.includes(word));
+}
+
+const CARD_AUTOCOMPLETE = new Set(["cc-name", "cc-number", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-csc"]);
 
 export function selectAutofillPageContext(fields: FieldDescriptor[]): PageContext {
   // Only fillable contexts participate in page-ready selection. Other form
@@ -113,7 +139,7 @@ type CredentialContext = "login" | "signup" | "password-change" | "password-rese
 export function analyzeControlSemantics(control: SupportedControl): ControlSemanticAnalysis {
   const cluster = semanticCluster(control);
   const role = credentialFieldRole(control, cluster);
-  if (role === "otp" || isSegmentedOtpCluster(cluster)) {
+  if (role === "otp" || isOtpDigitControl(control) && isSegmentedOtpCluster(cluster)) {
     return {
       context: "otp",
       role: "otp",
@@ -265,15 +291,18 @@ export function credentialFieldRole(control: SupportedControl, cluster = semanti
 
 function credentialFieldRoleWithoutStructure(control: SupportedControl): CredentialFieldRole {
   const metadata = getMetadata(control);
-  const text = metadataText(metadata);
+  const text = qualificationText(metadata);
+  if (isNonAutofillControl(control, text)) return "other";
+  if (control instanceof HTMLInputElement && !["text", "email", "tel", "number", "password"].includes(control.type)) return "other";
+  if (control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement) return "other";
   if (metadata.autocomplete.includes("one-time-code") || OTP_METADATA.test(text)) return "otp";
   if (metadata.autocomplete.includes("username") || metadata.autocomplete.includes("email")) return "account";
   if (control instanceof HTMLInputElement && (control.type === "email" || control.type === "tel")) return "account";
-  if (/user(name)?|login|account|apple[\s_-]*id|e-?mail|phone|mobile|用户名|账号|邮箱|电话|手机/i.test(text)) return "account";
+  if (/\b(?:user ?name|login|account|apple id|e ?mail|phone|mobile)\b|用户名|账号|邮箱|电话|手机/i.test(text)) return "account";
   return "other";
 }
 
-function semanticCluster(control: SupportedControl): SemanticCluster {
+export function semanticCluster(control: SupportedControl): SemanticCluster {
   const explicit = control instanceof HTMLInputElement && control.form
     ? control.form
     : control.closest('form,[role="form"],dialog,[role="dialog"],fieldset');
@@ -297,10 +326,7 @@ function semanticCluster(control: SupportedControl): SemanticCluster {
 }
 
 function semanticControls(root: ParentNode) {
-  const descendants = Array.from(root.querySelectorAll<SupportedControl>('input,textarea,select,[contenteditable]:not([contenteditable="false"])'));
-  const controls = root instanceof Element && root.matches('input,textarea,select,[contenteditable]:not([contenteditable="false"])')
-    ? [root as SupportedControl, ...descendants]
-    : descendants;
+  const controls = formControls(root);
   return controls
     .filter(isSemanticallyEligibleControl)
     .slice(0, 80);
@@ -375,31 +401,20 @@ function strongClusterIntent(cluster: SemanticCluster, document: Document): Cred
 
 function isSegmentedOtpCluster(cluster: SemanticCluster) {
   const headingSuggestsOtp = OTP_METADATA.test(semanticHeadingText(cluster));
-  const digitControls = cluster.controls.filter((candidate) => candidate instanceof HTMLInputElement &&
-    candidate.maxLength === 1 && ["", "text", "tel", "number"].includes(candidate.type));
+  const digitControls = cluster.controls.filter(isOtpDigitControl);
   const hasPassword = cluster.controls.some((candidate) => candidate instanceof HTMLInputElement && candidate.type === "password");
   return digitControls.length >= 4 && (headingSuggestsOtp || !hasPassword);
 }
 
+function isOtpDigitControl(control: SupportedControl) {
+  return control instanceof HTMLInputElement && control.maxLength === 1 && ["text", "tel", "number"].includes(control.type);
+}
+
 function isSemanticallyEligibleControl(control: SupportedControl) {
-  if ((isNativeControl(control) && control.disabled) ||
-    ((control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) && control.readOnly) ||
-    !isSemanticallyVisible(control)) return false;
+  if (isInteractionDisabled(control) || !isSemanticallyVisible(control)) return false;
   if (control instanceof HTMLInputElement && !TEXT_INPUT_TYPES.has(control.type)) return false;
   const metadata = getMetadata(control);
   return !SENSITIVE_METADATA.test([metadata.label, metadata.name, metadata.id, metadata.placeholder].join(" "));
-}
-
-function isSemanticallyVisible(control: HTMLElement) {
-  const view = control.ownerDocument.defaultView;
-  if (!view) return false;
-  for (let element: Element | null = control; element; element = composedParentElement(element)) {
-    const style = view.getComputedStyle(element);
-    if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden")?.toLowerCase() === "true") return false;
-    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
-    if (element !== control && clipsCollapsedContent(style)) return false;
-  }
-  return true;
 }
 
 export function passwordFieldPurpose(control: Element): PasswordFieldPurpose | null {
@@ -462,17 +477,20 @@ export async function applyAssignments({
   documentId,
   fields,
   currentOrigin,
+  currentDocumentId,
 }: {
   message: Extract<ContentMessage, { kind: "vaultmesh.apply-assignments" }>;
   documentId: string;
   fields: Map<string, SupportedControl>;
   currentOrigin: string;
+  currentDocumentId?: () => string;
 }) {
-  if (
-    message.documentId !== documentId ||
-    message.frameOrigin !== currentOrigin ||
-    Date.parse(message.expiresAt) <= Date.now()
-  ) {
+  const assignmentIsCurrent = () =>
+    message.documentId === documentId &&
+    (currentDocumentId == null || currentDocumentId() === documentId) &&
+    message.frameOrigin === currentOrigin &&
+    Date.parse(message.expiresAt) > Date.now();
+  if (!assignmentIsCurrent()) {
     return { status: "stale-document" as const, results: [] };
   }
 
@@ -482,7 +500,7 @@ export async function applyAssignments({
   const assignments = [...message.assignments].sort((left, right) =>
     assignmentPriority(fields.get(left.handle)) - assignmentPriority(fields.get(right.handle)),
   );
-  const results = [];
+  const results: Array<{ handle: string; status: string }> = [];
 
   if (message.clearBeforeFill) {
     let clearedAny = false;
@@ -493,8 +511,12 @@ export async function applyAssignments({
           return control ? [control] : [];
         });
     for (const control of controlsToClear) {
+      if (!assignmentIsCurrent()) return { status: "stale-document" as const, results };
       if (!control.isConnected || !hasValue(control)) continue;
-      if (!await waitForControlReady(control, message.expiresAt)) continue;
+      if (!await waitForControlReady(control, message.expiresAt, assignmentIsCurrent)) {
+        if (!assignmentIsCurrent()) return { status: "stale-document" as const, results };
+        continue;
+      }
       if (!assignValue(control, "")) continue;
       dispatchInput(control, null, "deleteContentBackward");
       control.dispatchEvent(new Event("change", { bubbles: true }));
@@ -504,6 +526,7 @@ export async function applyAssignments({
   }
 
   for (const assignment of assignments) {
+    if (!assignmentIsCurrent()) return { status: "stale-document" as const, results };
     const control = fields.get(assignment.handle);
     if (!control || !control.isConnected) {
       results.push({ handle: assignment.handle, status: "missing" as const });
@@ -513,7 +536,8 @@ export async function applyAssignments({
       results.push({ handle: assignment.handle, status: "skipped-non-empty" as const });
       continue;
     }
-    if (!await waitForControlReady(control, message.expiresAt)) {
+    if (!await waitForControlReady(control, message.expiresAt, assignmentIsCurrent)) {
+      if (!assignmentIsCurrent()) return { status: "stale-document" as const, results };
       results.push({ handle: assignment.handle, status: "not-ready" as const });
       continue;
     }
@@ -524,7 +548,8 @@ export async function applyAssignments({
         continue;
       }
       dispatchInput(control);
-    } else if (!await typeValue(control, assignment.value, message.expiresAt)) {
+    } else if (!await typeValue(control, assignment.value, message.expiresAt, assignmentIsCurrent)) {
+      if (!assignmentIsCurrent()) return { status: "stale-document" as const, results };
       results.push({ handle: assignment.handle, status: "invalid-value" as const });
       continue;
     }
@@ -541,28 +566,26 @@ function assignmentPriority(control: SupportedControl | undefined) {
   return control instanceof HTMLInputElement && control.type === "password" ? 1 : 0;
 }
 
-async function waitForControlReady(control: SupportedControl, expiresAt: string) {
+async function waitForControlReady(control: SupportedControl, expiresAt: string, assignmentIsCurrent: () => boolean = () => true) {
   const deadline = Math.min(Date.parse(expiresAt), Date.now() + CONTROL_READY_TIMEOUT_MS);
-  while (Date.now() < deadline) {
+  while (assignmentIsCurrent() && Date.now() < deadline) {
     if (isControlReady(control)) return true;
     await delay(CONTROL_READY_POLL_MS);
   }
-  return isControlReady(control);
+  return assignmentIsCurrent() && isControlReady(control);
 }
 
 function isControlReady(control: SupportedControl) {
-  return control.isConnected &&
-    !(isNativeControl(control) && control.disabled) &&
-    (!(control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) || !control.readOnly) &&
-    isVisible(control);
+  return control.isConnected && isSupportedControl(control);
 }
 
-async function typeValue(control: Exclude<SupportedControl, HTMLSelectElement>, value: string, expiresAt: string) {
+async function typeValue(control: Exclude<SupportedControl, HTMLSelectElement>, value: string, expiresAt: string, assignmentIsCurrent: () => boolean = () => true) {
+  if (!assignmentIsCurrent()) return false;
   control.focus({ preventScroll: true });
   assignValue(control, "");
   let typed = "";
   for (const character of Array.from(value)) {
-    if (!isControlReady(control) || Date.parse(expiresAt) <= Date.now()) break;
+    if (!assignmentIsCurrent() || !isControlReady(control) || Date.parse(expiresAt) <= Date.now()) break;
     typed += character;
     assignValue(control, typed);
     dispatchInput(control, character);
@@ -588,11 +611,7 @@ function isHttpOrigin(value: string) {
 }
 
 function isSupportedControl(control: SupportedControl) {
-  if (
-    (isNativeControl(control) && control.disabled) ||
-    ((control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) && control.readOnly) ||
-    !isVisible(control)
-  ) {
+  if (isInteractionDisabled(control) || !isVisible(control) || isNonAutofillControl(control)) {
     return false;
   }
   if (control instanceof HTMLInputElement && !TEXT_INPUT_TYPES.has(control.type)) {
@@ -681,15 +700,33 @@ function getLabels(control: SupportedControl) {
 }
 
 function isVisible(control: SupportedControl) {
+  return isSemanticallyVisible(control) && control.getClientRects().length > 0;
+}
+
+function isSemanticallyVisible(control: HTMLElement) {
   const view = control.ownerDocument.defaultView;
   if (!view) return false;
   for (let element: Element | null = control; element; element = composedParentElement(element)) {
     const style = view.getComputedStyle(element);
-    if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden")?.toLowerCase() === "true") return false;
+    if (
+      element.hasAttribute("hidden") ||
+      element.hasAttribute("inert") ||
+      element.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
+      style.contentVisibility === "hidden" ||
+      Number.parseFloat(style.opacity) <= 0.01
+    ) return false;
     if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
     if (element !== control && clipsCollapsedContent(style)) return false;
   }
-  return control.getClientRects().length > 0;
+  return true;
+}
+
+function isInteractionDisabled(control: SupportedControl) {
+  return (isNativeControl(control) && control.disabled) ||
+    ((control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) && control.readOnly) ||
+    control.matches(":disabled") ||
+    control.getAttribute("aria-readonly")?.toLowerCase() === "true" ||
+    control.getAttribute("aria-disabled")?.toLowerCase() === "true";
 }
 
 function composedParentElement(element: Element): Element | null {
@@ -724,13 +761,24 @@ function assignValue(control: SupportedControl, value: string) {
   return !(control instanceof HTMLSelectElement) || control.value === value;
 }
 
-function composedControls(root: DiscoveryRoot) {
+export function formControls(root: ParentNode): SupportedControl[] {
+  if (root instanceof HTMLFormElement) {
+    // Include controls associated by form= even when they are outside the form.
+    return [...new Set([...composedControls(root), ...Array.from(root.elements).filter(isControlElement)])]
+      .filter((control) => !isNativeControl(control) || !control.form || control.form === root);
+  }
+  const descendants = composedControls(root);
+  return root instanceof Element && isControlElement(root) ? [root, ...descendants] : descendants;
+}
+
+function composedControls(root: ParentNode) {
   const controls: SupportedControl[] = [];
-  const roots: DiscoveryRoot[] = [root];
+  const roots: ParentNode[] = [root];
   for (let index = 0; index < roots.length; index += 1) {
     const current = roots[index]!;
     controls.push(...current.querySelectorAll<SupportedControl>('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
     for (const element of current.querySelectorAll<HTMLElement>("*")) {
+      if (element.matches("[data-vaultmesh-autofill],[data-vaultmesh-autofill-trigger]")) continue;
       const shadowRoot = accessibleShadowRoot(element);
       if (shadowRoot) roots.push(shadowRoot);
     }

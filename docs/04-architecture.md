@@ -69,7 +69,7 @@ browser UI/content → background RPC → Rust native-host → Rust broker → s
 
 LAN pairing 是显式十分钟的短时设备信任服务，desktop 锁定、离开页面、系统锁定、睡眠和退出关闭配对发现。当前 v2.0 流程使用 TLS 内 PAKE；新配对明确授权当前 Vault 同步，旧信任须双方补充确认。身份固定、碰撞仲裁和原子信任持久化保持 ADR-0018 的机制。
 
-同步拥有独立的解锁期 mDNS/listener 与版本协议；Tauri Rust LAN sync service 拥有 transport、peer pin 与生命周期，shared runtime 拥有授权绑定和原子提交，Core 拥有记录投影、验证、HLC 合并、历史与 tombstone。renderer 仅操作 typed 控制接口，无法获取同步 payload；Browser/Agent 不获得同步能力。配对服务与同步服务的页面生命周期相互独立。详细行为由 `specs/lan-vault-sync.md` 所有。
+同步拥有独立的已授权密文 mDNS/listener 与持续连接协议；Tauri Rust LAN sync service 拥有 transport、peer pin 与生命周期，shared runtime 拥有授权绑定、密文缓存和原子提交，Core 拥有逐连接方向密钥、密文封装、记录投影、验证、HLC 合并、历史与 tombstone。renderer 仅操作 typed 控制接口，无法获取同步 payload；Browser/Agent 不获得网络控制接口，但其已授权 core 会话可以验证合并本机收件箱。完全锁定的后台只搬运密文，不保留方向密钥；冷启动路由须验证 OS-protected 证明与 Vault 指纹，见 ADR-0020。配对服务与同步服务的页面生命周期相互独立。详细行为由 `specs/lan-vault-sync.md` 所有。
 
 Desktop 与 browser authorization 独立。任一授权存在时 core 可以保持解锁；最后一个授权锁定后，
 Rust runtime 必须清除 core、email connection/candidate、import/SSH session、pending fill、Passkey
