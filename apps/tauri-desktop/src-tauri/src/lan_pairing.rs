@@ -378,6 +378,8 @@ struct SessionRegistry {
     next: AtomicU64,
     sockets: Mutex<HashMap<u64, TcpStream>>,
     peers: Mutex<HashMap<String, u64>>,
+    pairing_intents: Mutex<HashMap<String, Instant>>,
+    pairing_collisions: Mutex<HashMap<String, Instant>>,
 }
 struct SessionGuard {
     id: u64,
@@ -405,6 +407,12 @@ impl SessionRegistry {
         if let Ok(mut peers) = self.peers.lock() {
             peers.clear();
         }
+        if let Ok(mut intents) = self.pairing_intents.lock() {
+            intents.clear();
+        }
+        if let Ok(mut collisions) = self.pairing_collisions.lock() {
+            collisions.clear();
+        }
     }
     fn bind_peer(&self, session: &SessionGuard, reference: &str) -> Result<(), ()> {
         self.peers
@@ -423,6 +431,40 @@ impl SessionRegistry {
         }) {
             let _ = socket.shutdown(std::net::Shutdown::Both);
         }
+    }
+
+    fn mark_pairing_intent(&self, instance: &str) -> Result<(), ()> {
+        self.pairing_intents
+            .lock()
+            .map_err(|_| ())?
+            .insert(instance.to_owned(), Instant::now() + IO_TIMEOUT);
+        Ok(())
+    }
+
+    fn has_pairing_intent(&self, instance: &str) -> bool {
+        let Ok(mut intents) = self.pairing_intents.lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        intents.retain(|_, expires| *expires > now);
+        intents.contains_key(instance)
+    }
+
+    fn mark_pairing_collision(&self, instance: &str) -> Result<(), ()> {
+        self.pairing_collisions
+            .lock()
+            .map_err(|_| ())?
+            .insert(instance.to_owned(), Instant::now() + IO_TIMEOUT);
+        Ok(())
+    }
+
+    fn has_pairing_collision(&self, instance: &str) -> bool {
+        let Ok(mut collisions) = self.pairing_collisions.lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        collisions.retain(|_, expires| *expires > now);
+        collisions.contains_key(instance)
     }
 }
 impl Drop for SessionGuard {
@@ -702,6 +744,12 @@ impl LanPairingService {
                 },
             )
         };
+        if pairing_intent {
+            context
+                .sessions
+                .mark_pairing_intent(&endpoint.instance)
+                .map_err(|_| "局域网配对服务暂时不可用。")?;
+        }
         self.in_flight.insert(reference.to_owned());
         if let Some(device) = self.nearby.get_mut(id) {
             device.status = "connecting";
@@ -718,7 +766,15 @@ impl LanPairingService {
         pending
             .decision
             .send(allow)
-            .map_err(|_| "配对请求已结束。".into())
+            .map_err(|_| "配对请求已结束。".to_owned())?;
+        if let Some(device) = self
+            .nearby
+            .values_mut()
+            .find(|device| device.pairing_ref == reference)
+        {
+            device.status = if allow { "confirming" } else { "unverified" };
+        }
+        Ok(())
     }
     pub(crate) fn revoke(&mut self, reference: &str) -> Result<(), String> {
         if !valid_reference(reference) {
@@ -1010,17 +1066,20 @@ fn outbound(ep: Endpoint, pairing_intent: bool, context: PairingContext) {
             let Ok(session) = context.sessions.register(&s) else {
                 break;
             };
-            if pair(
+            let result = pair(
                 s,
                 true,
                 pairing_intent,
                 Some((ep.instance.clone(), ep.nonce.clone())),
                 &context,
                 &session,
-            )
-            .is_ok()
-            {
-                return;
+            );
+            match result {
+                Ok(()) | Err(PairError::Superseded) => return,
+                Err(PairError::Failed) if superseded_outbound(&context, &instance) => {
+                    return;
+                }
+                Err(PairError::Failed) => {}
             }
             drop(session);
         }
@@ -1030,6 +1089,24 @@ fn outbound(ep: Endpoint, pairing_intent: bool, context: PairingContext) {
         peer_ref: None,
     });
 }
+
+fn superseded_outbound(context: &PairingContext, peer_instance: &str) -> bool {
+    context.sessions.has_pairing_collision(peer_instance)
+        && context.instance.as_str() > peer_instance
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PairError {
+    Failed,
+    Superseded,
+}
+
+impl From<()> for PairError {
+    fn from((): ()) -> Self {
+        Self::Failed
+    }
+}
+
 fn pair(
     mut socket: TcpStream,
     client: bool,
@@ -1037,7 +1114,7 @@ fn pair(
     expected: Option<(String, String)>,
     context: &PairingContext,
     session: &SessionGuard,
-) -> Result<(), ()> {
+) -> Result<(), PairError> {
     socket.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     socket.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     let peer_cert = if client {
@@ -1069,12 +1146,25 @@ fn pair(
         || !valid_token(&hello.nonce)
         || !valid_token(&hello.device_id)
     {
-        return Err(());
+        return Err(PairError::Failed);
     }
     if let Some((ei, en)) = expected
         && ((hello.instance != ei) || (hello.nonce != en))
     {
-        return Err(());
+        return Err(PairError::Failed);
+    }
+    let simultaneous_intent = hello.pairing_intent
+        && (pairing_intent || context.sessions.has_pairing_intent(&hello.instance));
+    if simultaneous_intent {
+        context.sessions.mark_pairing_collision(&hello.instance)?;
+        // Bluetooth-style collision handling: when both users select each
+        // other, the lower ephemeral instance is the sole TLS client. Both
+        // endpoints therefore keep the same transport and silently discard
+        // the competing one before a safety code is exposed.
+        let local_is_canonical_client = context.instance < hello.instance;
+        if client != local_is_canonical_client {
+            return Err(PairError::Superseded);
+        }
     }
     let reference = format!("lan-peer-{}", hello.device_id);
     let fingerprint = hex_digest(&peer_cert);
@@ -1082,7 +1172,7 @@ fn pair(
     write_frame(&mut tls, &state)?;
     let remote: TrustState = read_frame(&mut tls)?;
     if state.blocked || remote.blocked {
-        return Err(());
+        return Err(PairError::Failed);
     }
     if state.trusted && remote.trusted {
         session.sessions.bind_peer(session, &reference)?;
@@ -1097,7 +1187,7 @@ fn pair(
         return Ok(());
     }
     if !pairing_intent && !hello.pairing_intent {
-        return Err(());
+        return Err(PairError::Failed);
     }
     let code = safety_code(
         &tls.exporter()?,
@@ -1157,7 +1247,7 @@ fn pair(
                 });
                 let _ = rolled_back_rx.recv_timeout(IO_TIMEOUT);
             }
-            return Err(());
+            return Err(PairError::Failed);
         }
         session.sessions.bind_peer(session, &reference)?;
         context
@@ -1798,6 +1888,119 @@ mod tests {
     }
 
     #[test]
+    fn ct_lan_pairing_simultaneous_intent_converges_on_one_safety_code() {
+        let listener_a = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener_b = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address_a = listener_a.local_addr().unwrap();
+        let address_b = listener_b.local_addr().unwrap();
+        let (tx_a, rx_a) = mpsc::channel();
+        let (tx_b, rx_b) = mpsc::channel();
+        let context_a = context(
+            identity(),
+            "11111111111111111111111111111111",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            tx_a,
+            "simultaneous-a",
+        );
+        let context_b = context(
+            identity(),
+            "22222222222222222222222222222222",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            tx_b,
+            "simultaneous-b",
+        );
+        context_a
+            .sessions
+            .mark_pairing_intent("22222222222222222222222222222222")
+            .unwrap();
+        context_b
+            .sessions
+            .mark_pairing_intent("11111111111111111111111111111111")
+            .unwrap();
+
+        let inbound_a_context = context_a.clone();
+        let inbound_a = thread::spawn(move || {
+            let (socket, _) = listener_a.accept().unwrap();
+            let session = inbound_a_context.sessions.register(&socket).unwrap();
+            pair(socket, false, false, None, &inbound_a_context, &session)
+        });
+        let inbound_b_context = context_b.clone();
+        let inbound_b = thread::spawn(move || {
+            let (socket, _) = listener_b.accept().unwrap();
+            let session = inbound_b_context.sessions.register(&socket).unwrap();
+            pair(socket, false, false, None, &inbound_b_context, &session)
+        });
+        let outbound_a_context = context_a.clone();
+        let outbound_a = thread::spawn(move || {
+            let socket = TcpStream::connect(address_b).unwrap();
+            let session = outbound_a_context.sessions.register(&socket).unwrap();
+            pair(
+                socket,
+                true,
+                true,
+                Some((
+                    "22222222222222222222222222222222".into(),
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                )),
+                &outbound_a_context,
+                &session,
+            )
+        });
+        let outbound_b_context = context_b.clone();
+        let outbound_b = thread::spawn(move || {
+            let socket = TcpStream::connect(address_a).unwrap();
+            let session = outbound_b_context.sessions.register(&socket).unwrap();
+            pair(
+                socket,
+                true,
+                true,
+                Some((
+                    "11111111111111111111111111111111".into(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                )),
+                &outbound_b_context,
+                &session,
+            )
+        });
+
+        let (code_a, decision_a) = match rx_a.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Pending { code, decision, .. } => (code, decision),
+            _ => panic!("expected one canonical pairing prompt on A"),
+        };
+        let (code_b, decision_b) = match rx_b.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Pending { code, decision, .. } => (code, decision),
+            _ => panic!("expected one canonical pairing prompt on B"),
+        };
+        assert_eq!(code_a, code_b);
+        assert!(rx_a.try_recv().is_err());
+        assert!(rx_b.try_recv().is_err());
+        decision_a.send(false).unwrap();
+        decision_b.send(false).unwrap();
+
+        assert_eq!(inbound_a.join().unwrap(), Err(PairError::Superseded));
+        assert!(inbound_b.join().unwrap().is_ok());
+        assert!(outbound_a.join().unwrap().is_ok());
+        assert_eq!(outbound_b.join().unwrap(), Err(PairError::Failed));
+        assert!(
+            context_b
+                .sessions
+                .has_pairing_collision("11111111111111111111111111111111")
+        );
+        assert!(superseded_outbound(
+            &context_b,
+            "11111111111111111111111111111111"
+        ));
+        assert!(!superseded_outbound(
+            &context_a,
+            "22222222222222222222222222222222"
+        ));
+        assert!(matches!(rx_a.try_recv(), Ok(Event::Closed { .. })));
+        assert!(matches!(rx_b.try_recv(), Ok(Event::Closed { .. })));
+        assert!(rx_a.try_recv().is_err());
+        assert!(rx_b.try_recv().is_err());
+    }
+
+    #[test]
     fn ct_lan_pairing_remote_persistence_failure_rolls_back_new_local_trust() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -1827,7 +2030,7 @@ mod tests {
         let server = thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
             let session = server_context.sessions.register(&socket).unwrap();
-            pair(socket, false, true, None, &server_context, &session)
+            pair(socket, false, false, None, &server_context, &session)
         });
         let client = thread::spawn(move || {
             let socket = TcpStream::connect(address).unwrap();
@@ -1881,6 +2084,92 @@ mod tests {
         assert!(!matches!(client_rx.try_recv(), Ok(Event::Connected { .. })));
         let _ = std::fs::remove_file(server_path);
         let _ = std::fs::remove_file(client_path);
+    }
+
+    #[test]
+    fn ct_lan_pairing_double_confirmation_persists_and_connects_both_peers() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let store_a = empty_store("success-a");
+        let store_b = empty_store("success-b");
+        let path_a = store_a.path.clone();
+        let path_b = store_b.path.clone();
+        let (tx_a, rx_a) = mpsc::channel();
+        let (tx_b, rx_b) = mpsc::channel();
+        let context_a = PairingContext {
+            identity: identity(),
+            instance: "11111111111111111111111111111111".into(),
+            nonce: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            tx: tx_a,
+            trust: store_a.clone(),
+            sessions: Arc::new(SessionRegistry::default()),
+        };
+        let context_b = PairingContext {
+            identity: identity(),
+            instance: "22222222222222222222222222222222".into(),
+            nonce: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            tx: tx_b,
+            trust: store_b.clone(),
+            sessions: Arc::new(SessionRegistry::default()),
+        };
+        let sessions_a = context_a.sessions.clone();
+        let sessions_b = context_b.sessions.clone();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let session = context_a.sessions.register(&socket).unwrap();
+            pair(socket, false, false, None, &context_a, &session)
+        });
+        let client = thread::spawn(move || {
+            let socket = TcpStream::connect(address).unwrap();
+            let session = context_b.sessions.register(&socket).unwrap();
+            pair(
+                socket,
+                true,
+                true,
+                Some((
+                    "11111111111111111111111111111111".into(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                )),
+                &context_b,
+                &session,
+            )
+        });
+
+        for receiver in [&rx_a, &rx_b] {
+            match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Pending { decision, .. } => decision.send(true).unwrap(),
+                _ => panic!("expected numeric comparison prompt"),
+            }
+        }
+        match rx_a.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Complete { peer, persisted } => {
+                persisted.send(store_a.approve(peer).is_ok()).unwrap()
+            }
+            _ => panic!("expected persistence request on A"),
+        }
+        match rx_b.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Complete { peer, persisted } => {
+                persisted.send(store_b.approve(peer).is_ok()).unwrap()
+            }
+            _ => panic!("expected persistence request on B"),
+        }
+        assert!(matches!(
+            rx_a.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::Connected { .. }
+        ));
+        assert!(matches!(
+            rx_b.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::Connected { .. }
+        ));
+        assert_eq!(store_a.load().unwrap().len(), 1);
+        assert_eq!(store_b.load().unwrap().len(), 1);
+
+        sessions_a.shutdown_all();
+        sessions_b.shutdown_all();
+        assert!(server.join().unwrap().is_ok());
+        assert!(client.join().unwrap().is_ok());
+        let _ = std::fs::remove_file(path_a);
+        let _ = std::fs::remove_file(path_b);
     }
 
     #[test]
@@ -2035,6 +2324,40 @@ mod tests {
         service.collect_events(Instant::now(), 0);
         assert!(!service.in_flight.contains(&reference));
         assert_eq!(service.nearby.get(instance).unwrap().status, "failed");
+    }
+
+    #[test]
+    fn ct_lan_pairing_local_confirmation_waits_for_the_other_device() {
+        let mut service = LanPairingService::new(
+            std::env::temp_dir().join(format!("vaultmesh-lan-confirming-{}.json", random_token())),
+        );
+        let instance = "00112233445566778899aabbccddeeff";
+        let reference = "lan-peer-ffeeddccbbaa99887766554433221100";
+        service.nearby.insert(
+            instance.into(),
+            LanNearbyDevice {
+                pairing_ref: reference.into(),
+                status: "unverified",
+            },
+        );
+        let (decision, resolved) = mpsc::channel();
+        service.pending.insert(
+            reference.into(),
+            Pending {
+                public: LanPendingPairing {
+                    pairing_ref: reference.into(),
+                    safety_code: "482913".into(),
+                    expires_at: u64::MAX,
+                },
+                decision,
+            },
+        );
+
+        service.resolve(reference, true).unwrap();
+
+        assert_eq!(resolved.recv_timeout(Duration::from_secs(1)), Ok(true));
+        assert_eq!(service.nearby.get(instance).unwrap().status, "confirming");
+        assert!(!service.pending.contains_key(reference));
     }
 
     #[test]

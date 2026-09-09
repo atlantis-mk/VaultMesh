@@ -95,6 +95,10 @@ describe('CT-TAURI-COMMAND-001 typed adapter', () => {
     expect(LanPairingStatusSchema.safeParse(safe).success).toBe(true);
     expect(LanPairingStatusSchema.safeParse({
       ...safe,
+      nearby: [{ ...safe.nearby[0], status: 'confirming' }],
+    }).success).toBe(true);
+    expect(LanPairingStatusSchema.safeParse({
+      ...safe,
       nearby: [{ ...safe.nearby[0], address: '192.168.1.8', port: 43210, nonce: 'secret' }],
     }).success).toBe(false);
     expect(LanPairingStatusSchema.safeParse({

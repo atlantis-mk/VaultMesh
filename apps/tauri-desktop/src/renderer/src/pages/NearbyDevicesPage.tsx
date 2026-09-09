@@ -112,8 +112,8 @@ export function NearbyDevicesPage() {
       {status?.pending.map((pending) => (
         <Card key={pending.pairingRef} className="ring-2 ring-primary/40">
           <CardHeader>
-            <CardTitle>核对安全短码</CardTitle>
-            <CardDescription>确认另一台设备显示完全相同的六码，再在两台设备上分别确认。任何差异都必须取消。</CardDescription>
+            <CardTitle>配对请求：核对安全短码</CardTitle>
+            <CardDescription>这与蓝牙数字比较相同：确认另一台设备显示完全相同的六码，再在两台设备上分别确认。任何差异都必须取消。</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
             <div className="rounded-xl bg-muted px-4 py-5 text-center font-mono text-4xl font-semibold tracking-[0.3em]" aria-label={`安全短码 ${pending.safetyCode}`}>
@@ -134,19 +134,20 @@ export function NearbyDevicesPage() {
         <Card>
           <CardHeader>
             <CardTitle>发现的设备</CardTitle>
-            <CardDescription>只显示兼容的 VaultMesh protocol major v1 客户端，不提供通用端口扫描。</CardDescription>
+            <CardDescription>任一端点击一次“配对”即可，对端会自动显示同一短码；即使两端同时点击，也会自动合并为一个请求。</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
             {status?.nearby.length ? status.nearby.map((device) => {
               const trusted = trustedByRef.get(device.pairingRef);
               const connecting = device.status === 'connecting';
+              const confirming = device.status === 'confirming';
               return (
                 <div key={device.pairingRef} className="flex items-center justify-between gap-3 rounded-lg border p-3">
                   <div className="min-w-0">
                     <p className="truncate font-medium">{trusted?.label ?? `VaultMesh ${shortPeer(device.pairingRef)}`}</p>
-                    <p className="text-xs text-muted-foreground">{device.status === 'connected' ? '已通过证书固定验证连通' : connecting ? '正在建立加密连接并生成安全短码' : device.status === 'failed' ? '无法建立安全连接，请重试' : trusted ? '已信任，等待双方重连' : '尚未验证'}</p>
+                    <p className="text-xs text-muted-foreground">{device.status === 'connected' ? '已通过证书固定验证连通' : connecting ? '正在建立加密连接并生成安全短码' : confirming ? '本机已确认，正在等待另一台设备' : device.status === 'failed' ? '配对未完成，请重试' : trusted ? '已信任，等待双方重连' : '尚未验证'}</p>
                   </div>
-                  {device.status === 'connected' ? <Badge><ShieldCheckIcon data-icon="inline-start" />已验证</Badge> : connecting ? <Badge variant="outline"><RefreshCwIcon className="animate-spin" data-icon="inline-start" />正在配对</Badge> : trusted ? <Badge variant="outline">等待重连</Badge> : (
+                  {device.status === 'connected' ? <Badge><ShieldCheckIcon data-icon="inline-start" />已验证</Badge> : connecting ? <Badge variant="outline"><RefreshCwIcon className="animate-spin" data-icon="inline-start" />正在配对</Badge> : confirming ? <Badge variant="outline"><RefreshCwIcon className="animate-spin" data-icon="inline-start" />等待确认</Badge> : trusted ? <Badge variant="outline">等待重连</Badge> : (
                     <Button size="sm" type="button" disabled={busy || status.pending.some((item) => item.pairingRef === device.pairingRef)} onClick={() => void run(() => window.vaultMesh.lan.begin(device.pairingRef).then(() => undefined))}>
                       <Link2Icon data-icon="inline-start" />配对
                     </Button>

@@ -2,7 +2,7 @@ id: "CHG-2026-040-lan-peer-discovery-pairing"
 title: "局域网 VaultMesh 客户端发现与可信配对"
 type: "feature"
 status: "Implementing"
-spec_revision: "0.1.51-active"
+spec_revision: "0.1.52-active"
 target_release: null
 requirements:
   - "REQ-LAN-PEER-001"

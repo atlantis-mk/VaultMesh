@@ -641,7 +641,7 @@ export const DEFAULT_SECURITY_SETTINGS: z.infer<typeof SecuritySettingsSchema> =
 
 export const LanNearbyDeviceSchema = z.object({
   pairingRef: z.string().regex(/^lan-peer-[a-f0-9]{32}$/),
-  status: z.enum(['unverified', 'connecting', 'failed', 'connected']),
+  status: z.enum(['unverified', 'connecting', 'confirming', 'failed', 'connected']),
 }).strict();
 export const LanPendingPairingSchema = z.object({
   pairingRef: z.string().regex(/^lan-peer-[a-f0-9]{32}$/),

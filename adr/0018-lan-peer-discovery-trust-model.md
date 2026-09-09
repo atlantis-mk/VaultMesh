@@ -6,11 +6,11 @@ Accepted
 
 ## 决策
 
-VaultMesh 仅在用户显式开启的十分钟窗口内，以随机会话实例和 nonce 通过 mDNS 发现相同 major protocol 的桌面客户端。TCP 连接使用 TLS 1.3；持久随机设备 ID 只在加密 Hello 内交换。首次配对由双方比较 TLS exporter 与双方身份派生的六码安全短码并双向确认；双方还要交换本地持久化结果，任一端失败均不进入 connected，随后按持久设备 ID 固定对方设备证书。私钥、设备 ID 与 proof 位于 OS credential store，非秘密索引位于 owner-only 文件。
+VaultMesh 仅在用户显式开启的十分钟窗口内，以随机会话实例和 nonce 通过 mDNS 发现相同 major protocol 的桌面客户端。TCP 连接使用 TLS 1.3；持久随机设备 ID 只在加密 Hello 内交换。首次配对采用类似蓝牙 Secure Simple Pairing 的数字比较：任一端可以发起，对端自动显示同一请求，双方比较 TLS exporter 与双方身份派生的六码并分别确认。双方同时发起时，以临时实例 ID 的全序确定唯一 TLS client，保留一条规范会话并安全淘汰另一条竞争会话；淘汰不得降级任何认证步骤或产生第二个短码。双方还要交换本地持久化结果，任一端失败均不进入 connected，随后按持久设备 ID 固定对方设备证书。私钥、设备 ID 与 proof 位于 OS credential store，非秘密索引位于 owner-only 文件。
 
 ## 后果
 
-引入短时 LAN listener 和平台防火墙验收，但不引入服务器、账户、Vault 复制、秘密披露或远程操作。mDNS 广告不被信任，所有未知数据在 TLS 与用户确认前不得形成授权。
+引入短时 LAN listener、并发发起仲裁和平台防火墙验收，但不引入服务器、账户、Vault 复制、秘密披露或远程操作。mDNS 广告不被信任，所有未知数据在 TLS 与用户确认前不得形成授权。用户不需要预先约定由哪一端点击“配对”，但两端仍必须独立核对并确认短码。
 
 ## 拒绝方案
 

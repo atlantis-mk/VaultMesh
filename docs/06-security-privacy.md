@@ -10,7 +10,7 @@
 
 ## LAN peer pairing
 
-LAN peer discovery 默认关闭且只在用户显式开启的有限窗口内运行。mDNS 记录是未认证输入，不能包含用户、主机、Vault 或秘密数据，也不能单独授予信任。首次 TLS 会话必须由双方核对同一安全短码并确认；双方还必须交换本地持久化成功状态，任一端失败时不得进入 connected。已配对身份固定到 OS-protected proof，证书漂移、记录损坏、取消、超时或撤销均拒绝。LAN service 不接触 Vault runtime、Agent broker、Browser RPC、clipboard、renderer persistence、analytics 或 crash payload。
+LAN peer discovery 默认关闭且只在用户显式开启的有限窗口内运行。mDNS 记录是未认证输入，不能包含用户、主机、Vault 或秘密数据，也不能单独授予信任。首次 TLS 会话必须由双方核对同一安全短码并确认；双方同时发起时只保留按临时实例 ID 确定的规范 TLS 会话，竞争会话不得形成第二个确认或错误地覆盖规范会话状态。双方还必须交换本地持久化成功状态，任一端失败时不得进入 connected。已配对身份固定到 OS-protected proof，证书漂移、记录损坏、取消、超时或撤销均拒绝。LAN service 不接触 Vault runtime、Agent broker、Browser RPC、clipboard、renderer persistence、analytics 或 crash payload。
 
 ## Vault 与文件边界
 

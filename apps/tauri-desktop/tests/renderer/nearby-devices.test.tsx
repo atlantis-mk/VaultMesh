@@ -100,8 +100,23 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     });
     render(<NearbyDevicesPage />);
 
-    expect(await screen.findByText('无法建立安全连接，请重试')).toBeTruthy();
+    expect(await screen.findByText('配对未完成，请重试')).toBeTruthy();
     expect(screen.getByRole('button', { name: '配对' })).toBeTruthy();
+  });
+
+  it('shows the Bluetooth-style wait state after this device confirms', async () => {
+    const pairingRef = 'lan-peer-00112233445566778899aabbccddeeff';
+    vi.mocked(window.vaultMesh.lan.status).mockResolvedValue({
+      ...emptyStatus,
+      discoverable: true,
+      expiresAt: Date.now() + 60_000,
+      nearby: [{ pairingRef, status: 'confirming' }],
+    });
+    render(<NearbyDevicesPage />);
+
+    expect(await screen.findByText('本机已确认，正在等待另一台设备')).toBeTruthy();
+    expect(screen.getByText('等待确认')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '配对' })).toBeNull();
   });
 
   it('shows only the six-digit comparison code and routes both decisions by opaque peer ref', async () => {
@@ -115,6 +130,7 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     render(<NearbyDevicesPage />);
 
     expect(await screen.findByText('482913')).toBeTruthy();
+    expect(screen.getByText(/蓝牙数字比较/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '短码一致' }));
     await waitFor(() => expect(window.vaultMesh.lan.confirm).toHaveBeenCalledWith(pairingRef));
 
