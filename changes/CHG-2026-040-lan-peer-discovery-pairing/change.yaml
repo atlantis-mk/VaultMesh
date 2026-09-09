@@ -19,7 +19,8 @@ context_refs:
   - "docs/06-security-privacy.md#LAN peer pairing"
   - "docs/07-test-release-plan.md"
   - "specs/lan-peer-pairing.md"
-related_changes: []
+related_changes:
+  - "BUG-2026-021-lan-accepted-socket-mode"
 affected_surfaces:
   - "tauri-desktop"
   - "desktop-runtime"

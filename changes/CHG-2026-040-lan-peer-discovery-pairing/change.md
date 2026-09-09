@@ -45,6 +45,7 @@ LAN service 是 Rust runtime 的独立 owner。mDNS 只广告随机实例标识�
 - 用户持续实机验证表明，双端比较并分别确认安全短码的交互复杂且容易进入“配对未完成”。当前实现已替换该流程：开启发现即生成本机一次性六码；另一端选择设备并输入该码；协议通过 SPAKE2 和绑定 TLS exporter/双方身份/证书/实例/nonce 的双向 key confirmation 验证，正确后两端自动原子保存信任，不再创建 renderer pending confirmation。旧的 `lan.pairing.confirm`/`lan.pairing.cancel` operation 已移除，错误码、尝试耗尽和安全存储失败均保留可区分的 fail-closed 状态。
 - 输码版首次实机复测仍显示通用安全连接失败；检查发现 mDNS 仍把已废弃的双端数字比较构建和输码构建共同声明为 `v=1`，两端会互相发现但在 TLS 内解析不同帧。当前输码流程改为精确发现修订 `v=1.1`，旧 `v=1` 在扫描阶段直接忽略。再次复测确认两端均为 `v=1.1` 后仍在配对码认证前失败，因此 runtime 现在显式完成 TLS handshake，并把证书交换、TLS、Hello/TrustState、发现漂移、本机/对端证书固定冲突、尝试耗尽和持久化结果同步拆为 renderer-safe 失败阶段；不记录或投影 endpoint、证书、nonce、密钥或协议帧。
 - `pnpm docs:check`：通过。
+- 后续实机出现 TLS/证书交换两种失败，已由 `BUG-2026-021-lan-accepted-socket-mode` 在 macOS 生产 accept_loop 上复现并修复连接继承非阻塞模式的问题；先前版本不一致、时间或安全软件判断不构成该次故障的根因证据。该 Bug 记录修复前/后测试和双机复测状态。
 - `AT-LAN-PAIRING-001` 尚待两台目标设备执行 macOS↔macOS、Windows↔Windows、macOS↔Windows 与 firewall/system-lock/sleep 路径；Work 因此保持 `Implementing`，不得进入 Verified 或封存。
 
 ## 安全与数据生命周期

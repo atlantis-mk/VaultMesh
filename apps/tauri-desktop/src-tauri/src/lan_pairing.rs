@@ -1080,6 +1080,10 @@ fn pair(
     session: &SessionGuard,
 ) -> Result<(), PairError> {
     let pairing_intent = submitted_code.is_some();
+    // Accepted sockets can inherit O_NONBLOCK from the listener on macOS/BSD.
+    // This worker uses synchronous certificate/TLS reads with socket timeouts;
+    // without resetting the mode, a normal gap between packets fails immediately.
+    socket.set_nonblocking(false).map_err(|_| ())?;
     socket.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     socket.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     let peer_cert = if client {
@@ -1982,6 +1986,132 @@ mod tests {
         assert!(!v.contains("fingerprint"));
         assert!(!v.contains("certificate"));
         assert!(v.contains("123456"));
+    }
+
+    #[test]
+    fn ct_lan_pairing_production_listener_tolerates_delayed_tls() {
+        production_listener_tolerates_delayed_handshake(false);
+    }
+
+    #[test]
+    fn ct_lan_pairing_production_listener_tolerates_delayed_certificate() {
+        production_listener_tolerates_delayed_handshake(true);
+    }
+
+    fn production_listener_tolerates_delayed_handshake(delay_certificate: bool) {
+        let listener = bind_listener().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+        let server_context = context(
+            identity(),
+            &random_token(),
+            &random_token(),
+            tx,
+            "delayed-tls",
+        );
+        let sessions = server_context.sessions.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        accept_loop(listener, stop.clone(), server_context);
+        let client_identity = identity();
+        let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        if delay_certificate {
+            thread::sleep(Duration::from_millis(100));
+        }
+        write_cert(&mut socket, &client_identity.cert).unwrap();
+        let peer_cert = read_cert(&mut socket);
+        // Model the network gap between the certificate preface and ClientHello.
+        thread::sleep(Duration::from_millis(100));
+        let result = peer_cert.and_then(|cert| {
+            let mut tls = client_tls(socket, &client_identity, &cert)?;
+            tls.complete_handshake()
+        });
+        stop.store(true, Ordering::Release);
+        sessions.shutdown_all();
+        assert!(
+            result.is_ok(),
+            "production listener must wait for delayed TLS data"
+        );
+        assert!(rx.try_recv().is_err(), "TLS alone must not establish trust");
+    }
+
+    #[test]
+    fn ct_lan_pairing_production_listener_completes_pairing() {
+        let listener = bind_listener().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (server_tx, server_rx) = mpsc::channel();
+        let (client_tx, client_rx) = mpsc::channel();
+        let server = context(
+            identity(),
+            &random_token(),
+            &random_token(),
+            server_tx,
+            "production-server",
+        );
+        let client = context(
+            identity(),
+            &random_token(),
+            &random_token(),
+            client_tx,
+            "production-client",
+        );
+        let endpoint = Endpoint {
+            instance: server.instance.clone(),
+            fullname: "test.local.".into(),
+            nonce: server.nonce.clone(),
+            addresses: vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+            port,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        accept_loop(listener, stop.clone(), server.clone());
+        let client_worker = client.clone();
+        let worker = thread::spawn(move || {
+            outbound(
+                endpoint,
+                Some(Zeroizing::new("123456".into())),
+                client_worker,
+            );
+        });
+        let result = (|| -> Result<(), &'static str> {
+            for (rx, store) in [(&server_rx, &server.trust), (&client_rx, &client.trust)] {
+                match rx.recv_timeout(Duration::from_secs(3)) {
+                    Ok(Event::Complete { peer, persisted }) => {
+                        persisted
+                            .send(store.approve(peer).is_ok())
+                            .map_err(|_| "persistence ack")?;
+                    }
+                    _ => return Err("production connection did not authenticate"),
+                }
+            }
+            for rx in [&server_rx, &client_rx] {
+                if !matches!(
+                    rx.recv_timeout(Duration::from_secs(3)),
+                    Ok(Event::Connected { .. })
+                ) {
+                    return Err("production connection did not complete");
+                }
+            }
+            if server.trust.load().map_err(|_| "server trust")?.len() != 1
+                || client.trust.load().map_err(|_| "client trust")?.len() != 1
+            {
+                return Err("missing persisted trust");
+            }
+            Ok(())
+        })();
+        stop.store(true, Ordering::Release);
+        server.sessions.shutdown_all();
+        client.sessions.shutdown_all();
+        worker.join().unwrap();
+        let _ = std::fs::remove_file(server.trust.path);
+        let _ = std::fs::remove_file(client.trust.path);
+        assert_eq!(result, Ok(()));
     }
 
     #[test]

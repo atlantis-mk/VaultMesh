@@ -1,0 +1,28 @@
+id: "BUG-2026-021-lan-accepted-socket-mode"
+title: "LAN 入站连接继承非阻塞模式导致握手失败"
+type: "bug"
+status: "Implementing"
+spec_revision: "0.1.52-active"
+target_release: null
+requirements:
+  - "REQ-LAN-PEER-001"
+tests:
+  - "CT-LAN-PAIRING-001"
+  - "AT-LAN-PAIRING-001"
+adrs:
+  - "ADR-0018"
+context_refs:
+  - "specs/lan-peer-pairing.md"
+  - "docs/03-functional-requirements.md#REQ-LAN-PEER-001 局域网客户端发现与可信配对"
+  - "docs/06-security-privacy.md#LAN peer pairing"
+related_changes:
+  - "CHG-2026-040-lan-peer-discovery-pairing"
+affected_surfaces:
+  - "desktop-runtime"
+affected_formats: []
+affected_versions:
+  - "LAN peer protocol 1"
+  - "0.0.9-review"
+security_impact: "恢复有界阻塞网络读写；保持 TLS、PAKE、pinning 和停止清理要求。"
+migration: "none"
+supersedes: []
