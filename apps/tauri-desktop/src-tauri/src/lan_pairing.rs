@@ -1673,7 +1673,8 @@ fn set_windows_owner_only(file: &std::fs::File) -> Result<(), ()> {
             PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile, WRITE_DAC,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, ReOpenFile,
+            WRITE_DAC,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
@@ -1756,13 +1757,13 @@ fn set_windows_owner_only(file: &std::fs::File) -> Result<(), ()> {
         return Err(());
     }
     // std::fs::File is opened for data writes and does not necessarily carry
-    // WRITE_DAC. Reopen the same atomic temp file with the exact security
-    // right before applying the owner-only DACL, then close that handle before
-    // the atomic commit renames the file.
+    // the rights needed by SetSecurityInfo. Its protected-DACL path also reads
+    // security information, so reopen the same atomic temp file with both
+    // READ_CONTROL and WRITE_DAC. Close this handle before the atomic rename.
     let security_handle = unsafe {
         ReOpenFile(
             file.as_raw_handle() as HANDLE,
-            WRITE_DAC,
+            READ_CONTROL | WRITE_DAC,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             0,
         )
@@ -2802,10 +2803,93 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn ct_lan_pairing_index_is_owner_only() {
+        use std::{ffi::c_void, os::windows::ffi::OsStrExt, ptr::null_mut};
+        use windows_sys::Win32::{
+            Foundation::{ERROR_SUCCESS, LocalFree},
+            Security::{
+                ACCESS_ALLOWED_ACE,
+                Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+                DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorControl,
+                OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+            },
+            Storage::FileSystem::FILE_ALL_ACCESS,
+        };
+
+        struct Descriptor(*mut c_void);
+        impl Drop for Descriptor {
+            fn drop(&mut self) {
+                unsafe { LocalFree(self.0) };
+            }
+        }
+        fn assert_owner_only(path: &Path) {
+            let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut owner = null_mut();
+            let mut dacl = null_mut();
+            let mut descriptor = null_mut();
+            assert_eq!(
+                unsafe {
+                    GetNamedSecurityInfoW(
+                        name.as_ptr(),
+                        SE_FILE_OBJECT,
+                        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                        &mut owner,
+                        null_mut(),
+                        &mut dacl,
+                        null_mut(),
+                        &mut descriptor,
+                    )
+                },
+                ERROR_SUCCESS
+            );
+            let descriptor = Descriptor(descriptor);
+            assert!(!owner.is_null() && !dacl.is_null());
+            let mut control = 0;
+            let mut revision = 0;
+            assert_ne!(
+                unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) },
+                0
+            );
+            assert_ne!(
+                control & SE_DACL_PROTECTED,
+                0,
+                "parent permissions must not be inherited"
+            );
+            assert_eq!(
+                unsafe { (*dacl).AceCount },
+                1,
+                "only the owner may have access"
+            );
+            let mut ace = null_mut();
+            assert_ne!(unsafe { GetAce(dacl, 0, &mut ace) }, 0);
+            let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+            assert_eq!(allowed.Header.AceType, 0, "must be an access-allowed ACE");
+            assert_eq!(allowed.Header.AceFlags, 0, "must not be inherited");
+            assert_eq!(allowed.Mask, FILE_ALL_ACCESS);
+            assert_ne!(
+                unsafe {
+                    EqualSid(
+                        owner,
+                        std::ptr::addr_of!(allowed.SidStart).cast_mut().cast(),
+                    )
+                },
+                0
+            );
+        }
+
         let store = empty_store("windows-permissions");
         store.save(&[]).unwrap();
         assert!(store.path.is_file());
         assert_eq!(store.load_index().unwrap().peers.len(), 0);
+        assert_owner_only(&store.path);
+        let peer = LanTrustedPeer {
+            pairing_ref: "lan-peer-00112233445566778899aabbccddeeff".into(),
+            certificate_fingerprint: "ab".repeat(32),
+            label: "Test peer".into(),
+            protocol_major: PROTOCOL,
+        };
+        store.save(std::slice::from_ref(&peer)).unwrap();
+        assert_eq!(store.load_index().unwrap().peers, vec![peer]);
+        assert_owner_only(&store.path);
         let _ = std::fs::remove_file(&store.path);
     }
 }

@@ -1,0 +1,28 @@
+id: "BUG-2026-022-lan-windows-trust-acl"
+title: "Windows LAN 信任索引安全句柄缺少读取权限"
+type: "bug"
+status: "Implementing"
+spec_revision: "0.1.52-active"
+target_release: null
+requirements:
+  - "REQ-LAN-PEER-001"
+tests:
+  - "CT-LAN-PAIRING-001"
+  - "AT-LAN-PAIRING-001"
+adrs:
+  - "ADR-0018"
+context_refs:
+  - "specs/lan-peer-pairing.md"
+  - "docs/03-functional-requirements.md#REQ-LAN-PEER-001 局域网客户端发现与可信配对"
+  - "docs/06-security-privacy.md#LAN peer pairing"
+related_changes:
+  - "CHG-2026-040-lan-peer-discovery-pairing"
+affected_surfaces:
+  - "desktop-runtime"
+affected_formats: []
+affected_versions:
+  - "0.0.9-review"
+  - "LAN peer protocol 1"
+security_impact: "补齐现有文件安全 API 所需句柄权限，保持 owner-only 保护 DACL 与原子持久化；无信任模型变化。"
+migration: "none"
+supersedes: []

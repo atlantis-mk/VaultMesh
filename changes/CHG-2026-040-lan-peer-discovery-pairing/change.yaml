@@ -21,6 +21,7 @@ context_refs:
   - "specs/lan-peer-pairing.md"
 related_changes:
   - "BUG-2026-021-lan-accepted-socket-mode"
+  - "BUG-2026-022-lan-windows-trust-acl"
 affected_surfaces:
   - "tauri-desktop"
   - "desktop-runtime"
