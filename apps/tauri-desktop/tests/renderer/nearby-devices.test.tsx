@@ -93,18 +93,22 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     expect(screen.queryByRole('button', { name: '配对' })).toBeNull();
   });
 
-  it('returns a failed pre-prompt handshake to a visible retry action', async () => {
+  it('returns transport and secure-channel failures to actionable retry states', async () => {
     const pairingRef = 'lan-peer-00112233445566778899aabbccddeeff';
     vi.mocked(window.vaultMesh.lan.status).mockResolvedValue({
       ...emptyStatus,
       discoverable: true,
       expiresAt: Date.now() + 60_000,
-      nearby: [{ pairingRef, status: 'failed' }],
+      nearby: [
+        { pairingRef, status: 'transport-failed' },
+        { pairingRef: 'lan-peer-ffeeddccbbaa99887766554433221100', status: 'secure-channel-failed' },
+      ],
     });
     render(<NearbyDevicesPage />);
 
-    expect(await screen.findByText('无法建立安全连接，请重试')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '配对' })).toBeTruthy();
+    expect(await screen.findByText('无法连接该设备，请检查双方防火墙和局域网访问权限')).toBeTruthy();
+    expect(screen.getByText('安全握手失败，请确认两端均已更新到相同版本')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: '配对' })).toHaveLength(2);
   });
 
   it('shows an explicit rejected-code state and allows retry', async () => {

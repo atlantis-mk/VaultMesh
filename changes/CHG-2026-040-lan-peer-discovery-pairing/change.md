@@ -18,7 +18,7 @@ Tauri Rust runtime、typed desktop contract、React 设置入口、平台凭据�
 
 ## 实现约束
 
-LAN service 是 Rust runtime 的独立 owner。mDNS 只广告随机实例标识、版本、端口和 nonce；本机六码不得进入 mDNS、日志或持久化，首次会话使用 TLS 1.3 内 SPAKE2 与双向 key confirmation 验证输入码，已配对连接固定对方设备证书。双方同时发起时必须按临时实例 ID 保留唯一规范会话并静默淘汰竞争会话。错误码、失败、超时、取消、撤销和系统锁定必须清除瞬态会话并 fail closed。
+LAN service 是 Rust runtime 的独立 owner。mDNS 只广告随机实例标识、精确流程版本、端口和 nonce；本机六码不得进入 mDNS、日志或持久化，首次会话使用 TLS 1.3 内 SPAKE2 与双向 key confirmation 验证输入码，已配对连接固定对方设备证书。双方同时发起时必须按临时实例 ID 保留唯一规范会话并静默淘汰竞争会话。错误码、失败、超时、取消、撤销和系统锁定必须清除瞬态会话并 fail closed。
 
 ## 任务
 
@@ -32,7 +32,7 @@ LAN service 是 Rust runtime 的独立 owner。mDNS 只广告随机实例标识�
 
 自动化必须覆盖广告解析、版本拒绝、短码、持久化回滚、撤销和时限。macOS↔macOS、Windows↔Windows、macOS↔Windows 的 packaged 验收在实现后写入本 Work。
 
-- `cargo test -p vaultmesh-tauri-desktop lan_pairing --lib`：22 passed；覆盖 exact/bounded v1 TXT 与配对码不进入 mDNS、同链路双栈 listener、随机六码及原子五次尝试上限、TLS 1.3 内 SPAKE2/key confirmation、单端输入正确码后双方自动持久化与 connected、错误码不建立信任、双端同时输入时唯一会话仲裁、nonce mismatch、超限证书、pin drift、停止清理、首次信任前不自动探测、失败握手清理与可重试、凭据/索引及远端持久化失败回滚，并包含 session-lock locked/unlocked/unknown 回归。
+- `cargo test -p vaultmesh-tauri-desktop lan_pairing --lib`：22 passed；覆盖 exact/bounded v1.1 TXT、旧 v1 流程隔离与配对码不进入 mDNS、同链路双栈 listener、随机六码及原子五次尝试上限、TLS 1.3 内 SPAKE2/key confirmation、单端输入正确码后双方自动持久化与 connected、错误码不建立信任、双端同时输入时唯一会话仲裁、nonce mismatch、超限证书、pin drift、停止清理、首次信任前不自动探测、失败握手清理与可重试、凭据/索引及远端持久化失败回滚，并包含 session-lock locked/unlocked/unknown 回归。
 - `pnpm tauri:test`：desktop Rust 247 passed / 1 environment-only ignored，native host 1 passed，Agent MCP 4 passed，stdio E2E 6 passed，renderer 142 passed。
 - `pnpm tauri:typecheck`、`cargo fmt --all -- --check` 与 `cargo clippy -p vaultmesh-tauri-desktop --lib -- -D warnings`：通过。
 - macOS debug application bundle 已生成于 `target/debug/bundle/macos/VaultMesh.app`；最终包的 `Info.plist` 已确认包含 `_vaultmesh-pair._tcp` 与 `NSLocalNetworkUsageDescription`。该本地 debug bundle 未签名，不替代签名 packaged AT。
@@ -43,6 +43,7 @@ LAN service 是 Rust runtime 的独立 owner。mDNS 只广告随机实例标识�
 - macOS 实机预验收进一步确认双端均可发现且能显示短码，但原流程要求用户隐式约定只有一端点击“配对”；双端同时点击会让两条合法 TLS 会话竞争并以通用失败结束。现已改为类似蓝牙数字比较的流程：任一端可发起，对端自动进入同一短码确认；双端同时发起时按临时实例 ID 选择唯一 TLS client，竞争会话静默退出。确认后 UI 保持“等待另一台设备”状态，完整双端确认、原子持久化和 connected 路径已有回归测试。
 - macOS↔Windows 实机预验收在两端短码一致并确认后仍回滚；macOS 本机未留下 peer proof 或 `lan-peer-trust.json`，将失败定位到双方持久化确认阶段。Windows 原实现用普通数据写句柄调用文件安全 API，该句柄未显式取得 `WRITE_DAC`，可能导致 owner-only DACL 应用失败。现已在同一 atomic temp file 上以最小 `WRITE_DAC` 权限重新打开安全句柄，并按 Windows 文件对象 API 应用保护 DACL后再提交；Windows 专属回归要求 owner-only 索引实际创建并可读取。renderer-safe 状态同时区分本机与对端安全存储失败，不再折叠成网络错误。该修复仍待新版 Windows 包实机确认。
 - 用户持续实机验证表明，双端比较并分别确认安全短码的交互复杂且容易进入“配对未完成”。当前实现已替换该流程：开启发现即生成本机一次性六码；另一端选择设备并输入该码；协议通过 SPAKE2 和绑定 TLS exporter/双方身份/证书/实例/nonce 的双向 key confirmation 验证，正确后两端自动原子保存信任，不再创建 renderer pending confirmation。旧的 `lan.pairing.confirm`/`lan.pairing.cancel` operation 已移除，错误码、尝试耗尽和安全存储失败均保留可区分的 fail-closed 状态。
+- 输码版首次实机复测仍显示通用安全连接失败；检查发现 mDNS 仍把已废弃的双端数字比较构建和输码构建共同声明为 `v=1`，两端会互相发现但在 TLS 内解析不同帧。当前输码流程改为精确发现修订 `v=1.1`，旧 `v=1` 在扫描阶段直接忽略；连接失败同时拆分为防火墙/局域网导致的 transport failure 与同版本安全握手 failure，renderer 不暴露 endpoint 或加密材料。
 - `pnpm docs:check`：通过。
 - `AT-LAN-PAIRING-001` 尚待两台目标设备执行 macOS↔macOS、Windows↔Windows、macOS↔Windows 与 firewall/system-lock/sleep 路径；Work 因此保持 `Implementing`，不得进入 Verified 或封存。
 

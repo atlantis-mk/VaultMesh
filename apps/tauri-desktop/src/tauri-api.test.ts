@@ -95,6 +95,14 @@ describe('CT-TAURI-COMMAND-001 typed adapter', () => {
     }).success).toBe(true);
     expect(LanPairingStatusSchema.safeParse({
       ...safe,
+      nearby: [{ ...safe.nearby[0], status: 'transport-failed' }],
+    }).success).toBe(true);
+    expect(LanPairingStatusSchema.safeParse({
+      ...safe,
+      nearby: [{ ...safe.nearby[0], status: 'secure-channel-failed' }],
+    }).success).toBe(true);
+    expect(LanPairingStatusSchema.safeParse({
+      ...safe,
       nearby: [{ ...safe.nearby[0], status: 'local-storage-failed' }],
     }).success).toBe(true);
     expect(LanPairingStatusSchema.safeParse({

@@ -31,6 +31,7 @@ use spake2_conflux::{Identity as SpakeIdentity, Password, RistrettoGroup, Spake2
 use zeroize::{Zeroize, Zeroizing};
 
 const PROTOCOL: u8 = 1;
+const PROTOCOL_TXT: &str = "1.1";
 const SERVICE_TYPE: &str = "_vaultmesh-pair._tcp.local.";
 const DISCOVERY_TTL: Duration = Duration::from_secs(600);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -637,7 +638,11 @@ impl LanPairingService {
         let pairing_code = Arc::new(Zeroizing::new(random_pairing_code()));
         let failed_code_attempts = Arc::new(AtomicUsize::new(0));
         let hostname = format!("{}.local.", random_token());
-        let props = [("v", "1"), ("i", instance.as_str()), ("n", nonce.as_str())];
+        let props = [
+            ("v", PROTOCOL_TXT),
+            ("i", instance.as_str()),
+            ("n", nonce.as_str()),
+        ];
         let mut info = ServiceInfo::new(SERVICE_TYPE, &instance, &hostname, "", port, &props[..])
             .map_err(|_| "无法启动局域网发现。")?
             .enable_addr_auto();
@@ -948,7 +953,11 @@ fn parse_discovery_record(props: &TxtProperties, own_instance: &str) -> Option<(
     let version = props.get("v")?.val_str();
     let instance = props.get("i")?.val_str();
     let nonce = props.get("n")?.val_str();
-    if version != "1" || instance == own_instance || !valid_token(instance) || !valid_token(nonce) {
+    if version != PROTOCOL_TXT
+        || instance == own_instance
+        || !valid_token(instance)
+        || !valid_token(nonce)
+    {
         return None;
     }
     Some((instance.to_owned(), nonce.to_owned()))
@@ -991,8 +1000,10 @@ fn accept_loop(listener: TcpListener, stop: Arc<AtomicBool>, context: PairingCon
 }
 fn outbound(ep: Endpoint, pairing_code: Option<Zeroizing<String>>, context: PairingContext) {
     let instance = ep.instance.clone();
+    let mut reached_peer = false;
     for address in ep.addresses.clone() {
         if let Ok(s) = TcpStream::connect_timeout(&SocketAddr::new(address, ep.port), IO_TIMEOUT) {
+            reached_peer = true;
             let Ok(session) = context.sessions.register(&s) else {
                 break;
             };
@@ -1017,7 +1028,11 @@ fn outbound(ep: Endpoint, pairing_code: Option<Zeroizing<String>>, context: Pair
     let _ = context.tx.send(Event::Closed {
         instance,
         peer_ref: None,
-        failure: Some("failed"),
+        failure: Some(if reached_peer {
+            "secure-channel-failed"
+        } else {
+            "transport-failed"
+        }),
     });
 }
 
@@ -1869,10 +1884,10 @@ mod tests {
     }
 
     #[test]
-    fn ct_lan_pairing_accepts_only_exact_bounded_v1_discovery_txt() {
+    fn ct_lan_pairing_accepts_only_exact_bounded_v1_1_discovery_txt() {
         let own = "ffffffffffffffffffffffffffffffff";
         let valid = txt_properties(&[
-            ("v", "1"),
+            ("v", PROTOCOL_TXT),
             ("i", "00112233445566778899aabbccddeeff"),
             ("n", "ffeeddccbbaa99887766554433221100"),
         ]);
@@ -1884,27 +1899,33 @@ mod tests {
             ))
         );
         let wrong_version = txt_properties(&[
-            ("v", "2"),
+            ("v", "2.0"),
             ("i", "00112233445566778899aabbccddeeff"),
             ("n", "ffeeddccbbaa99887766554433221100"),
         ]);
         assert!(parse_discovery_record(&wrong_version, own).is_none());
-        let unknown = txt_properties(&[
+        let legacy_revision = txt_properties(&[
             ("v", "1"),
+            ("i", "00112233445566778899aabbccddeeff"),
+            ("n", "ffeeddccbbaa99887766554433221100"),
+        ]);
+        assert!(parse_discovery_record(&legacy_revision, own).is_none());
+        let unknown = txt_properties(&[
+            ("v", PROTOCOL_TXT),
             ("i", "00112233445566778899aabbccddeeff"),
             ("n", "ffeeddccbbaa99887766554433221100"),
             ("hostname", "private-machine"),
         ]);
         assert!(parse_discovery_record(&unknown, own).is_none());
         let leaked_code = txt_properties(&[
-            ("v", "1"),
+            ("v", PROTOCOL_TXT),
             ("i", "00112233445566778899aabbccddeeff"),
             ("n", "ffeeddccbbaa99887766554433221100"),
             ("code", "123456"),
         ]);
         assert!(parse_discovery_record(&leaked_code, own).is_none());
         let overlong = txt_properties(&[
-            ("v", "1"),
+            ("v", PROTOCOL_TXT),
             ("i", "00112233445566778899aabbccddeeff00"),
             ("n", "ffeeddccbbaa99887766554433221100"),
         ]);
@@ -2514,13 +2535,16 @@ mod tests {
             .send(Event::Closed {
                 instance: instance.into(),
                 peer_ref: None,
-                failure: Some("failed"),
+                failure: Some("secure-channel-failed"),
             })
             .unwrap();
 
         service.collect_events(Instant::now(), 0);
         assert!(!service.in_flight.contains(&reference));
-        assert_eq!(service.nearby.get(instance).unwrap().status, "failed");
+        assert_eq!(
+            service.nearby.get(instance).unwrap().status,
+            "secure-channel-failed"
+        );
     }
 
     #[test]

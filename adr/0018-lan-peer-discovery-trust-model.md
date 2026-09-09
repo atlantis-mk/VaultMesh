@@ -6,7 +6,7 @@ Accepted
 
 ## 决策
 
-VaultMesh 仅在用户显式开启的十分钟窗口内，以随机会话实例和 nonce 通过 mDNS 发现相同 major protocol 的桌面客户端，并同时生成只在本机显示的随机六码配对码。另一台设备选择该客户端并输入其当前配对码后，双方在 TLS 1.3 内以 SPAKE2 执行短时密码认证密钥交换，并以双方设备 ID、证书、实例、nonce 与 TLS exporter 完成双向 key confirmation；配对码本身不进入网络帧。认证通过后无需被发现端二次确认，双方自动交换本地持久化结果；任一端失败均不进入 connected，成功后按持久设备 ID 固定对方设备证书。双方同时发起时，以临时实例 ID 的全序确定唯一 TLS client，安全淘汰竞争会话。私钥、设备 ID 与 proof 位于 OS credential store，非秘密索引位于 owner-only 文件。
+VaultMesh 仅在用户显式开启的十分钟窗口内，以随机会话实例和 nonce 通过 mDNS 发现相同 major protocol 与配对流程修订的桌面客户端；LAN protocol 1 的当前输码流程发布 `v=1.1`，并在发现阶段拒绝已废弃的双端数字比较开发修订 `v=1`。开启发现同时生成只在本机显示的随机六码配对码。另一台设备选择该客户端并输入其当前配对码后，双方在 TLS 1.3 内以 SPAKE2 执行短时密码认证密钥交换，并以双方设备 ID、证书、实例、nonce 与 TLS exporter 完成双向 key confirmation；配对码本身不进入网络帧。认证通过后无需被发现端二次确认，双方自动交换本地持久化结果；任一端失败均不进入 connected，成功后按持久设备 ID 固定对方设备证书。双方同时发起时，以临时实例 ID 的全序确定唯一 TLS client，安全淘汰竞争会话。私钥、设备 ID 与 proof 位于 OS credential store，非秘密索引位于 owner-only 文件。
 
 ## 后果
 

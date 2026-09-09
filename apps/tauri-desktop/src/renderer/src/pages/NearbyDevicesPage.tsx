@@ -172,7 +172,7 @@ export function NearbyDevicesPage() {
                 <div key={device.pairingRef} className="flex items-center justify-between gap-3 rounded-lg border p-3">
                   <div className="min-w-0">
                     <p className="truncate font-medium">{trusted?.label ?? `VaultMesh ${shortPeer(device.pairingRef)}`}</p>
-                    <p className="text-xs text-muted-foreground">{device.status === 'connected' ? '已通过证书固定验证连通' : connecting ? '正在验证配对码并建立信任' : device.status === 'code-rejected' ? '配对码不正确或安全验证失败' : device.status === 'local-storage-failed' ? '本机无法安全保存设备信任' : device.status === 'peer-storage-failed' ? '另一台设备无法安全保存信任' : device.status === 'failed' ? '无法建立安全连接，请重试' : trusted ? '已信任，等待双方重连' : '尚未验证'}</p>
+                    <p className="text-xs text-muted-foreground">{device.status === 'connected' ? '已通过证书固定验证连通' : connecting ? '正在验证配对码并建立信任' : device.status === 'code-rejected' ? '配对码不正确或安全验证失败' : device.status === 'local-storage-failed' ? '本机无法安全保存设备信任' : device.status === 'peer-storage-failed' ? '另一台设备无法安全保存信任' : device.status === 'transport-failed' ? '无法连接该设备，请检查双方防火墙和局域网访问权限' : device.status === 'secure-channel-failed' ? '安全握手失败，请确认两端均已更新到相同版本' : trusted ? '已信任，等待双方重连' : '尚未验证'}</p>
                   </div>
                   {device.status === 'connected' ? <Badge><ShieldCheckIcon data-icon="inline-start" />已验证</Badge> : connecting ? <Badge variant="outline"><RefreshCwIcon className="animate-spin" data-icon="inline-start" />正在配对</Badge> : trusted ? <Badge variant="outline">等待重连</Badge> : (
                     <Button size="sm" type="button" disabled={busy} onClick={() => { setPairingPeer(device.pairingRef); setPairingCode(''); }}>
