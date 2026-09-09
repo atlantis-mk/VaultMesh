@@ -93,7 +93,7 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     expect(screen.queryByRole('button', { name: '配对' })).toBeNull();
   });
 
-  it('returns transport and secure-channel failures to actionable retry states', async () => {
+  it('returns transport, TLS, and identity failures to actionable retry states', async () => {
     const pairingRef = 'lan-peer-00112233445566778899aabbccddeeff';
     vi.mocked(window.vaultMesh.lan.status).mockResolvedValue({
       ...emptyStatus,
@@ -101,14 +101,16 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
       expiresAt: Date.now() + 60_000,
       nearby: [
         { pairingRef, status: 'transport-failed' },
-        { pairingRef: 'lan-peer-ffeeddccbbaa99887766554433221100', status: 'secure-channel-failed' },
+        { pairingRef: 'lan-peer-ffeeddccbbaa99887766554433221100', status: 'tls-failed' },
+        { pairingRef: 'lan-peer-aabbccddeeff00112233445566778899', status: 'peer-identity-rejected' },
       ],
     });
     render(<NearbyDevicesPage />);
 
     expect(await screen.findByText('无法连接该设备，请检查双方防火墙和局域网访问权限')).toBeTruthy();
-    expect(screen.getByText('安全握手失败，请确认两端均已更新到相同版本')).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: '配对' })).toHaveLength(2);
+    expect(screen.getByText('TLS 握手失败，请检查系统时间和安全软件')).toBeTruthy();
+    expect(screen.getByText('另一台设备拒绝了本机身份，请在对端撤销旧信任')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: '配对' })).toHaveLength(3);
   });
 
   it('shows an explicit rejected-code state and allows retry', async () => {

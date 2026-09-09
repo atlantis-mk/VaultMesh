@@ -101,6 +101,16 @@ describe('CT-TAURI-COMMAND-001 typed adapter', () => {
       ...safe,
       nearby: [{ ...safe.nearby[0], status: 'secure-channel-failed' }],
     }).success).toBe(true);
+    for (const status of [
+      'certificate-exchange-failed', 'tls-failed', 'protocol-failed', 'discovery-changed',
+      'identity-changed', 'peer-identity-rejected', 'local-trust-state-failed',
+      'code-attempts-exhausted', 'persistence-sync-failed',
+    ]) {
+      expect(LanPairingStatusSchema.safeParse({
+        ...safe,
+        nearby: [{ ...safe.nearby[0], status }],
+      }).success).toBe(true);
+    }
     expect(LanPairingStatusSchema.safeParse({
       ...safe,
       nearby: [{ ...safe.nearby[0], status: 'local-storage-failed' }],

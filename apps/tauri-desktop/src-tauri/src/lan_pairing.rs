@@ -554,6 +554,22 @@ impl Write for TlsStream {
     }
 }
 impl TlsStream {
+    fn complete_handshake(&mut self) -> Result<(), ()> {
+        match self {
+            Self::Client(stream) => {
+                while stream.conn.is_handshaking() {
+                    stream.conn.complete_io(&mut stream.sock).map_err(|_| ())?;
+                }
+            }
+            Self::Server(stream) => {
+                while stream.conn.is_handshaking() {
+                    stream.conn.complete_io(&mut stream.sock).map_err(|_| ())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn exporter(&self) -> Result<[u8; 32], ()> {
         let out = [0; 32];
         match self {
@@ -1001,6 +1017,7 @@ fn accept_loop(listener: TcpListener, stop: Arc<AtomicBool>, context: PairingCon
 fn outbound(ep: Endpoint, pairing_code: Option<Zeroizing<String>>, context: PairingContext) {
     let instance = ep.instance.clone();
     let mut reached_peer = false;
+    let mut failure = "secure-channel-failed";
     for address in ep.addresses.clone() {
         if let Ok(s) = TcpStream::connect_timeout(&SocketAddr::new(address, ep.port), IO_TIMEOUT) {
             reached_peer = true;
@@ -1017,10 +1034,10 @@ fn outbound(ep: Endpoint, pairing_code: Option<Zeroizing<String>>, context: Pair
             );
             match result {
                 Ok(()) | Err(PairError::Reported | PairError::Superseded) => return,
-                Err(PairError::Failed) if superseded_outbound(&context, &instance) => {
+                Err(PairError::Failed(_)) if superseded_outbound(&context, &instance) => {
                     return;
                 }
-                Err(PairError::Failed) => {}
+                Err(PairError::Failed(stage)) => failure = stage,
             }
             drop(session);
         }
@@ -1029,7 +1046,7 @@ fn outbound(ep: Endpoint, pairing_code: Option<Zeroizing<String>>, context: Pair
         instance,
         peer_ref: None,
         failure: Some(if reached_peer {
-            "secure-channel-failed"
+            failure
         } else {
             "transport-failed"
         }),
@@ -1043,14 +1060,14 @@ fn superseded_outbound(context: &PairingContext, peer_instance: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PairError {
-    Failed,
+    Failed(&'static str),
     Reported,
     Superseded,
 }
 
 impl From<()> for PairError {
     fn from((): ()) -> Self {
-        Self::Failed
+        Self::Failed("secure-channel-failed")
     }
 }
 
@@ -1066,18 +1083,25 @@ fn pair(
     socket.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     socket.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     let peer_cert = if client {
-        write_cert(&mut socket, &context.identity.cert)?;
-        read_cert(&mut socket)?
+        write_cert(&mut socket, &context.identity.cert)
+            .map_err(|_| PairError::Failed("certificate-exchange-failed"))?;
+        read_cert(&mut socket).map_err(|_| PairError::Failed("certificate-exchange-failed"))?
     } else {
-        let c = read_cert(&mut socket)?;
-        write_cert(&mut socket, &context.identity.cert)?;
+        let c =
+            read_cert(&mut socket).map_err(|_| PairError::Failed("certificate-exchange-failed"))?;
+        write_cert(&mut socket, &context.identity.cert)
+            .map_err(|_| PairError::Failed("certificate-exchange-failed"))?;
         c
     };
     let mut tls = if client {
-        client_tls(socket, &context.identity, &peer_cert)?
+        client_tls(socket, &context.identity, &peer_cert)
+            .map_err(|_| PairError::Failed("tls-failed"))?
     } else {
-        server_tls(socket, &context.identity, &peer_cert)?
+        server_tls(socket, &context.identity, &peer_cert)
+            .map_err(|_| PairError::Failed("tls-failed"))?
     };
+    tls.complete_handshake()
+        .map_err(|_| PairError::Failed("tls-failed"))?;
     write_frame(
         &mut tls,
         &Hello {
@@ -1087,19 +1111,20 @@ fn pair(
             device_id: context.identity.device_id.clone(),
             pairing_intent,
         },
-    )?;
-    let hello: Hello = read_frame(&mut tls)?;
+    )
+    .map_err(|_| PairError::Failed("protocol-failed"))?;
+    let hello: Hello = read_frame(&mut tls).map_err(|_| PairError::Failed("protocol-failed"))?;
     if hello.version != PROTOCOL
         || !valid_token(&hello.instance)
         || !valid_token(&hello.nonce)
         || !valid_token(&hello.device_id)
     {
-        return Err(PairError::Failed);
+        return Err(PairError::Failed("protocol-failed"));
     }
     if let Some((ei, en)) = expected
         && ((hello.instance != ei) || (hello.nonce != en))
     {
-        return Err(PairError::Failed);
+        return Err(PairError::Failed("discovery-changed"));
     }
     let simultaneous_intent = hello.pairing_intent
         && (pairing_intent || context.sessions.has_pairing_intent(&hello.instance));
@@ -1116,11 +1141,16 @@ fn pair(
     }
     let reference = format!("lan-peer-{}", hello.device_id);
     let fingerprint = hex_digest(&peer_cert);
-    let state = peer_trust_state(&context.trust, &reference, &fingerprint)?;
-    write_frame(&mut tls, &state)?;
-    let remote: TrustState = read_frame(&mut tls)?;
-    if state.blocked || remote.blocked {
-        return Err(PairError::Failed);
+    let state = peer_trust_state(&context.trust, &reference, &fingerprint)
+        .map_err(|_| PairError::Failed("local-trust-state-failed"))?;
+    write_frame(&mut tls, &state).map_err(|_| PairError::Failed("protocol-failed"))?;
+    let remote: TrustState =
+        read_frame(&mut tls).map_err(|_| PairError::Failed("protocol-failed"))?;
+    if state.blocked {
+        return Err(PairError::Failed("identity-changed"));
+    }
+    if remote.blocked {
+        return Err(PairError::Failed("peer-identity-rejected"));
     }
     if state.trusted && remote.trusted {
         session.sessions.bind_peer(session, &reference)?;
@@ -1135,16 +1165,17 @@ fn pair(
         return Ok(());
     }
     if !pairing_intent && !hello.pairing_intent {
-        return Err(PairError::Failed);
+        return Err(PairError::Failed("protocol-failed"));
     }
     let reserved_code_attempt = if client {
         false
     } else {
-        reserve_pairing_attempt(&context.failed_code_attempts).map_err(|_| PairError::Failed)?;
+        reserve_pairing_attempt(&context.failed_code_attempts)
+            .map_err(|_| PairError::Failed("code-attempts-exhausted"))?;
         true
     };
     let code = if client {
-        submitted_code.ok_or(PairError::Failed)?
+        submitted_code.ok_or(PairError::Failed("protocol-failed"))?
     } else {
         context.pairing_code.as_ref().as_str()
     };
@@ -1193,7 +1224,7 @@ fn pair(
             } else if remote_persisted.is_ok_and(|remote| !remote.persisted) {
                 "peer-storage-failed"
             } else {
-                "failed"
+                "persistence-sync-failed"
             };
             let _ = context.tx.send(Event::Closed {
                 instance: hello.instance,
@@ -2204,7 +2235,10 @@ mod tests {
         assert_eq!(inbound_a.join().unwrap(), Err(PairError::Superseded));
         assert!(inbound_b.join().unwrap().is_ok());
         assert!(outbound_a.join().unwrap().is_ok());
-        assert_eq!(outbound_b.join().unwrap(), Err(PairError::Failed));
+        assert!(matches!(
+            outbound_b.join().unwrap(),
+            Err(PairError::Failed(_))
+        ));
         let _ = std::fs::remove_file(&context_a.trust.path);
         let _ = std::fs::remove_file(&context_b.trust.path);
     }
