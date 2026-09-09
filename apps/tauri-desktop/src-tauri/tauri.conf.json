@@ -45,6 +45,7 @@
     "windows": {
       "wix": {
         "upgradeCode": "54591767-50d9-5adc-879b-58465ad2719e",
+        "version": "0.0.9",
         "fragmentPaths": ["./windows/browser-host.wxs"],
         "componentRefs": ["BrowserNativeMessagingRegistration"]
       },

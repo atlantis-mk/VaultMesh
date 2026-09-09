@@ -1,6 +1,7 @@
 //! Isolated LAN discovery/pairing owner; this module never receives a Vault runtime.
 use std::{
     collections::{HashMap, HashSet},
+    ffi::c_void,
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
