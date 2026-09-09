@@ -47,8 +47,11 @@ LAN service 是 Rust runtime 的独立 owner。mDNS 只广告随机实例标识�
 - `pnpm docs:check`：通过。
 - 后续实机出现 TLS/证书交换两种失败，已由 `BUG-2026-021-lan-accepted-socket-mode` 在 macOS 生产 accept_loop 上复现并修复连接继承非阻塞模式的问题；先前版本不一致、时间或安全软件判断不构成该次故障的根因证据。该 Bug 记录修复前/后测试和双机复测状态。
 - `AT-LAN-PAIRING-001` 尚待两台目标设备执行 macOS↔macOS、Windows↔Windows、macOS↔Windows 与 firewall/system-lock/sleep 路径；Work 因此保持 `Implementing`，不得进入 Verified 或封存。
+- 2026-09-09 Windows 存储失败诊断（基线 `8025eca`）：从当前 `lan_pairing.rs` 提取 `write_private` / `set_windows_owner_only`，使用已构建的同仓库依赖，在应用实际 app-data 目录写入独立临时空索引，并以独立临时凭据执行 keyring 写/读/删。连续两次复现 `SetSecurityInfo` 返回 `5`（Access denied），凭据库三步均成功。仅将安全句柄访问掩码从 `WRITE_DAC` 改成 `WRITE_DAC | READ_CONTROL` 的对照诊断，两次索引写入/读取及凭据库三步均成功；未改变目标 owner-only DACL。由此定位当前 Windows 索引权限设置仍缺少安全描述符读取权限，先前仅补 `WRITE_DAC` 的修复不完整。本次仅获取诊断详情，产品代码/运行程序未替换；后续修复仍需 Windows 回归、DACL 内容验证和真实双机配对验收。本地可定位诊断程序与输出为 `target/lan-storage-diagnostic/probe.rs`、`probe-read-control.rs`、`baseline.log`、`read-control.log`（临时构建产物，不含真实凭据、配对码或 peer 数据）；测试索引/凭据已清理。
 
 ## 安全与数据生命周期
+
+Windows `SetSecurityInfo` error 5 的后续修复、权限回归与重建证据由 `BUG-2026-022-lan-windows-trust-acl` 维护。
 
 设备私钥、已配对验证材料进入 OS credential store；本地索引仅含非秘密 peer 标识、固定指纹和用户本地标签。监听、广告、TLS 会话、nonce 与本机配对码只存在于发现窗口；不写日志、Vault、clipboard、renderer persistence 或 crash data。
 
