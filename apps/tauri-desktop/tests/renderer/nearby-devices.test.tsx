@@ -119,6 +119,23 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     expect(screen.queryByRole('button', { name: '配对' })).toBeNull();
   });
 
+  it('distinguishes local and peer trust-storage failures without exposing internals', async () => {
+    vi.mocked(window.vaultMesh.lan.status).mockResolvedValue({
+      ...emptyStatus,
+      discoverable: true,
+      expiresAt: Date.now() + 60_000,
+      nearby: [
+        { pairingRef: 'lan-peer-00112233445566778899aabbccddeeff', status: 'local-storage-failed' },
+        { pairingRef: 'lan-peer-ffeeddccbbaa99887766554433221100', status: 'peer-storage-failed' },
+      ],
+    });
+    render(<NearbyDevicesPage />);
+
+    expect(await screen.findByText('本机无法安全保存设备信任')).toBeTruthy();
+    expect(screen.getByText('另一台设备无法安全保存信任')).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/DACL|Keychain|Credential Manager|fingerprint/i);
+  });
+
   it('shows only the six-digit comparison code and routes both decisions by opaque peer ref', async () => {
     const pairingRef = 'lan-peer-00112233445566778899aabbccddeeff';
     vi.mocked(window.vaultMesh.lan.status).mockResolvedValue({

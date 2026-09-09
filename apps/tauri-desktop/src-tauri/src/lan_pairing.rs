@@ -1,7 +1,6 @@
 //! Isolated LAN discovery/pairing owner; this module never receives a Vault runtime.
 use std::{
     collections::{HashMap, HashSet},
-    ffi::c_void,
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -499,6 +498,7 @@ enum Event {
     Closed {
         instance: String,
         peer_ref: Option<String>,
+        failure: Option<&'static str>,
     },
 }
 
@@ -954,19 +954,18 @@ impl LanPairingService {
                         device.status = "connected";
                     }
                 }
-                Event::Closed { instance, peer_ref } => {
+                Event::Closed {
+                    instance,
+                    peer_ref,
+                    failure,
+                } => {
                     self.in_flight.remove(&format!("lan-peer-{instance}"));
-                    let failed_before_prompt = peer_ref.is_none();
                     if let Some(reference) = peer_ref {
                         self.pending.remove(&reference);
                     }
                     if let Some(device) = self.nearby.get_mut(&instance) {
                         device.pairing_ref = format!("lan-peer-{instance}");
-                        device.status = if failed_before_prompt {
-                            "failed"
-                        } else {
-                            "unverified"
-                        };
+                        device.status = failure.unwrap_or("unverified");
                     }
                 }
             }
@@ -1075,7 +1074,7 @@ fn outbound(ep: Endpoint, pairing_intent: bool, context: PairingContext) {
                 &session,
             );
             match result {
-                Ok(()) | Err(PairError::Superseded) => return,
+                Ok(()) | Err(PairError::Reported | PairError::Superseded) => return,
                 Err(PairError::Failed) if superseded_outbound(&context, &instance) => {
                     return;
                 }
@@ -1087,6 +1086,7 @@ fn outbound(ep: Endpoint, pairing_intent: bool, context: PairingContext) {
     let _ = context.tx.send(Event::Closed {
         instance,
         peer_ref: None,
+        failure: Some("failed"),
     });
 }
 
@@ -1098,6 +1098,7 @@ fn superseded_outbound(context: &PairingContext, peer_instance: &str) -> bool {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PairError {
     Failed,
+    Reported,
     Superseded,
 }
 
@@ -1247,7 +1248,19 @@ fn pair(
                 });
                 let _ = rolled_back_rx.recv_timeout(IO_TIMEOUT);
             }
-            return Err(PairError::Failed);
+            let failure = if !local_persisted {
+                "local-storage-failed"
+            } else if remote_persisted.is_ok_and(|remote| !remote.persisted) {
+                "peer-storage-failed"
+            } else {
+                "failed"
+            };
+            let _ = context.tx.send(Event::Closed {
+                instance: hello.instance,
+                peer_ref: Some(reference),
+                failure: Some(failure),
+            });
+            return Err(PairError::Reported);
         }
         session.sessions.bind_peer(session, &reference)?;
         context
@@ -1262,6 +1275,7 @@ fn pair(
         let _ = context.tx.send(Event::Closed {
             instance: hello.instance,
             peer_ref: Some(reference),
+            failure: None,
         });
     }
     Ok(())
@@ -1318,6 +1332,7 @@ fn monitor_connection(
     let _ = tx.send(Event::Closed {
         instance,
         peer_ref: Some(reference),
+        failure: None,
     });
     Ok(())
 }
@@ -1566,16 +1581,22 @@ fn write_private(path: &Path, b: &[u8]) -> Result<(), ()> {
 
 #[cfg(target_os = "windows")]
 fn set_windows_owner_only(file: &std::fs::File) -> Result<(), ()> {
-    use std::{os::windows::io::AsRawHandle, ptr::null_mut};
+    use std::{ffi::c_void, os::windows::io::AsRawHandle, ptr::null_mut};
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE, LocalFree},
+        Foundation::{
+            CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GetLastError, HANDLE,
+            INVALID_HANDLE_VALUE, LocalFree,
+        },
         Security::{
             Authorization::{
                 ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-                SDDL_REVISION_1,
+                SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
             },
-            DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
-            SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER, TokenUser,
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
+            PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        },
+        Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile, WRITE_DAC,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
@@ -1640,15 +1661,53 @@ fn set_windows_owner_only(file: &std::fs::File) -> Result<(), ()> {
     {
         return Err(());
     }
-    let applied = unsafe {
-        SetKernelObjectSecurity(
-            file.as_raw_handle() as HANDLE,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+    let mut dacl_present = 0;
+    let mut dacl_defaulted = 0;
+    let mut dacl = null_mut();
+    if unsafe {
+        GetSecurityDescriptorDacl(
             descriptor,
+            &mut dacl_present,
+            &mut dacl,
+            &mut dacl_defaulted,
+        )
+    } == 0
+        || dacl_present == 0
+        || dacl.is_null()
+    {
+        unsafe { LocalFree(descriptor) };
+        return Err(());
+    }
+    // std::fs::File is opened for data writes and does not necessarily carry
+    // WRITE_DAC. Reopen the same atomic temp file with the exact security
+    // right before applying the owner-only DACL, then close that handle before
+    // the atomic commit renames the file.
+    let security_handle = unsafe {
+        ReOpenFile(
+            file.as_raw_handle() as HANDLE,
+            WRITE_DAC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            0,
+        )
+    };
+    if security_handle == INVALID_HANDLE_VALUE {
+        unsafe { LocalFree(descriptor) };
+        return Err(());
+    }
+    let security_handle = OwnedHandle(security_handle);
+    let applied = unsafe {
+        SetSecurityInfo(
+            security_handle.0,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            dacl,
+            null_mut(),
         )
     };
     unsafe { LocalFree(descriptor) };
-    (applied != 0).then_some(()).ok_or(())
+    (applied == ERROR_SUCCESS).then_some(()).ok_or(())
 }
 
 #[cfg(test)]
@@ -2076,12 +2135,24 @@ mod tests {
             _ => panic!("expected rollback after remote persistence failure"),
         }
 
-        assert!(server.join().unwrap().is_err());
-        assert!(client.join().unwrap().is_err());
+        assert_eq!(server.join().unwrap(), Err(PairError::Reported));
+        assert_eq!(client.join().unwrap(), Err(PairError::Reported));
         assert!(server_store.load().unwrap().is_empty());
         assert!(client_store.load().unwrap().is_empty());
-        assert!(!matches!(server_rx.try_recv(), Ok(Event::Connected { .. })));
-        assert!(!matches!(client_rx.try_recv(), Ok(Event::Connected { .. })));
+        assert!(matches!(
+            server_rx.try_recv(),
+            Ok(Event::Closed {
+                failure: Some("peer-storage-failed"),
+                ..
+            })
+        ));
+        assert!(matches!(
+            client_rx.try_recv(),
+            Ok(Event::Closed {
+                failure: Some("local-storage-failed"),
+                ..
+            })
+        ));
         let _ = std::fs::remove_file(server_path);
         let _ = std::fs::remove_file(client_path);
     }
@@ -2318,6 +2389,7 @@ mod tests {
             .send(Event::Closed {
                 instance: instance.into(),
                 peer_ref: None,
+                failure: Some("failed"),
             })
             .unwrap();
 
@@ -2493,6 +2565,16 @@ mod tests {
             std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ct_lan_pairing_index_is_owner_only() {
+        let store = empty_store("windows-permissions");
+        store.save(&[]).unwrap();
+        assert!(store.path.is_file());
+        assert_eq!(store.load_index().unwrap().peers.len(), 0);
         let _ = std::fs::remove_file(&store.path);
     }
 }

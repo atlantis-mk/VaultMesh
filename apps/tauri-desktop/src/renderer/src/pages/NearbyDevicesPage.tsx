@@ -145,7 +145,7 @@ export function NearbyDevicesPage() {
                 <div key={device.pairingRef} className="flex items-center justify-between gap-3 rounded-lg border p-3">
                   <div className="min-w-0">
                     <p className="truncate font-medium">{trusted?.label ?? `VaultMesh ${shortPeer(device.pairingRef)}`}</p>
-                    <p className="text-xs text-muted-foreground">{device.status === 'connected' ? '已通过证书固定验证连通' : connecting ? '正在建立加密连接并生成安全短码' : confirming ? '本机已确认，正在等待另一台设备' : device.status === 'failed' ? '配对未完成，请重试' : trusted ? '已信任，等待双方重连' : '尚未验证'}</p>
+                    <p className="text-xs text-muted-foreground">{device.status === 'connected' ? '已通过证书固定验证连通' : connecting ? '正在建立加密连接并生成安全短码' : confirming ? '本机已确认，正在等待另一台设备' : device.status === 'local-storage-failed' ? '本机无法安全保存设备信任' : device.status === 'peer-storage-failed' ? '另一台设备无法安全保存信任' : device.status === 'failed' ? '配对未完成，请重试' : trusted ? '已信任，等待双方重连' : '尚未验证'}</p>
                   </div>
                   {device.status === 'connected' ? <Badge><ShieldCheckIcon data-icon="inline-start" />已验证</Badge> : connecting ? <Badge variant="outline"><RefreshCwIcon className="animate-spin" data-icon="inline-start" />正在配对</Badge> : confirming ? <Badge variant="outline"><RefreshCwIcon className="animate-spin" data-icon="inline-start" />等待确认</Badge> : trusted ? <Badge variant="outline">等待重连</Badge> : (
                     <Button size="sm" type="button" disabled={busy || status.pending.some((item) => item.pairingRef === device.pairingRef)} onClick={() => void run(() => window.vaultMesh.lan.begin(device.pairingRef).then(() => undefined))}>

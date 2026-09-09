@@ -99,6 +99,14 @@ describe('CT-TAURI-COMMAND-001 typed adapter', () => {
     }).success).toBe(true);
     expect(LanPairingStatusSchema.safeParse({
       ...safe,
+      nearby: [{ ...safe.nearby[0], status: 'local-storage-failed' }],
+    }).success).toBe(true);
+    expect(LanPairingStatusSchema.safeParse({
+      ...safe,
+      nearby: [{ ...safe.nearby[0], status: 'peer-storage-failed' }],
+    }).success).toBe(true);
+    expect(LanPairingStatusSchema.safeParse({
+      ...safe,
       nearby: [{ ...safe.nearby[0], address: '192.168.1.8', port: 43210, nonce: 'secret' }],
     }).success).toBe(false);
     expect(LanPairingStatusSchema.safeParse({
