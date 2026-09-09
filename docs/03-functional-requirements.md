@@ -4,18 +4,26 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 ## 产品与 Vault 生命周期
 
-### REQ-PRODUCT-001 本地单设备运行
+### REQ-PRODUCT-001 本地优先运行
 
 - 必须：用户不创建账号、不连接 VaultMesh 服务即可创建和使用 Vault。
-- 必须：当前版本不提供同步、分享或恢复后门。
+- 必须：当前版本仅提供 REQ-LAN-SYNC-001 定义的局域网桌面同步，不提供服务器同步、分享或恢复后门。
 - 验收：`AT-PRODUCT-001`。
 
 ### REQ-LAN-PEER-001 局域网客户端发现与可信配对
 
 - 必须：macOS/Windows VaultMesh desktop 可以在用户显式开启、最长十分钟的局域网发现窗口内，生成本次窗口专用的随机六码配对码并发现同一协议主版本与配对流程修订的 VaultMesh desktop；不同流程修订必须在发现阶段相互隔离，不得等到 TLS 握手后才以通用错误失败。另一台设备选择该客户端并输入其当前配对码后，双方必须通过与当前 TLS 会话绑定的密码认证密钥交换自动建立可撤销设备信任，不得再要求被发现端二次确认。
-- 必须：非秘密的附近设备页面不依赖 Vault 解锁；窗口失焦仍按既有策略锁定 Vault，但不得因此中断正在显示的 LAN 配对页。发现、配对、重连状态与 desktop/browser/Agent unlock 相互独立；不读取、复制、传输或操作 Vault、秘密、账号、授权、Browser RPC 或 Agent IPC。
+- 必须：附近设备页面只能在 desktop Vault 解锁后展示；锁定状态直接访问必须跳转解锁页，不得加载或展示设备列表与配对码。页面显示期间，手动锁定、按策略锁定或状态刷新发现已锁定时必须立即卸载页面、停止发现并返回解锁页；窗口失焦仍按既有策略锁定 Vault。LAN 设备信任不得授予或继承 desktop/browser/Agent unlock；配对仅为 REQ-LAN-SYNC-001 建立当前 Vault 的同步授权，不授予远程操作、Browser RPC 或 Agent IPC 权限。
 - 必须：mDNS TXT 只能包含协议版本、随机实例 ID 与一次性 nonce，SRV/A/AAAA 只能使用随机会话 hostname 与临时 endpoint；不得披露系统 hostname、用户信息、Vault metadata、证书、公钥、配对码或受保护值。renderer-safe DTO 除本机当前的短时配对码外，不得包含 hostname、IP、port、证书、公钥、固定指纹、nonce 或协议帧；错误配对码、证书变化、协议不兼容、超时、取消、重复、撤销和损坏持久化必须 fail closed。
 - 验收：`CT-LAN-PAIRING-001`、`AT-LAN-PAIRING-001`。
+
+### REQ-LAN-SYNC-001 局域网自动双向同步
+
+- 必须：配对授权后，两端 desktop Vault 解锁且同一 LAN 时自动合并适用凭据与组织信息，离开附近设备页面仍继续；各端主密码与 Vault Key 独立。新配对明确包含同步授权，旧配对双方补充确认，授权绑定双方 Vault 与设备身份。
+- 必须：不同 ID 保留独立；同记录采用确定性最后修改版本，败者保留加密历史；重复幂等，删除和历史清理不被旧设备复活；变化、版本和墓碑同事务原子落盘后才确认。
+- 必须：邮件连接凭据、本地权限/设置/审计与 SSH 部署绑定不得传输；旧单设备 Passkey 保持本机，新可备份 Passkey 支持同步。desktop 锁定、系统锁定、睡眠、撤销、切换 Vault 或退出必须停止同步；Browser/Agent 解锁不得代替 desktop 授权。
+- 必须：format-3 升级由主密码验证并先保存加密备份，format 4 不得被旧 writer 修改；恢复必须轮换副本 epoch 并重新授权。机制由 `specs/lan-vault-sync.md` 所有。
+- 验收：`CT-LAN-SYNC-001`、`AT-LAN-SYNC-001`。
 
 ### REQ-VAULT-001 创建、解锁和锁定
 
@@ -366,6 +374,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 ### REQ-PASSKEY-001 软件 Passkey
 
+- 必须：旧 BE=0 Passkey 不参与同步且不得改变备份资格；新注册 Passkey 使用 BE=1、counter=0，副本持久化成功后才设置 BS。私钥只经已授权 Rust 同步通道复制，使用仍执行逐次原生确认。
+
 - 必须：Chromium WebAuthn proxy 的 ES256 私钥保存在加密 secret 中，签名在 main 完成，每次 registration/assertion 显示 native confirmation。
 - 必须：Passkey 创建或导入使用当前 RP/origin 的默认 Login 作为归属提示，并由 desktop 重新验证；无有效默认值时可以唯一用户名匹配，仍不确定时作为 Passkey-only Login，禁止进入普通 Secret/密钥分类。
 - 验收：`CT-PASSKEY-001`、`AT-PASSKEY-001`。
@@ -455,8 +465,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
   Agent 自报 label 或模型推断不能选择生产账号。
 - 必须：Agent Profile、Profile permission rule、Profile CRUD 与 format-2 兼容读取不得存在。只有 managed-web
   recipe 与 SSH tunnel endpoint 可以保存在 Rust-owned internal ConnectorDefinition 中；该记录不拥有账号、
-  credential 或 client permission，也不通过 MCP/renderer 暴露。所有 Vault 必须统一写入和读取 format 3；
-  其他所有版本必须在 KDF 前拒绝，不得保留迁移、降级或专用兼容入口。
+  credential 或 client permission，也不通过 MCP/renderer 暴露。所有 Vault 必须统一写入 format 4；format 3 仅由 desktop 主密码验证的迁移入口读取，兼容规则由 NFR-COMPAT-001 所有。
 - 验收：`CT-AGENT-POLICY-001`、`CT-AGENT-ACCOUNT-001`。
 
 ### REQ-AGENT-004 SSH 动作
@@ -623,9 +632,8 @@ managed web 或 protected-action 工具完成受支持的任务。
 ### NFR-COMPAT-001 版本兼容
 
 - 必须：未知 Vault/RPC 版本 fail closed；兼容字段使用明确 default；版本变化具备迁移和回滚策略。
-- 必须：Vault 只写入和读取 format 3。所有其他版本必须在 KDF 前拒绝；Core、FFI、Tauri、renderer、Agent、
-  Browser、quick unlock 与 restore 均不得保留旧格式迁移、降级、专用 reader 或备份入口。所有 mutation 与
-  backup/restore 必须保持 format 3，并继续满足原子提交和失败回滚。
+- 必须：Vault 只创建和写入 format 4。format 3 仅允许 desktop 主密码驱动的受控升级，升级前必须保存原加密备份，失败保留旧文件；所有其他版本在 KDF 前拒绝。Agent、Browser 与 quick unlock 不执行迁移，旧客户端必须拒绝 format 4。 PIN/指纹遇到旧格式时必须明确提示先在桌面使用主密码升级，不得仅显示通用操作失败；升级后原 Vault Key 对应的快速解锁必须继续有效。
+- 必须：备份恢复轮换副本 epoch 与 Vault 同步绑定身份、清除同步授权，重新授权后才同步。升级回退仅通过升级前备份，不包含升级后的修改；所有 mutation 与 backup/restore 保持原子提交和失败回滚。
 - 验收：`CT-COMPAT-001`、`CT-AGENT-ACCOUNT-001`。
 
 ### NFR-PRIV-001 秘密最小化

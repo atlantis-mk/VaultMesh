@@ -146,7 +146,7 @@ export function validateArchiveManifest({ root, changes, baseRef = 'HEAD' }) {
   }
 
   for (const change of changes) {
-    if (COMPLETED_STATUSES.has(change.status) && !archivesById.has(change.id)) {
+    if (change.schema !== '2' && COMPLETED_STATUSES.has(change.status) && !archivesById.has(change.id)) {
       errors.push(`${change.file}: completed Work ${change.id} must be archived`);
     }
   }

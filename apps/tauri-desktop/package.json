@@ -10,7 +10,7 @@
     "directory": "apps/tauri-desktop"
   },
   "type": "module",
-  "packageManager": "pnpm@11.1.1",
+  "packageManager": "pnpm@11.24.0",
   "scripts": {
     "dev": "vite --config vite.config.ts",
     "build:web": "vite build --config vite.config.ts",

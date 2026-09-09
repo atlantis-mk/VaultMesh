@@ -46,6 +46,7 @@ pub struct ManagedSshHostKeyMaterial {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DesktopRuntimeError {
     status: VaultmeshStatus,
+    message: Option<&'static str>,
 }
 
 impl DesktopRuntimeError {
@@ -54,6 +55,7 @@ impl DesktopRuntimeError {
     }
 
     pub fn public_message(self) -> &'static str {
+        if let Some(message) = self.message { return message; }
         match self.status {
             VAULTMESH_STATUS_INVALID_ARGUMENT => "请求参数无效。",
             VAULTMESH_STATUS_LOCKED => "请先解锁保险库。",
@@ -71,6 +73,6 @@ impl DesktopRuntimeError {
 
 impl From<VaultmeshStatus> for DesktopRuntimeError {
     fn from(status: VaultmeshStatus) -> Self {
-        Self { status }
+        Self { status, message: None }
     }
 }

@@ -154,7 +154,7 @@ use electron_migration::{
 };
 use email_otp::{EmailOtpService, EmailScanExecution, EmailScanPlan};
 use import_service::{ImportService, MAX_IMPORT_FILE_BYTES, validate_source};
-use lan_pairing::LanPairingService;
+use lan_pairing::{LanPairingService, LanSyncService};
 use pin_service::PinQuickUnlockService;
 use recovery_code_command::import_recovery_code_file;
 use recovery_code_file::PreparedRecoveryCodeFile;
@@ -234,6 +234,7 @@ struct RuntimeState {
     biometric: Arc<Mutex<BiometricQuickUnlockService>>,
     pin: Arc<Mutex<PinQuickUnlockService>>,
     lan_pairing: Arc<Mutex<LanPairingService>>,
+    lan_sync: Arc<Mutex<LanSyncService>>,
     vault_path_record: PathBuf,
 }
 
@@ -762,6 +763,19 @@ fn handle_lan_pairing(
     operation: &str,
     input: Value,
 ) -> Result<Value, String> {
+    if operation.starts_with("lan.sync.") {
+        return handle_lan_sync(state, operation, input);
+    }
+    if operation != "lan.discovery.stop"
+        && !state
+            .runtime
+            .lock()
+            .map_err(|_| "保险库不可用。")?
+            .status()
+            .unlocked
+    {
+        return Err("请先解锁保险库。".into());
+    }
     let mut service = state
         .lan_pairing
         .lock()
@@ -769,12 +783,33 @@ fn handle_lan_pairing(
     match operation {
         "lan.pairing.status" | "lan.discovery.scan" => {
             require_empty_object(&input)?;
-            serde_json::to_value(service.status(std::time::Instant::now(), unix_millis()))
-                .map_err(|_| "局域网配对服务暂时不可用。".to_owned())
+            let status = service.status(std::time::Instant::now(), unix_millis());
+            for (vault, peer, fingerprint) in service.take_sync_authorizations() {
+                let mut runtime = state.runtime.lock().map_err(|_| "保险库不可用。")?;
+                if runtime
+                    .sync_state()
+                    .map_err(|_| "请先解锁保险库。")?
+                    .vault_id
+                    != vault
+                {
+                    return Err("保险库已切换，请重新授权同步。".into());
+                }
+                runtime
+                    .sync_authorize(&peer, &fingerprint, true)
+                    .map_err(|_| "设备已配对，但同步授权保存失败，请重新授权同步。")?;
+            }
+            serde_json::to_value(status).map_err(|_| "局域网配对服务暂时不可用。".to_owned())
         }
         "lan.discovery.start" => {
             require_empty_object(&input)?;
-            service.start(std::time::Instant::now())?;
+            let vault = state
+                .runtime
+                .lock()
+                .map_err(|_| "保险库不可用。")?
+                .sync_state()
+                .map_err(|_| "请先解锁保险库。")?
+                .vault_id;
+            service.start_for_vault(std::time::Instant::now(), vault)?;
             serde_json::to_value(service.status(std::time::Instant::now(), unix_millis()))
                 .map_err(|_| "局域网配对服务暂时不可用。".to_owned())
         }
@@ -799,7 +834,19 @@ fn handle_lan_pairing(
         "lan.pairing.revoke" => {
             let input: LanPairingRefInput =
                 serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
+            let fingerprint = service.peer_fingerprint(&input.pairing_ref)?;
+            state
+                .runtime
+                .lock()
+                .map_err(|_| "保险库不可用。")?
+                .sync_authorize(&input.pairing_ref, &fingerprint, false)
+                .map_err(|_| "无法撤销同步授权。")?;
             service.revoke(&input.pairing_ref)?;
+            state
+                .lan_sync
+                .lock()
+                .map_err(|_| "同步不可用。")?
+                .interrupt_peer(&input.pairing_ref);
             Ok(json!({ "revoked": true }))
         }
         "lan.pairing.rename" => {
@@ -861,3 +908,93 @@ fn desktop_activity(state: State<'_, RuntimeState>) {
 
 #[cfg(test)]
 mod lib_tests;
+
+fn handle_lan_sync(state: &RuntimeState, operation: &str, input: Value) -> Result<Value, String> {
+    match operation {
+        "lan.sync.status" => {
+            require_empty_object(&input)?;
+            serde_json::to_value(
+                state
+                    .lan_sync
+                    .lock()
+                    .map_err(|_| "同步不可用。")?
+                    .status()?,
+            )
+            .map_err(|_| "同步不可用。".into())
+        }
+        "lan.sync.enable" | "lan.sync.disable" | "lan.sync.retry" => {
+            let input: LanPairingRefInput =
+                serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
+            let fingerprint = state
+                .lan_pairing
+                .lock()
+                .map_err(|_| "设备信任不可用。")?
+                .peer_fingerprint(&input.pairing_ref)?;
+            if operation != "lan.sync.retry" {
+                state
+                    .runtime
+                    .lock()
+                    .map_err(|_| "保险库不可用。")?
+                    .sync_authorize(
+                        &input.pairing_ref,
+                        &fingerprint,
+                        operation == "lan.sync.enable",
+                    )
+                    .map_err(|_| "无法更新同步授权，请先解锁保险库。")?;
+            } else if !state
+                .runtime
+                .lock()
+                .map_err(|_| "保险库不可用。")?
+                .status()
+                .unlocked
+            {
+                return Err("请先解锁保险库。".into());
+            }
+            state.lan_sync.lock().map_err(|_| "同步不可用。")?.retry();
+            Ok(json!({"ok":true}))
+        }
+        "lan.sync.conflicts.list" => {
+            require_empty_object(&input)?;
+            state
+                .runtime
+                .lock()
+                .map_err(|_| "保险库不可用。")?
+                .sync_conflicts()
+                .map_err(|_| "无法读取冲突历史。".into())
+        }
+        "lan.sync.conflicts.restore" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Input {
+                id: String,
+            }
+            let input: Input = serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
+            if input.id.len() > 100 {
+                return Err("请求参数无效。".into());
+            }
+            state
+                .runtime
+                .lock()
+                .map_err(|_| "保险库不可用。")?
+                .sync_restore_conflict(&input.id)
+                .map_err(|_| "无法恢复冲突历史。")?;
+            state
+                .lan_sync
+                .lock()
+                .map_err(|_| "同步不可用。")?
+                .notify_change();
+            Ok(json!({"ok":true}))
+        }
+        "lan.sync.conflicts.clear" => {
+            require_empty_object(&input)?;
+            state
+                .runtime
+                .lock()
+                .map_err(|_| "保险库不可用。")?
+                .sync_clear_conflicts()
+                .map_err(|_| "无法清理冲突历史。")?;
+            Ok(json!({"ok":true}))
+        }
+        _ => Err("不支持该桌面操作。".into()),
+    }
+}

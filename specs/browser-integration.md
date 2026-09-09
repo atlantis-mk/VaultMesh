@@ -138,6 +138,8 @@ TOTP URI 只可在本次 content response、当前 popup React state 和 desktop
 
 Chromium 127+ WebAuthn proxy 把 ES256 credential 存为 protected `authenticator-key` secret，并在 active desktop privileged process 签名。创建或导入时 Extension 可以提供当前 origin 记住的默认 Login opaque ID，但 Tauri broker 必须按 RP/origin 重新验证后才能写入关联；无有效默认值时可以唯一用户名匹配，仍不确定时表示为 Passkey-only Login，不进入普通 Secret/密钥分类。每次 registration/assertion 必须显示 RP/origin/account context 的 native confirmation。Extension lock detach proxy。Conditional mediation、largeBlob/PRF 不在当前范围。
 
+新版 registration 必须从创建开始设置不可变的 BE 标志，签名计数固定为零；BS 只有在已授权对端持久化成功（包含重试时版本清单确认）后才能为真。旧 BE=0 凭据必须保持本机使用，重新注册后才可参与同步。同步 Passkey 不传递浏览器授权，使用时仍执行上述验证与确认。完整备份、复制与恢复规则由 `lan-vault-sync.md` 和 `ADR-0019` 拥有。
+
 ## 验证
 
 ```sh

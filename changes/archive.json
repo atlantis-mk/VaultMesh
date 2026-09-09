@@ -284,6 +284,15 @@
         "changes/CHG-2026-039-retire-legacy-ffi-c-abi/change.md": "sha256:d6c768c306ac5d28f1166435c02f986f4c8a10200a2dc5b9ebf96ab0c764056d",
         "changes/CHG-2026-039-retire-legacy-ffi-c-abi/change.yaml": "sha256:92199bf2944e0dd5ad90bbf530c99059f1a310e7a0e2ba3a4ceaed7215b27e77"
       }
+    },
+    {
+      "work_id": "CHG-2026-042-aivo-document-governance",
+      "status": "Verified",
+      "archived_at": "2026-09-09T12:33:32.409Z",
+      "files": {
+        "changes/CHG-2026-042-aivo-document-governance/change.md": "sha256:73a920952273ee3f2e90247940b3fbb1e1a38aecb55dec8947cc72a6e8bf2cf5",
+        "changes/CHG-2026-042-aivo-document-governance/change.yaml": "sha256:ef361da5adf00fbff33dbd4b10bf7e8fad404365d19e6172112582ca48b6062d"
+      }
     }
   ]
 }

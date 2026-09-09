@@ -4,7 +4,6 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NearbyDevicesPage } from '../../src/renderer/src/pages/NearbyDevicesPage';
-import { keepsIndependentPageOnVaultLock } from '../../src/renderer/src/App';
 import type { VaultMeshApi } from '../../src/shared/api';
 import type { LanPairingStatus } from '../../src/shared/contracts';
 
@@ -26,6 +25,8 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
       configurable: true,
       value: {
         lan: {
+          syncStatus: vi.fn().mockResolvedValue({ peers: [], conflictCount: 0 }),
+          syncConflicts: vi.fn().mockResolvedValue([]),
           status: vi.fn().mockResolvedValue(emptyStatus),
           startDiscovery: vi.fn().mockResolvedValue({
             ...emptyStatus,
@@ -48,10 +49,10 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     vi.clearAllMocks();
   });
 
-  it('keeps only the non-secret nearby page mounted when the Vault locks', () => {
-    expect(keepsIndependentPageOnVaultLock('/nearby')).toBe(true);
-    expect(keepsIndependentPageOnVaultLock('/vault')).toBe(false);
-    expect(keepsIndependentPageOnVaultLock('/vault/security')).toBe(false);
+  it('explains that nearby devices require unlock and discovery stops on Vault lock', () => {
+    render(<NearbyDevicesPage />);
+    expect(screen.getByText(/解锁保险库后才能使用附近设备/)).toBeTruthy();
+    expect(screen.getByText(/锁定保险库、离开此页面/)).toBeTruthy();
   });
 
   it('starts only on explicit action and stops discovery when the page closes', async () => {
@@ -156,7 +157,7 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     render(<NearbyDevicesPage />);
 
     expect(await screen.findByText('482913')).toBeTruthy();
-    expect(screen.getByText(/验证成功后会自动完成配对/)).toBeTruthy();
+    expect(screen.getByText(/验证成功后自动配对并授权双方保险库同步/)).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/192\.168\.|证书指纹|公钥|TLS exporter|PAKE/i);
   });
 });

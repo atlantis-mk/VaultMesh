@@ -2,6 +2,14 @@ pub(crate) fn transaction(
     vault: &mut VaultmeshVault,
     operation: impl FnOnce(&mut VaultSession) -> Result<Value, VaultmeshStatus>,
 ) -> Result<Value, VaultmeshStatus> {
+    transaction_guarded(vault, operation, || true)
+}
+
+pub(crate) fn transaction_guarded(
+    vault: &mut VaultmeshVault,
+    operation: impl FnOnce(&mut VaultSession) -> Result<Value, VaultmeshStatus>,
+    can_commit: impl Fn() -> bool,
+) -> Result<Value, VaultmeshStatus> {
     let mutation_lock = mutation_lock(&vault.path);
     let _guard = mutation_lock
         .lock()
@@ -11,7 +19,10 @@ pub(crate) fn transaction(
         return Err(VAULTMESH_STATUS_CONFLICT);
     }
     let key = vault.session.quick_unlock_key().map_err(map_core_error)?;
-    let result = operation(&mut vault.session);
+    let result = operation(&mut vault.session).and_then(|value| {
+        vault.session.sync_checkpoint(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64).map_err(map_core_error)?;
+        Ok(value)
+    });
     if result.is_ok() {
         let encrypted = vault
             .session
@@ -19,6 +30,7 @@ pub(crate) fn transaction(
             .map(Zeroizing::new)
             .map_err(map_core_error);
         if let Ok(encrypted) = encrypted
+            && can_commit()
             && write_vault(&vault.path, encrypted.as_slice()).is_ok()
         {
             vault.persisted_fingerprint = vault_fingerprint(encrypted.as_slice());

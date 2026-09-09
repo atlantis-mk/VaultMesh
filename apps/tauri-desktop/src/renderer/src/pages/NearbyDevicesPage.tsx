@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import type { LanPairingStatus, LanTrustedPeer } from '../../../shared/contracts';
+import { LanSyncPanel } from './LanSyncPanel';
 
 function remainingLabel(expiresAt: number | null): string {
   if (expiresAt === null) return '';
@@ -84,7 +85,7 @@ export function NearbyDevicesPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><RadioTowerIcon />局域网发现</CardTitle>
-          <CardDescription>发现默认关闭。每次最多开启 10 分钟；离开此页面、锁屏、休眠或退出应用会立即停止。</CardDescription>
+          <CardDescription>解锁保险库后才能使用附近设备。发现默认关闭，每次最多开启 10 分钟；锁定保险库、离开此页面、锁屏、休眠或退出应用会立即停止。</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -95,12 +96,12 @@ export function NearbyDevicesPage() {
             <div className="grid gap-2 rounded-xl bg-muted px-4 py-5 text-center">
               <p className="text-xs font-medium text-muted-foreground">本机配对码</p>
               <div className="font-mono text-4xl font-semibold tracking-[0.3em]" aria-label={`本机配对码 ${status.pairingCode}`}>{status.pairingCode}</div>
-              <p className="text-xs text-muted-foreground">在另一台设备选择本机并输入此码，验证成功后会自动完成配对。</p>
+              <p className="text-xs text-muted-foreground">在另一台设备输入此码，验证成功后自动配对并授权双方保险库同步。</p>
             </div>
           ) : status?.discoverable ? (
             <p className="text-sm text-destructive">错误尝试次数过多。请停止发现后重新开启，以生成新的配对码。</p>
           ) : null}
-          <p className="text-sm text-muted-foreground">配对码不会广播、记录或持久化。广播也不包含主机名、账号、保险库元数据或秘密。</p>
+          <p className="text-sm text-muted-foreground">开启发现即允许持有本次配对码的设备与当前保险库双向同步。配对码不会广播、记录或持久化。</p>
         </CardContent>
         <CardFooter className="flex flex-wrap gap-2">
           {status?.discoverable ? (
@@ -134,7 +135,7 @@ export function NearbyDevicesPage() {
           }}>
             <CardHeader>
               <CardTitle>输入另一台设备的配对码</CardTitle>
-              <CardDescription>请输入设备 {shortPeer(pairingPeer)} 当前显示的六码。正确后两端会自动完成，不需要再次确认。</CardDescription>
+              <CardDescription>请输入设备 {shortPeer(pairingPeer)} 当前显示的六码。正确后自动配对并授权同步全部适用凭据，双方解锁时自动合并。</CardDescription>
             </CardHeader>
             <CardContent>
               <Input
@@ -158,6 +159,7 @@ export function NearbyDevicesPage() {
         </Card>
       ) : null}
 
+      <LanSyncPanel trusted={status?.trusted ?? []} />
       <div className="grid gap-5 md:grid-cols-2">
         <Card>
           <CardHeader>

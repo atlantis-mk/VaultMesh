@@ -1,17 +1,16 @@
+schema: "2"
 id: "CHG-YYYY-NNN-change-name"
-title: "变更标题"
+title: "Change title"
 type: "feature"
 status: "Draft"
-spec_revision: "TBD"
+spec_revision: "0.1.53-active"
 target_release: null
+goal: "Why this state must survive the current task"
 requirements: []
 tests: []
 adrs: []
 context_refs: []
 related_changes: []
-affected_surfaces: []
-affected_formats: []
-affected_versions: []
-security_impact: "TBD"
-migration: "none"
-supersedes: []
+boundaries: []
+risks: []
+next: []

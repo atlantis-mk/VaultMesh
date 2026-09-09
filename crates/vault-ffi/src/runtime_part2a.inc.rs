@@ -73,6 +73,7 @@ impl DesktopRuntime {
         session
             .record_unlock_event(unlock_source)
             .map_err(map_runtime_core_error)?;
+        session.sync_checkpoint(0).map_err(map_runtime_core_error)?;
         let encrypted = Zeroizing::new(session.save().map_err(map_runtime_core_error)?);
         write_vault(&self.path, encrypted.as_slice())
             .map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
@@ -125,7 +126,7 @@ impl DesktopRuntime {
             master_password.zeroize();
             return Err(VAULTMESH_STATUS_INVALID_ARGUMENT.into());
         }
-        let unlocked = unlock_current_format(&path, &master_password);
+        let unlocked = unlock_current_format(&path, &master_password, false);
         master_password.zeroize();
         let (session, encrypted) = unlocked?;
         self.path = path;
@@ -151,7 +152,7 @@ impl DesktopRuntime {
             master_password.zeroize();
             return Err(VAULTMESH_STATUS_INVALID_ARGUMENT.into());
         }
-        let unlocked = unlock_current_format(&path, &master_password);
+        let unlocked = unlock_current_format(&path, &master_password, matches!(source, UnlockEventSource::Desktop));
         master_password.zeroize();
         let (mut session, encrypted) = unlocked?;
         session
@@ -615,6 +616,7 @@ impl DesktopRuntime {
 fn unlock_current_format(
     path: &std::path::Path,
     master_password: &str,
+    allow_upgrade: bool,
 ) -> Result<(VaultSession, Zeroizing<Vec<u8>>), DesktopRuntimeError> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
@@ -624,7 +626,20 @@ fn unlock_current_format(
     let encrypted = Zeroizing::new(
         read_vault(path).map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?,
     );
-    let session = VaultSession::unlock(master_password, encrypted.as_slice())
-        .map_err(map_runtime_core_error)?;
-    Ok((session, encrypted))
+    match VaultSession::unlock(master_password, encrypted.as_slice()) {
+        Ok(session) => Ok((session, encrypted)),
+        Err(vaultmesh_core::VaultError::UnsupportedFormat) if allow_upgrade => {
+            let lock = crate::vault::mutation_lock(path);
+            let _guard = lock.lock().map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
+            let current = Zeroizing::new(read_vault(path).map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?);
+            if *current != *encrypted { return Err(VAULTMESH_STATUS_CONFLICT.into()); }
+            let session = VaultSession::upgrade_format3(master_password, &encrypted).map_err(map_runtime_core_error)?;
+            let backup = path.with_file_name(format!("{}.format3-{}.backup", path.file_name().unwrap_or_default().to_string_lossy(), Uuid::new_v4()));
+            write_vault(&backup, &encrypted).map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
+            let upgraded = Zeroizing::new(session.save().map_err(map_runtime_core_error)?);
+            write_vault(path, &upgraded).map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
+            Ok((session, upgraded))
+        },
+        Err(error) => Err(map_runtime_core_error(error)),
+    }
 }

@@ -1,0 +1,43 @@
+schema: "2"
+id: "CHG-2026-043-lan-vault-sync"
+title: "局域网 Vault 自动双向同步"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "实现经配对授权的跨设备秘密同步、format-4 迁移与跨平台验收"
+requirements:
+  - "REQ-LAN-SYNC-001"
+  - "REQ-LAN-PEER-001"
+  - "REQ-PASSKEY-001"
+  - "NFR-COMPAT-001"
+  - "NFR-REL-001"
+tests:
+  - "CT-LAN-SYNC-001"
+  - "AT-LAN-SYNC-001"
+  - "CT-LAN-PAIRING-001"
+  - "CT-PASSKEY-001"
+  - "CT-COMPAT-001"
+adrs:
+  - "ADR-0019"
+context_refs:
+  - "specs/lan-vault-sync.md"
+  - "specs/lan-peer-pairing.md"
+  - "specs/browser-integration.md"
+  - "docs/05-data-model.md"
+  - "docs/06-security-privacy.md"
+  - "docs/07-test-release-plan.md"
+  - "docs/09-document-governance.md"
+related_changes: []
+boundaries:
+  - "秘密跨设备复制"
+  - "Vault format 4 与迁移"
+  - "桌面解锁期 LAN listener"
+  - "Passkey 备份属性"
+risks:
+  - "旧客户端无法读取 format 4，回退仅能恢复升级前备份"
+  - "离线并发修改按确定版本排序，不能保证真实时间顺序"
+  - "跨平台 packaged AT 必须在目标 OS 完成"
+next:
+  - "完成 packaged macOS↔macOS、Windows↔Windows、macOS↔Windows 的 AT-LAN-SYNC-001；当前仅有本机自动化验证"
+  - "验证系统锁定/睡眠、防火墙、旧库升级恢复、双端 Passkey 与离页后台同步后才执行 work:finish；此次不发布"

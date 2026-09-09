@@ -30,8 +30,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use spake2_conflux::{Identity as SpakeIdentity, Password, RistrettoGroup, Spake2};
 use zeroize::{Zeroize, Zeroizing};
 
-const PROTOCOL: u8 = 1;
-const PROTOCOL_TXT: &str = "1.1";
+const PROTOCOL: u8 = 2;
+const PROTOCOL_TXT: &str = "2.0";
 const SERVICE_TYPE: &str = "_vaultmesh-pair._tcp.local.";
 const DISCOVERY_TTL: Duration = Duration::from_secs(600);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -85,7 +85,7 @@ impl LanTrustedPeer {
             && !self.label.is_empty()
             && self.label.chars().count() <= 64
             && self.label.len() <= 256
-            && self.protocol_major == PROTOCOL
+            && matches!(self.protocol_major, 1 | PROTOCOL)
     }
     fn dto(self) -> LanTrustedPeerDto {
         LanTrustedPeerDto {
@@ -472,6 +472,10 @@ impl Drop for SessionGuard {
     }
 }
 enum Event {
+    SyncAuthorized {
+        peer_ref: String,
+        fingerprint: String,
+    },
     Complete {
         peer: LanTrustedPeer,
         persisted: Sender<bool>,
@@ -586,7 +590,13 @@ impl TlsStream {
     }
 }
 
+#[path = "lan_sync.rs"]
+mod sync_transport;
+pub(crate) use sync_transport::LanSyncService;
+
 pub(crate) struct LanPairingService {
+    sync_vault: Option<uuid::Uuid>,
+    sync_authorizations: Vec<(uuid::Uuid, String, String)>,
     active: Option<Active>,
     nearby: HashMap<String, LanNearbyDevice>,
     in_flight: HashSet<String>,
@@ -600,6 +610,8 @@ impl LanPairingService {
     pub(crate) fn new(path: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
+            sync_vault: None,
+            sync_authorizations: vec![],
             active: None,
             nearby: HashMap::new(),
             in_flight: HashSet::new(),
@@ -637,6 +649,27 @@ impl LanPairingService {
                 .map(LanTrustedPeer::dto)
                 .collect(),
         }
+    }
+    pub(crate) fn start_for_vault(
+        &mut self,
+        now: Instant,
+        vault: uuid::Uuid,
+    ) -> Result<(), String> {
+        self.start(now)?;
+        self.sync_vault = Some(vault);
+        Ok(())
+    }
+    pub(crate) fn take_sync_authorizations(&mut self) -> Vec<(uuid::Uuid, String, String)> {
+        std::mem::take(&mut self.sync_authorizations)
+    }
+    pub(crate) fn peer_fingerprint(&self, reference: &str) -> Result<String, String> {
+        self.trust
+            .load()
+            .map_err(|_| "设备信任不可用。")?
+            .into_iter()
+            .find(|p| p.pairing_ref == reference)
+            .map(|p| p.certificate_fingerprint)
+            .ok_or_else(|| "设备尚未配对。".into())
     }
     pub(crate) fn start(&mut self, now: Instant) -> Result<(), String> {
         self.stop();
@@ -802,6 +835,8 @@ impl LanPairingService {
             .map_err(|_| "无法更新设备名称。".into())
     }
     pub(crate) fn stop(&mut self) {
+        self.sync_vault = None;
+        self.sync_authorizations.clear();
         if let Some(a) = self.active.take() {
             a.stop.store(true, Ordering::Release);
             a.sessions.shutdown_all();
@@ -813,6 +848,17 @@ impl LanPairingService {
         }
         while let Ok(event) = self.rx.try_recv() {
             match event {
+                Event::SyncAuthorized {
+                    peer_ref,
+                    fingerprint,
+                } => {
+                    if let Some(vault) = self.sync_vault {
+                        if self.sync_authorizations.len() < MAX_PEERS {
+                            self.sync_authorizations
+                                .push((vault, peer_ref, fingerprint));
+                        }
+                    }
+                }
                 Event::Complete { persisted, .. } => {
                     let _ = persisted.send(false);
                 }
@@ -892,6 +938,17 @@ impl LanPairingService {
     fn collect_events(&mut self, _now: Instant, _ms: u64) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
+                Event::SyncAuthorized {
+                    peer_ref,
+                    fingerprint,
+                } => {
+                    if let Some(vault) = self.sync_vault {
+                        if self.sync_authorizations.len() < MAX_PEERS {
+                            self.sync_authorizations
+                                .push((vault, peer_ref, fingerprint));
+                        }
+                    }
+                }
                 Event::Complete { peer, persisted } => {
                     self.in_flight.remove(&peer.pairing_ref);
                     let _ = persisted.send(self.trust.approve(peer).is_ok());
@@ -1185,7 +1242,7 @@ fn pair(
     };
     let peer = LanTrustedPeer {
         pairing_ref: reference.clone(),
-        certificate_fingerprint: fingerprint,
+        certificate_fingerprint: fingerprint.clone(),
         label: format!("VaultMesh {}", &hello.instance[..6]),
         protocol_major: PROTOCOL,
     };
@@ -1238,6 +1295,13 @@ fn pair(
             return Err(PairError::Reported);
         }
         session.sessions.bind_peer(session, &reference)?;
+        context
+            .tx
+            .send(Event::SyncAuthorized {
+                peer_ref: reference.clone(),
+                fingerprint,
+            })
+            .map_err(|_| ())?;
         context
             .tx
             .send(Event::Connected {
@@ -1816,7 +1880,7 @@ mod tests {
         }
     }
 
-    fn identity() -> Arc<Identity> {
+    pub(super) fn identity() -> Arc<Identity> {
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec!["vaultmesh.local".into()]).unwrap();
         Arc::new(
@@ -1829,7 +1893,7 @@ mod tests {
         )
     }
 
-    fn empty_store(name: &str) -> TrustStore {
+    pub(super) fn empty_store(name: &str) -> TrustStore {
         TrustStore::memory(
             std::env::temp_dir().join(format!("vaultmesh-lan-test-{name}-{}.json", random_token())),
             Arc::new(MemoryCredentials::default()),
@@ -1919,7 +1983,7 @@ mod tests {
     }
 
     #[test]
-    fn ct_lan_pairing_accepts_only_exact_bounded_v1_1_discovery_txt() {
+    fn ct_lan_pairing_accepts_only_exact_bounded_v2_0_discovery_txt() {
         let own = "ffffffffffffffffffffffffffffffff";
         let valid = txt_properties(&[
             ("v", PROTOCOL_TXT),
@@ -1934,7 +1998,7 @@ mod tests {
             ))
         );
         let wrong_version = txt_properties(&[
-            ("v", "2.0"),
+            ("v", "3.0"),
             ("i", "00112233445566778899aabbccddeeff"),
             ("n", "ffeeddccbbaa99887766554433221100"),
         ]);
@@ -2093,6 +2157,12 @@ mod tests {
             for rx in [&server_rx, &client_rx] {
                 if !matches!(
                     rx.recv_timeout(Duration::from_secs(3)),
+                    Ok(Event::SyncAuthorized { .. })
+                ) {
+                    return Err("sync authorization must precede connected");
+                }
+                if !matches!(
+                    rx.recv_timeout(Duration::from_secs(3)),
                     Ok(Event::Connected { .. })
                 ) {
                     return Err("production connection did not complete");
@@ -2174,7 +2244,15 @@ mod tests {
         }
         assert!(matches!(
             server_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::SyncAuthorized { .. }
+        ));
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
             Event::Connected { .. }
+        ));
+        assert!(matches!(
+            client_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::SyncAuthorized { .. }
         ));
         assert!(matches!(
             client_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
@@ -2340,7 +2418,15 @@ mod tests {
         }
         assert!(matches!(
             rx_a.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::SyncAuthorized { .. }
+        ));
+        assert!(matches!(
+            rx_a.recv_timeout(Duration::from_secs(5)).unwrap(),
             Event::Connected { .. }
+        ));
+        assert!(matches!(
+            rx_b.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::SyncAuthorized { .. }
         ));
         assert!(matches!(
             rx_b.recv_timeout(Duration::from_secs(5)).unwrap(),
@@ -2536,7 +2622,15 @@ mod tests {
         }
         assert!(matches!(
             rx_a.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::SyncAuthorized { .. }
+        ));
+        assert!(matches!(
+            rx_a.recv_timeout(Duration::from_secs(5)).unwrap(),
             Event::Connected { .. }
+        ));
+        assert!(matches!(
+            rx_b.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::SyncAuthorized { .. }
         ));
         assert!(matches!(
             rx_b.recv_timeout(Duration::from_secs(5)).unwrap(),

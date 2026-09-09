@@ -26,6 +26,23 @@ impl VaultSession {
         Self::unlock_envelope_with_key(envelope, vault_key)
     }
 
+    /// Explicit, master-password-only migration. The runtime must preserve the
+    /// original encrypted bytes before committing the returned format-4 session.
+    pub fn upgrade_format3(master_password: &str, bytes: &[u8]) -> Result<Self, VaultError> {
+        let envelope = crate::format::parse_format3_for_upgrade(bytes)?;
+        let key = unlock_key(master_password, &envelope.header)?;
+        let payload = decrypt_payload(&envelope, &key)?;
+        let header = rewrap_header(master_password, &key)?;
+        let mut session = Self {
+            header,
+            vault_key: Some(key),
+            payload: Some(payload),
+        };
+        session.sync_reset_after_restore()?;
+        session.sync_checkpoint(0)?;
+        Ok(session)
+    }
+
     /// Unlocks encrypted bytes using the random vault key rather than the
     /// master password. Platform integrations use this only after a local
     /// user-presence check has released their device-bound quick-unlock
@@ -105,7 +122,7 @@ impl VaultSession {
         self.payload.as_ref().ok_or(VaultError::Locked)
     }
 
-    pub(super) fn payload_mut(&mut self) -> Result<&mut VaultPayload, VaultError> {
+    pub(crate) fn payload_mut(&mut self) -> Result<&mut VaultPayload, VaultError> {
         self.payload.as_mut().ok_or(VaultError::Locked)
     }
 

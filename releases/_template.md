@@ -12,7 +12,7 @@
 
 ## 已交付
 
-下列 Work 必须已经列入 `changes/archive.json`；创建 Release 或 Git Tag 不得修改其状态、正文或封存条目。
+下列 Work 必须是 schema-v2 的 Done 状态或已列入 `changes/archive.json` 的 legacy Work；创建 Release 或 Git Tag 不得改写历史 Work 或封存条目。
 
 | Work ID | Requirement/ADR | 类型 | 用户可观察结果 |
 | --- | --- | --- | --- |

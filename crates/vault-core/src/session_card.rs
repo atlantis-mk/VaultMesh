@@ -192,6 +192,7 @@ impl VaultSession {
         if !self.payload()?.cards.iter().any(|item| item.id == item_id) {
             return Err(VaultError::ItemNotFound);
         }
+        crate::sync::record_history_clear(self.payload_mut()?, "card_history", item_id)?;
         self.payload_mut()?
             .card_history
             .retain(|revision| revision.item_id != item_id);

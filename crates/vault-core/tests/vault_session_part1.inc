@@ -18,6 +18,7 @@ use vaultmesh_core::{
 
 fn example_payload() -> VaultPayload {
     VaultPayload {
+        sync: Default::default(),
         items: vec![LoginItem::new(
             "Example".into(),
             "ada@example.test".into(),
@@ -157,43 +158,43 @@ fn ssh_tunnel_connector_definition(item_id: Uuid) -> NewAgentConnectorDefinition
 }
 
 #[test]
-fn agent_connector_definitions_persist_in_the_single_format_three_contract() {
+fn agent_connector_definitions_persist_in_the_single_format_four_contract() {
     let password = "a long unique master password";
     let mut session = VaultSession::create(password).unwrap();
     let ssh_account = session
         .add_ssh_credential(new_ssh("Agent SSH account"))
         .unwrap();
-    assert_eq!(session.format_version().unwrap(), 3);
+    assert_eq!(session.format_version().unwrap(), 4);
     assert!(session.agent_connector_definitions().unwrap().is_empty());
 
     let definition = session
         .add_agent_connector_definition(ssh_tunnel_connector_definition(ssh_account.id), 11)
         .unwrap();
-    assert_eq!(session.format_version().unwrap(), 3);
+    assert_eq!(session.format_version().unwrap(), 4);
     assert_eq!(session.agent_connector_definitions().unwrap(), vec![definition.clone()]);
 
     let encrypted_v3 = session.save().unwrap();
     assert!(!String::from_utf8_lossy(&encrypted_v3).contains("Production database tunnel"));
     let envelope: VaultEnvelope = serde_json::from_slice(&encrypted_v3).unwrap();
-    assert_eq!(envelope.header.format_version, 3);
+    assert_eq!(envelope.header.format_version, 4);
     let mut reopened = VaultSession::unlock(password, &encrypted_v3).unwrap();
     assert_eq!(reopened.agent_connector_definitions().unwrap(), vec![definition.clone()]);
     reopened
         .change_master_password(password, "replacement master password")
         .unwrap();
-    assert_eq!(reopened.format_version().unwrap(), 3);
+    assert_eq!(reopened.format_version().unwrap(), 4);
     let rewrapped_v3 = reopened.save().unwrap();
     assert!(VaultSession::unlock(password, &rewrapped_v3).is_err());
     let mut reopened = VaultSession::unlock("replacement master password", &rewrapped_v3).unwrap();
     reopened.delete_agent_connector_definition(definition.id).unwrap();
-    assert_eq!(reopened.format_version().unwrap(), 3);
+    assert_eq!(reopened.format_version().unwrap(), 4);
     let without_definition = reopened.save().unwrap();
     assert_eq!(
         serde_json::from_slice::<VaultEnvelope>(&without_definition)
             .unwrap()
             .header
             .format_version,
-        3
+        4
     );
 }
 
@@ -245,7 +246,7 @@ fn agent_audit_is_encrypted_bounded_and_cleared_only_by_explicit_clear() {
 
     session.clear_agent_audit().unwrap();
     assert!(session.agent_audit_events().unwrap().is_empty());
-    assert_eq!(session.format_version().unwrap(), 3);
+    assert_eq!(session.format_version().unwrap(), 4);
 }
 
 fn new_card(title: &str) -> NewPaymentCardItem {
@@ -567,7 +568,7 @@ fn non_current_formats_are_rejected_before_any_untrusted_kdf_parameters() {
 }
 
 #[test]
-fn format_three_authenticates_both_header_and_payload() {
+fn format_four_authenticates_both_header_and_payload() {
     let password = "a long unique master password";
     let mut session = VaultSession::create(password).unwrap();
     let ssh_account = session.add_ssh_credential(new_ssh("Agent SSH account")).unwrap();

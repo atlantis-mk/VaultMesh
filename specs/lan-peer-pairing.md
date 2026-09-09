@@ -2,11 +2,11 @@
 
 ## LAN-PAIR-001 范围与生命周期
 
-仅 macOS/Windows VaultMesh Tauri 客户端支持 LAN protocol 1。用户必须从不依赖 Vault 解锁的附近设备 UI 显式开启发现；窗口失焦仍可以按既有策略锁定 Vault，但附近设备页保持可用。服务最多运行十分钟，离开页面、系统会话锁定、睡眠、退出、停止或超时必须关闭 mDNS、listener 和所有 pending/connected session。配对与 Vault、Agent、Browser 授权相互独立，不传输或操作 Vault 数据。
+仅 macOS/Windows VaultMesh Tauri 客户端支持 LAN protocol 2。附近设备 UI 的解锁展示条件与锁定跳转由 `REQ-LAN-PEER-001` 定义；用户必须在该页面显式开启发现。服务最多运行十分钟，desktop Vault 锁定导致页面卸载、离开页面、系统会话锁定、睡眠、退出、停止或超时必须关闭 mDNS、listener 和所有 pending/connected session。重新解锁并进入页面不得自动开启发现或恢复旧配对会话。设备信任与 Vault、Agent、Browser 授权相互独立，配对 transport 不传输 Vault 数据；新配对明确授权双方当前 Vault 的同步，由独立同步服务执行（见 `lan-vault-sync.md`），旧配对须双方补充确认。
 
 ## LAN-PAIR-002 发现与认证
 
-使用 `_vaultmesh-pair._tcp.local.`。TXT 只允许 `v=1.1`、随机 `i` 和一次性 `n`；`1` 是已废弃的双端数字比较开发修订，当前客户端必须在发现阶段忽略它，避免不同帧流程互相发现后才于 TLS 内失败。未知、不完整、过长或非 `1.1` 记录同样忽略，SRV hostname 必须为本次发现随机生成而非系统 hostname。TCP listener 使用一个临时双栈端口，连接端点和入站来源必须匹配本机活动网卡的同链路网段。TLS 加密 Hello 才交换持久随机设备 ID 与是否由用户发起配对；该 ID 不进入 mDNS。
+使用 `_vaultmesh-pair._tcp.local.`。TXT 只允许 `v=2.0`、随机 `i` 和一次性 `n`；`1` 与 `1.1` 是已废弃、未包含同步授权的配对修订，当前客户端必须在发现阶段忽略它，避免不同帧流程互相发现后才于 TLS 内失败。未知、不完整、过长或非 `2.0` 记录同样忽略，SRV hostname 必须为本次发现随机生成而非系统 hostname。TCP listener 使用一个临时双栈端口，连接端点和入站来源必须匹配本机活动网卡的同链路网段。TLS 加密 Hello 才交换持久随机设备 ID 与是否由用户发起配对；该 ID 不进入 mDNS。
 
 开启发现时必须使用 CSPRNG 生成本次窗口专用的六位十进制配对码；配对码只显示在生成它的本机 UI，不得进入 mDNS、日志或持久化。另一台设备选择该客户端、输入其当前配对码并提交后，双方必须在首次 TLS 连接内以 client/server 固定角色执行短时密码认证密钥交换（PAKE），并把双方设备 ID、证书、实例、nonce 与 TLS exporter 绑定到双向 key confirmation。只有输入码正确且两端 key confirmation 均通过时才自动进入持久化，不得再要求生成码的一端二次确认，也不得在网络帧中直接发送配对码。
 

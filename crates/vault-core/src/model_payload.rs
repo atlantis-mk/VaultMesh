@@ -2,6 +2,8 @@ use super::*;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VaultPayload {
+    #[serde(default)]
+    pub sync: crate::SyncState,
     pub items: Vec<LoginItem>,
     #[serde(default)]
     pub trash: Vec<TrashedLoginItem>,
@@ -114,6 +116,7 @@ pub struct UnlockEvent {
 
 impl Zeroize for VaultPayload {
     fn zeroize(&mut self) {
+        self.sync.zeroize();
         self.items.zeroize();
         self.trash.zeroize();
         self.history.zeroize();

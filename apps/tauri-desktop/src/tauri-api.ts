@@ -41,6 +41,14 @@ export function createTauriVaultMeshApi(): VaultMeshApi {
       enablePin: (input) => call('pin.enable', input),
       disablePin: () => call('pin.disable'),
       unlockWithPin: (input) => call('pin.unlock', input),
+      onChanged: (callback) => {
+        let active = true;
+        let unlisten: (() => void) | undefined;
+        void listen('vault-data-changed', () => callback()).then((next) => {
+          if (active) unlisten = next; else next();
+        });
+        return () => { active = false; unlisten?.(); };
+      },
       onLocked: (callback) => {
         let active = true;
         let unlisten: (() => void) | undefined;
@@ -56,6 +64,13 @@ export function createTauriVaultMeshApi(): VaultMeshApi {
       updateSettings: (input) => call('security.settings.update', input),
     },
     lan: {
+      syncStatus: () => call('lan.sync.status'),
+      enableSync: (pairingRef) => call('lan.sync.enable', { pairingRef }),
+      disableSync: (pairingRef) => call('lan.sync.disable', { pairingRef }),
+      retrySync: (pairingRef) => call('lan.sync.retry', { pairingRef }),
+      syncConflicts: () => call('lan.sync.conflicts.list'),
+      restoreSyncConflict: (id) => call('lan.sync.conflicts.restore', { id }),
+      clearSyncConflicts: () => call('lan.sync.conflicts.clear'),
       status: () => call('lan.pairing.status'),
       startDiscovery: () => call('lan.discovery.start'),
       stopDiscovery: () => call('lan.discovery.stop'),

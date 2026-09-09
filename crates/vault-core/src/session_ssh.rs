@@ -443,6 +443,7 @@ impl VaultSession {
         {
             return Err(VaultError::ItemNotFound);
         }
+        crate::sync::record_history_clear(self.payload_mut()?, "ssh_history", item_id)?;
         self.payload_mut()?
             .ssh_history
             .retain(|revision| revision.item_id != item_id);

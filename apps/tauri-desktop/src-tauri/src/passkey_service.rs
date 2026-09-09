@@ -115,6 +115,10 @@ struct StoredPasskey {
     login_id: Option<Uuid>,
     private_key_jwk: PrivateJwk,
     sign_count: u32,
+    #[serde(default)]
+    backup_eligible: bool,
+    #[serde(default)]
+    backup_state: bool,
     created_at: String,
     last_used_at: Option<String>,
 }
@@ -241,6 +245,8 @@ impl PasskeyService {
                 d: URL_SAFE_NO_PAD.encode(signing.to_bytes()),
             },
             sign_count: 0,
+            backup_eligible: true,
+            backup_state: false,
             created_at: now.into(),
             last_used_at: None,
         };
@@ -364,8 +370,18 @@ impl PasskeyService {
         {
             return Err("Passkey 私钥无效。".into());
         }
-        let next = stored.sign_count.saturating_add(1);
-        let auth_data = assertion_data(&request.rp_id, next);
+        let next = if stored.backup_eligible {
+            0
+        } else {
+            stored.sign_count.saturating_add(1)
+        };
+        let mut auth_data = assertion_data(&request.rp_id, next);
+        if stored.backup_eligible {
+            auth_data[32] |= 0x08;
+            if stored.backup_state {
+                auth_data[32] |= 0x10;
+            }
+        }
         let client = client_data("webauthn.get", &request.challenge, &origin, cross_origin)?;
         let mut signed = auth_data.clone();
         signed.extend_from_slice(&Sha256::digest(&client));
@@ -577,7 +593,7 @@ fn registration_data(rp: &str, id: &[u8], x: &[u8], y: &[u8]) -> Result<Vec<u8>,
         (Cbor::Int(-3), Cbor::Bytes(y.to_vec())),
     ]);
     let mut v = Sha256::digest(rp.as_bytes()).to_vec();
-    v.push(0x45);
+    v.push(0x4d);
     v.extend_from_slice(&[0; 4]);
     v.extend_from_slice(&[0; 16]);
     v.extend_from_slice(&(id.len() as u16).to_be_bytes());
@@ -857,7 +873,7 @@ mod tests {
             &registration_auth_data[..32],
             Sha256::digest(b"example.test").as_slice()
         );
-        assert_eq!(registration_auth_data[32], 0x45);
+        assert_eq!(registration_auth_data[32], 0x4d);
         let public_key_der = URL_SAFE_NO_PAD
             .decode(
                 created["response"]["publicKey"]
@@ -900,7 +916,7 @@ mod tests {
             .is_err(),
             "an Agent assertion must not select a different passkey item"
         );
-        for expected_counter in [1_u32, 2] {
+        for expected_counter in [0_u32, 0] {
             let response = PasskeyService::get_for_item(
                 &mut runtime,
                 &get_request,
@@ -917,7 +933,7 @@ mod tests {
                 )
                 .expect("decode auth data");
             assert_eq!(&auth_data[..32], Sha256::digest(b"example.test").as_slice());
-            assert_eq!(auth_data[32], 0x05);
+            assert_eq!(auth_data[32], 0x0d);
             assert_eq!(
                 u32::from_be_bytes(auth_data[33..37].try_into().expect("counter")),
                 expected_counter
@@ -948,6 +964,69 @@ mod tests {
                 .expect("verify assertion signature");
             assert!(!response.to_string().contains("privateKeyJwk"));
         }
+        // CT-LAN-SYNC-001: real credential material signs on an independently
+        // encrypted replica; neither response exposes the private key.
+        let peer = format!("lan-peer-{}", "a".repeat(32));
+        let fingerprint = "b".repeat(64);
+        let remote_path = path.with_extension("peer.vault");
+        let mut remote = DesktopRuntime::new(remote_path.clone()).unwrap();
+        remote.create("remote passkey master".into()).unwrap();
+        let local_id = runtime.sync_state().unwrap().vault_id;
+        let remote_id = remote.sync_state().unwrap().vault_id;
+        runtime.sync_authorize(&peer, &fingerprint, true).unwrap();
+        remote.sync_authorize(&peer, &fingerprint, true).unwrap();
+        runtime
+            .sync_bind(&peer, &fingerprint, remote_id, local_id)
+            .unwrap();
+        remote
+            .sync_bind(&peer, &fingerprint, local_id, remote_id)
+            .unwrap();
+        let records = runtime
+            .sync_export(
+                &peer,
+                &fingerprint,
+                remote_id,
+                local_id,
+                &Default::default(),
+            )
+            .unwrap();
+        remote
+            .sync_merge(&peer, &fingerprint, local_id, remote_id, &records)
+            .unwrap();
+        runtime
+            .sync_mark_backed_up(&peer, &fingerprint, remote_id, local_id, &records)
+            .unwrap();
+        for replica in [&mut runtime, &mut remote] {
+            let response: Value = serde_json::from_str(
+                &PasskeyService::get_for_item(
+                    replica,
+                    &get_request,
+                    "2027-01-15T08:00:02.000Z",
+                    Some(passkey_item_id),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let auth = URL_SAFE_NO_PAD
+                .decode(response["response"]["authenticatorData"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(auth[32], 0x1d);
+            assert_eq!(&auth[33..37], &[0; 4]);
+            let client = URL_SAFE_NO_PAD
+                .decode(response["response"]["clientDataJSON"].as_str().unwrap())
+                .unwrap();
+            let signature = URL_SAFE_NO_PAD
+                .decode(response["response"]["signature"].as_str().unwrap())
+                .unwrap();
+            let mut signed = auth;
+            signed.extend_from_slice(&Sha256::digest(client));
+            verifying_key
+                .verify(&signed, &Signature::from_der(&signature).unwrap())
+                .unwrap();
+        }
+        remote.lock();
+        drop(remote);
+        let _ = std::fs::remove_file(remote_path);
         runtime.lock();
         drop(runtime);
         let mut reopened = DesktopRuntime::new(path).expect("reopen runtime");

@@ -664,7 +664,7 @@ export const LanNearbyDeviceSchema = z.object({
 export const LanTrustedPeerSchema = z.object({
   pairingRef: z.string().regex(/^lan-peer-[a-f0-9]{32}$/),
   label: z.string().min(1).max(64),
-  protocolMajor: z.literal(1),
+  protocolMajor: z.union([z.literal(1), z.literal(2)]),
 }).strict();
 export const LanPairingStatusSchema = z.object({
   discoverable: z.boolean(),
@@ -741,3 +741,16 @@ export type RevealedPassword = z.infer<typeof RevealedPasswordSchema>;
 
 export * from './service-contracts';
 export * from './api-environment-contracts';
+
+export const LanSyncStatusSchema = z.object({
+  peers: z.array(z.object({
+    peerRef: z.string().regex(/^lan-peer-[a-f0-9]{32}$/),
+    enabled: z.boolean(),
+    state: z.enum(['disabled', 'offline', 'waiting-unlock', 'syncing', 'synced', 'failed']),
+    lastSuccessAt: z.number().int().nonnegative().nullable(),
+  }).strict()).max(32),
+  conflictCount: z.number().int().nonnegative(),
+}).strict();
+export type LanSyncStatus = z.infer<typeof LanSyncStatusSchema>;
+export const LanSyncConflictSchema = z.object({id: z.string().max(100), kind: z.string().max(32), savedAt: z.number().int().nonnegative()}).strict();
+export type LanSyncConflict = z.infer<typeof LanSyncConflictSchema>;

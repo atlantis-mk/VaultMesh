@@ -42,7 +42,7 @@ use crate::{
 #[path = "session_agent.rs"]
 mod session_agent;
 #[path = "session_api_environment.rs"]
-mod session_api_environment;
+pub(crate) mod session_api_environment;
 #[path = "session_api_request.rs"]
 mod session_api_request;
 #[path = "session_base.rs"]

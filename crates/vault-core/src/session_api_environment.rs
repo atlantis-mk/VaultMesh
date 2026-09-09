@@ -261,6 +261,7 @@ impl VaultSession {
         {
             return Err(VaultError::ApiEnvironmentNotFound);
         }
+        crate::sync::record_history_clear(self.payload_mut()?, "api_environment_history", id)?;
         self.payload_mut()?
             .api_environment_history
             .retain(|revision| revision.environment_id != id);

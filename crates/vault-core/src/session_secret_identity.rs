@@ -326,6 +326,7 @@ impl VaultSession {
         {
             return Err(VaultError::ItemNotFound);
         }
+        crate::sync::record_history_clear(self.payload_mut()?, "identity_history", item_id)?;
         self.payload_mut()?
             .identity_history
             .retain(|revision| revision.item_id != item_id);

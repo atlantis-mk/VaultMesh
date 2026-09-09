@@ -2,12 +2,12 @@
 
 `crates/vault-core/src/format.rs` 和 `crates/vault-core/src/model.rs` 是实现定位；本文件拥有格式兼容意图。对应 `REQ-VAULT-*`、`REQ-ITEM-*`、`REQ-RECOVERY-001`、`NFR-COMPAT-001`。
 
-## Envelope format 3
+## Envelope format 4
 
 ```text
-VaultEnvelope v3
+VaultEnvelope v4
   header
-    format_version = 3
+    format_version = 4
     salt[16]
     kdf = Argon2id(memory_kib=65536, iterations=3, parallelism=1, output=32)
     wrapped_vault_key_nonce[24]
@@ -16,10 +16,10 @@ VaultEnvelope v3
   payload_ciphertext[n + 16]
 ```
 
-Format 3 是当前唯一 Vault envelope。它可以持久化 `agent_connector_definitions` 与 Agent audit，且 version 3
-进入 wrapping-key 与 payload 两层 AAD。所有 Reader 只接受 format 3；其他版本必须在 KDF 前拒绝。
+Format 4 是当前唯一写入 Vault envelope。它可以持久化 `agent_connector_definitions` 与 Agent audit，且 version 4
+进入 wrapping-key 与 payload 两层 AAD。常规 Reader 只接受 format 4；format 3 仅由受控主密码迁移入口验证。
 
-随机 32-byte `vault_key` 使用 XChaCha20-Poly1305 加密 payload。主密码经 Argon2id 派生独立 wrapping key，并使用独立 nonce 包装 `vault_key`。Format version、salt 和固定 KDF 参数是两次加密的 AAD。解析必须在运行 Argon2 前拒绝非 format 3、非固定 KDF 参数或非法固定长度。
+随机 32-byte `vault_key` 使用 XChaCha20-Poly1305 加密 payload。主密码经 Argon2id 派生独立 wrapping key，并使用独立 nonce 包装 `vault_key`。Format version、salt 和固定 KDF 参数是两次加密的 AAD。解析必须在运行 Argon2 前拒绝非受支持格式、非固定 KDF 参数或非法固定长度。
 
 更换主密码为同一 `vault_key` 生成新 salt、wrapping nonce/key。Header 是 payload AAD，因此 payload 在同一原子提交中重新加密。Backup 是完整加密 envelope，不是 plaintext export。
 
@@ -53,10 +53,7 @@ ID、host、port、username 或 Host Key，本地不得另存
 `manifest.json`。公私钥仍使用 SSH item 的既有 protected 字段，桌面 runtime 只能在有界特权流程中读取并物化
 到 owner-only OpenSSH 文件。
 
-这是发布前 format-3 development payload 的可选增量：缺失字段表示普通非托管 SSH item；旧 writer 不受支持。
-若不受支持的旧 writer 丢弃该字段，后续 setup 因无法解析加密所有者而拒绝复用或覆盖本地 identity，不会扩大
-Agent 或远端权限，因此本次不提升 envelope version。当前 writer 的加密 round-trip、原子回滚和重启恢复必须
-由 `CT-AGENT-SSH-001` 覆盖。
+format 4 必须保留 managed SSH ownership；同步仅复制 SSH 凭据的可移植字段，本机部署绑定不得传输。
 
 内部 ConnectorDefinition 的 credential reference、生产 target 和 adapter policy 是 encrypted payload；Agent/MCP
 metadata 只从对应 Vault item 派生 opaque account ID、用户标签、kind、capability 与 environment，不暴露 definition
@@ -65,19 +62,11 @@ OS-protected storage；active task lease、confirmation、session、continuation
 未配置 Vault item 的 Agent discovery candidate 不持久化，只在 Vault 已解锁时从 Login、SSH account 与
 developer/service secret 派生 opaque item ID、kind、label 和类型化 tool；cursor 与 pending authorization 只存在于
 broker 内存，不能包含 username、target、notes 或 secret。
-Agent audit、ConnectorDefinition 与 ApiEnvironment 始终写入 format 3；不存在降级或旧 writer 兼容路径。
+Agent audit、ConnectorDefinition 与 ApiEnvironment 始终写入 format 4；不存在降级或旧 writer 兼容路径。
 
-Service collections 是发布前 format-3 development payload 的 additive 增量。旧 writer 不受支持；丢失 Service
-只移除导航组织，不扩大凭据、target 或 permission，因此不提升 envelope version。关系允许多对多并携带 item kind +
-UUID；Core 必须在所有 mutation 与 renderer-safe projection 时验证。Service 删除/rollback 不删除源 item，当前 writer
-必须覆盖加密 round-trip、backup/restore、原子回滚和重启恢复。兼容理由见 ADR-0014。
+Service 与 ApiEnvironment collections 必须保留其 exact relationship、revision 与 policy digest。缺失/已删除关系必须由 live validation 拒绝，不能复用旧 target 或权限。format-3 兼容理由见 ADR-0014/0015；当前 format-4 同步与迁移由 ADR-0019 所有。
 
-ApiEnvironment 是 authority-bearing encrypted additive collection，但 discovery、future ActionPlan 和 permission 必须
-live revalidate exact Environment ID、Service、credential kind/lifecycle、revision 与 policy digest。旧 development writer
-丢失 Environment 时，对应账号消失，Vault 外旧规则不得继续执行，因此只会撤销而不会扩大 authority；format 3 不提升，
-不提供 downgrade 或自动迁移。Delete/restore、Service/credential lifecycle 和配置漂移提升 revision；相同规范化输入
-重复保存幂等。Backup/restore 保留 exact Service/Environment/credential relationship、revision 与 digest。
-兼容和 ownership 见 ADR-0015。
+`sync` 是加密 payload 内的同步状态：Vault 身份、副本 epoch、HLC/已见版本、记录摘要、永久 tombstone、加密冲突历史和本机 peer 授权。它不得出现在非秘密索引或同步 payload 投影中；线上只发送 allowlisted 记录与版本清单。协议与删除语义见 `specs/lan-vault-sync.md`。所有数据入口必须在原子保存前更新版本。
 
 旧 Agent 账号配置、其权限规则与 format-2 compatibility 不属于当前数据模型，也不存在读取或投影路径。
 当前设备的 persistent Agent authorization 使用独立本地加密规则库：随机 256-bit key 由
@@ -118,15 +107,9 @@ Login/credential opaque ID；WebAuthn response 不包含 private JWK。
 
 ## 迁移规则
 
-- Format 改动必须有新版本或明确的向后兼容理由、migration、malformed-input test、旧 Fixture 和 deterministic vector。
-- 仅增加 defaulted payload field 不自动提升 envelope version。
-- Service 导航 metadata 按 ADR-0014 保留在 format 3；旧开发 writer 不受支持，且丢字段不得被解释为权限或 target。
-- 会使旧 writer 丢失 `access-token` Secret 的 revoked/needs-review fail-closed 状态属于 authority expansion，必须
-  使用明确的新 format/feature compatibility 与旧 writer refusal；不得以 defaulted field 为由留在旧格式。
-- 当前代码不能保留的未知 version/feature 禁止被 mutation。
-- 当前版本只创建、写入和读取 format 3；其他所有版本在 KDF 前拒绝。
-- Core、FFI、Tauri、renderer、Agent、Browser、quick unlock 和 restore 不提供旧格式 reader、迁移、降级或
-  专用备份 API。
-- 禁用 Agent 功能只撤销 lease 并保留 format-3 encrypted ConnectorDefinition。
-- 加密或文件提交失败必须保留旧文件和旧 unlocked state。
-- 不可逆迁移必须在 Change 和 Release 中写明最低可回滚版本或补偿限制。
+- 新建和所有 mutation 仅写 format 4；主密码/KDF/AEAD 保持既有机制。
+- format 3 必须由 desktop 主密码验证，再保存 owner-only 原加密备份，最后原子写 format 4；任一步失败保留原文件与旧状态。未知版本、非固定 KDF 或长度在 KDF 前拒绝。
+- Browser、Agent 与 quick unlock 只读 format 4，不得隐式升级；主密码升级后可以重新使用同一 Vault Key 的本机 quick-unlock wrapper。
+- 恢复备份必须轮换副本 epoch 和 Vault 同步绑定身份、清除授权；恢复的条目版本和 tombstone 保留，重新授权后合并。
+- 旧客户端必须拒绝 format 4，不提供降级 writer。回退恢复升级前加密备份，不包含升级后修改。
+- 加密或文件提交失败必须保留旧文件和旧 unlocked state。测试必须覆盖旧加密 Fixture、错误密码、恶意输入、备份失败、原子回滚、密码轮换和重启恢复。

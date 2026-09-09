@@ -1,118 +1,109 @@
-# AI 文档、Change 与版本治理
+# AI 文档、Work 与版本治理
 
-本文件只保留 AI 在没有聊天上下文时正确实现、验证和演进 VaultMesh 所需的流程。人员汇报、会议、工时和绩效不进入仓库。
+本文件是 VaultMesh 文档治理的唯一所有者。系统优化目标是紧凑的当前事实和可执行约束；日常变更历史由 Git 保存。
 
 ## 1. 文档职责
 
-- `AGENTS.md`：最高执行规则和禁止行为。
-- `docs/`：当前目标版本的产品、范围、Requirement、架构、数据、安全、测试和追踪。
-- `specs/`：跨多个模块、不能仅靠 API 名称表达的专项行为。
-- `adr/`：不能从当前代码推断的重大技术原因与被拒方案。
-- `changes/<WORK-ID>/`：一次变化的增量、任务、测试和证据。
-- `changes/archive.json`：完成态 Work 的不可变文件集合、摘要和封存时间。
-- `releases/vX.Y.Z.md` + Git Tag：实际交付、兼容和历史快照。
+- `AGENTS.md`：简短、执行关键的规则和禁止行为。
+- `docs/`：当前产品、范围、Requirement、架构、数据、安全、全局测试政策和生成的 Traceability。
+- `specs/`：Requirement 和代码合约无法清晰表达的专项当前行为。
+- `adr/`：代码无法解释的重大持久化决策和被拒绝方案。
+- `changes/<WORK-ID>/change.yaml`：跨任务临时状态或受控边界协调。
+- `changes/archive.json`：仅为 legacy 已封存 Work 保留的兼容注册表。
+- `releases/vX.Y.Z.md` 和同名 Git Tag：交付版本及发布证据。
 
-同一规则只有一个主规格所有者。Change、Traceability 和 Release 只能引用，不复制完整行为。
+Requirement 拥有当前行为，代码拥有完整合约，测试拥有可执行验收，ADR 拥有例外原因，Git 拥有日常历史。不得把这些事实复制进 Work。
 
-## 2. Work 比例与建立条件
+## 2. 治理路径
 
-Work 的判断依据是是否存在需要长期保存的产品决策、契约、风险、迁移或跨任务协调，而不是修改类别或 diff 大小。
+### Direct 是默认路径
 
-修改可以不建 Work，当且仅当 AI 能确认它处于已接受行为与范围内、影响局部且容易回滚、不引入新的产品/架构选择、不跨越高风险或公共契约边界，并且能在当前任务完成实现与充分验证。直接修改可以新增或更新局部回归测试、测试数据和快照，只要它们证明已经明确的预期而不是改变契约；测试变化本身不构成 Work 理由。
+对于能在当前任务完成的日常功能、行为和规格更新、明确根因的 Bug、重构、UI、测试、开发工具和可逆且无生产依赖的改进，使用 Direct change。行为变化时同时更新其唯一当前主规格和测试；不创建 Work、审批状态、证据文件或 archive 记录。
 
-UI/文案调整、恢复既有响应式或可访问性预期、明确局部根因的普通 Bug、内部重构、类型/空值修正、测试补强、开发工具与非发布构建调整、无语义局部性能改进都可能直接处理。该列表只是示例，不是白名单；未列出的修改仍按同一通用判据判断。
+### Work 是例外
 
-以下情况必须建立或复用 Work：
+仅当至少一个条件成立时建立 Work：
 
-- 修改主规格、Requirement、Scope 或 ADR，或需要产品/安全选择。
-- 跨越安全/信任、secret、数据所有权、持久化/Vault format、公共 API/Schema/RPC/IPC/ABI、兼容/迁移、平台/范围或发布/回滚边界。
-- 涉及生产依赖或许可、跨模块/平台/版本协调，或不可逆操作。
-- Bug 严重、反复、根因不明、涉及安全或数据丢失，或需要长期根因/补偿记录。
-- 无法在当前任务完整验证，或需要为后续 Agent 保存计划、取舍、风险和未完成状态。
+- 未完成的上下文、风险或下一步必须跨任务保存。
+- 开放的产品或架构决定需要用户显式批准后才能实施。
+- 改变安全/信任、秘密、数据所有权、持久化/schema、公共 API/RPC/IPC、兼容/迁移、生产依赖/许可、不可逆行为、平台/范围或发布/回滚边界。
+- 严重、反复、安全/数据丢失或根因不明的 Bug 需要长期协调。
+- 跨模块、平台或版本的工作无法作为一个完整任务验证。
 
-需要 Work 但影响有限时继续使用统一 YAML、路由、状态机与门禁，正文各节可以只有一个短段落或 N/A。进入 Work 的 Bug 必须关联 Requirement、最小复现和回归证据；Traceability 只更新受影响行。高风险、跨边界或长期演进事项使用完整正文。
+行为或文档变化本身不构成 Work 理由。重大持久化、特权、公共契约、凭据、插件/MCP 信任、sandbox/授权、平台或不可逆决定还必须有 ADR。不得合并无关工作。
 
-多个小修改只有在同一 surface、同一目标和同一验收边界内才可以合并，禁止长期 catch-all Change。
+## 3. 新 Work schema
 
-## 3. 最小结构
+schema-v2 Work 只有一个 `change.yaml`，保存身份、目标、当前状态、路由、受控边界、风险和下一步；不保存正文、任务表、验收散文、命令记录、证据 JSON、profile、specification-delta 或每 Work hash。
 
-```text
-changes/<WORK-ID>/
-  change.yaml
-  change.md
+```yaml
+schema: "2"
+id: "CHG-YYYY-NNN-change-name"
+title: "Change title"
+type: "feature"
+status: "Draft"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "Why this state must survive the current task"
+requirements: []
+tests: []
+adrs: []
+context_refs: []
+related_changes: []
+boundaries: []
+risks: []
+next: []
 ```
 
-`change.yaml` 只保存 AI routing/state 所需元数据。`change.md` 保存问题、行为增量、非目标、影响、约束、任务、验收、证据和兼容。复杂安全、Schema、ABI 或架构才增加 `design.md` 或 ADR。
+复杂的长期推理使用 ADR、专项规格或可选设计文档，不把 YAML 扩张为第二份规格。
 
-精简 Work 仍使用同一模板，但每节可以只有一个短段落或明确 N/A；详略取决于需要长期保存的决策和风险，不取决于修改类型。不得删除进入 Work 的 Bug 根因/回归证据或用精简正文掩盖高风险影响。
+## 4. 上下文路由
 
-## 4. 上下文路由与受控检索
+- `requirements`、`adrs`、`context_refs` 和 `related_changes` 是初始读取集。
+- `context_refs` 使用仓库根目录相对路径和可选 `#<标题或稳定 ID>` 选择器，不能指向另一个 Work。
+- 搜索命中、共享 ID、路径或模块不构成依赖。未声明 Work 只能用于解决具体冲突或受控边界。
+- 已知 Work ID 时读取 YAML 及可选 legacy 正文，然后沿声明路由展开一层。未知 ID 时从 `docs/00-spec-index.md` 开始，只搜索文件名/YAML 元数据。
+- 已封存与 Done Work 是历史，不是默认上下文。
 
-- `requirements`、`adrs`、`context_refs` 和 `related_changes` 共同构成当前 Work 的声明式初始读取集。
-- `context_refs` 使用仓库根目录相对路径，可以用 `#<标题或稳定 ID>` 将读取范围限制为一个标题小节或表格行；不带选择器表示必须读取整个文件。
-- `related_changes` 是默认读取其他 Work 正文的唯一显式入口；`supersedes` 仍表示替代关系并允许读取被替代 Work。
-- 搜索命中、共享 Requirement/Test ID、模块名、代码路径或关键词不构成 Change 依赖。其他 Work 不得写入 `context_refs` 绕过 `related_changes`。
-- 已知 Work ID 时必须先读取其 YAML 和正文，再沿声明的路由一层展开；未知 Work ID 时只搜索规格索引和 `change.yaml` 元数据，不能先全文搜索所有 Change 正文。
-- 读取未声明的 Change 前必须存在具体的未决问题。确认关联后，把该 Work ID 写回 `related_changes`；不相关的候选不得继续留在上下文。
-- 既有 Work 缺少新路由字段时，以其 `requirements`、`adrs` 和 Traceability 对应行为为 legacy 路由，不要求批量迁移；新建或实质更新的 Work 必须同时提供两个字段，允许空列表。
-- 加密、格式、鉴权、秘密所有权、不可逆迁移、平台安全边界、已发现的规格冲突或未声明跨层影响必须扩大到全部直接相关主规格和 ADR；上下文最小化不得覆盖安全与兼容要求。
-- Change 状态只由各自 `change.yaml` 手写拥有。索引、Traceability 和 Release 可以引用 Work ID，但不得复制活动 Change 状态表或完整证据。
+## 5. 生命周期
 
-## 5. 状态机
+新 Work 使用 `Draft → Active → Done`；未实施提案可以进入 `Rejected`。
 
-- `Draft`：确认范围，只允许调查和 Spike。
-- `Accepted`：行为、非目标和验收明确；新功能可以准备实施。
-- `Implementing`：主规格和 Traceability 已更新，正在实现。
-- `Verified`：适用自动化和平台验收有证据，工作已完成并等待封存。
-- `Released`：兼容既有记录的完成态；新发布不得为表达交付而回写已封存 Work。
-- `Rejected`：不实施并保留原因。
+- `Draft`：调查和提案；受控实现尚未开始。
+- `Active`：`pnpm work:start -- <WORK-ID>` 记录明确开始决定并刷新 Traceability。
+- `Done`：`pnpm work:finish -- <WORK-ID>` 运行适用检查，仅修改状态、刷新 Traceability 并验证结果。
 
-正常路径：`Draft → Accepted → Implementing → Verified → 封存`；拒绝路径以 `Rejected → 封存` 结束。禁止跳过行为冻结直接实现，或把 merge 当作 Verified。实际交付由 Release record 和 Git Tag 表达，Release 只引用已封存 Work。
+命令结果留在任务/CI 输出和 Git 历史。新 Work 不创建 `verification.json` 或 archive digest。Done Work 提交后由 Git 保留；后续可在独立、可审查提交中删除不再被引用的小 YAML。
 
-## 6. 完成态封存
+## 6. Legacy 兼容
 
-- `Verified`、`Rejected` 和兼容既有记录的 `Released` 都是完成态。完成态 Work 必须运行 `pnpm work:archive -- <WORK-ID>`，写入 `changes/archive.json` 后任务才算最终结束。
-- 封存记录包含 Work ID、完成状态、封存时间、目录内完整文件集合和逐文件 SHA-256。Work 保持原目录，不移动、不复制，既有路由继续有效。
-- 封存后不得修改、删除或增补 `changes/<WORK-ID>/` 内文件，也不得删除、替换或重算其既有封存条目。需要纠错、补证据或改变决策时必须创建新的 Work；新 Work 可以在主规格、Traceability 或 Release 中引用原 Work，但不能回写原文。
-- `changes/archive.json` 是封存状态的唯一机器可读所有者。目录权限、只读文件位和重复 archive 目录都不作为完整性保证。
-- `pnpm docs:check` 在本地相对 `HEAD` 拒绝未提交的封存篡改；CI 必须设置 `VAULTMESH_ARCHIVE_BASE_REF` 为可信目标分支或 push 前提交，从而拒绝同一提交同时修改旧正文和摘要。清单只允许新增其他 Work 的封存条目。
-- 治理引入前已完成的 Work 通过一次性 `pnpm work:archive -- --all` 迁移，不回写其正文或 YAML。
+没有 `schema: "2"` 的 Work 保持创建时的生命周期和字段。既有 Draft、Accepted、Implementing、Verified、Released 和 Rejected 状态继续可读；Verified、Released 和 Rejected legacy Work 仍须有历史 archive 条目，所有既有 archive 目录和摘要永久不可变。
 
-## 7. AI 实施流程
+不得迁移或重算 legacy 封存 Work。legacy Active Work 仍按其历史完成和封存契约推进；`pnpm work:finish` 提供兼容路径。
 
-1. 读取 `change.yaml`，确认 type、status、目标版本、影响 surface/version 和声明式路由。
-2. 读取 `change.md`，再按路由读取关联 Requirement/Spec/ADR/Test；除明确相关外不读取其他 Change。
-3. 新功能只有 Accepted 后才能改产品代码；Bug 必须先复现并关联 Requirement。
-4. 将 Accepted 行为增量合并到主规格，再更新 Traceability 并进入 Implementing；纯 Bug 不改变 Requirement 语义。
-5. 实现失败、取消、重复、锁定、过期、迁移、回滚和安全路径，把命令/CI/平台证据写回 Change。
-6. 所有适用测试通过后标记 Verified，补齐最终证据，然后立即封存；封存是该 Work 的最后一次写入。
-7. 发布时只选择已封存 Work，创建 Release 和 Git Tag，不修改 Work 状态或正文。
+## 7. 生成的 Traceability
 
-## 8. ID 与历史
+`docs/03-functional-requirements.md` 拥有 Requirement 文本和 Test ID。Work YAML 拥有临时 routing。`pnpm docs:trace` 生成 `docs/08-traceability.md` 中的活跃 Work 与已完成证据索引；`pnpm docs:check` 在文件过期时失败。
 
-- Work、Requirement、Test、ADR 和 OPEN ID 永不复用。
-- 替代需求保留并标记 `Superseded by <ID>`；移除需求标记 `Removed in vX.Y.Z`。
-- Rejected、Verified、Released 和历史 Bug 不删除；完成态封存后永久只读。
-- 治理变化也使用 `type: governance` Change，并提升规格修订。
-- Git Tag 冻结完整快照；禁止维护 `docs/v1-copy/` 等重复版本树。
+Traceability 是索引，不是证据存储。功能验收清单与命令结果不属于该文件。
 
-## 9. Bug Work 必填信息
+## 8. ID、当前事实与历史
 
-进入 Work 的 Bug 必须包含：关联 Requirement、影响版本/surface、最小复现、expected/actual、根因、修复约束、回归测试、验证平台和修复版本。
+- Work、Requirement、Test、ADR 和 OPEN ID 永不复用或改写原意。
+- 当前规格只描述当前接受行为；Git 展示它如何变化。
+- 仅在当前兼容要求时，已取代的 Requirement 保留简短替代或移除指针。
+- Git commit 和 tag 取代日常变化的叙事过程 archive。
+- 在考虑移除 legacy archive 兼容性之前，应启用受保护分支和签名发布 tag。
 
-找不到 Requirement 时先判断：规格遗漏则补规格；预期行为变化则转 CHG；符合设计则 Rejected/By Design，不能伪装成 Bug。
+## 9. 发布最小信息
 
-## 10. Release 最小信息
+Release 记录版本、日期、同名 Git Tag、组件/schema/contract build、适用的 Done 或 legacy sealed Work、兼容/迁移、平台证据、已知问题、回滚限制和补偿。它不得重新定义 Requirement。
 
-版本、日期、Git Tag、Tauri/extension/Rust/format/RPC/ABI build、已交付且已封存的 Work/REQ/ADR、兼容/迁移、测试证据、已知问题、不可逆限制和补偿步骤。Release 可以在 Work 封存后创建，不得回写 Work。
+发布就绪是明确的操作员决定。文档和测试证据仍是可审查指引，但不独自授权或阻止发布。自动化在无法绑定版本、构建必需 artifact、保留不可变字节或发布自洽更新合约时仍必须 fail closed。
 
-## 11. 完成门禁
+## 10. 完成门禁
 
-- Change YAML 可解析，正文无未解释的范围空白。
-- 新建或实质更新的 Change 路由路径、选择器和关联 Work 可定位；其他 Change 依赖只通过 `related_changes` 或 `supersedes` 表达。
-- 主规格拥有最终行为，Change 没有建立第二所有者。
-- Requirement→Spec/ADR→Test→状态可追踪。
-- Bug 有修复前失败和修复后通过证据。
-- 失败、取消、重复、锁定、过期、迁移、回滚和安全影响已验证或明确 N/A。
-- Verified 有证据；所有完成态 Work 均已封存，文件集合、摘要和既有封存条目未变。
-- Release 只引用已封存 Work，并有 Release record 和 Git Tag；发布不修改已封存 Work。
+- `pnpm docs:trace` 第二次运行无 diff，`pnpm docs:check` 验证 schema、routing、ID、命令、生成的 Traceability、Release 和 legacy archive。
+- 治理或发布脚本改变时运行 `pnpm scripts:test`。
+- `pnpm test`、`pnpm typecheck` 和 `pnpm tauri:build` 按受影响 runtime surface 运行。
+- 迁移、安全、公共契约、依赖、平台和发布机制仍为改变该边界的 Work 保持 fail closed。

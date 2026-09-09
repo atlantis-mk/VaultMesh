@@ -33,7 +33,8 @@ pub use vaultmesh_core::{
     AgentWebInputPolicy, AgentWebRecipeKind, AgentWebRecipePolicy, ApiKeyLocation,
     ApiRequestAuthenticationMaterial, ApiRequestBodyInput, ApiRequestExecutionPlan,
     ApiRequestInput, ApiRequestPair, ApiRequestPlanSummary, ApiRequestValueMaterial,
-    NewAgentAuditEvent, NewAgentConnectorDefinition, validate_agent_audit,
+    NewAgentAuditEvent, NewAgentConnectorDefinition, SYNC_MAX_BYTES, SYNC_MAX_RECORDS, SyncEntry,
+    SyncManifest, SyncRecord, SyncState, SyncVersion, validate_agent_audit,
 };
 
 pub const VAULTMESH_ITEM_KIND_LOGIN: u32 = 1;

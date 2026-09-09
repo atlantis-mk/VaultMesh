@@ -9,7 +9,12 @@ mod error;
 mod format;
 mod model;
 mod session;
+mod sync;
 mod totp;
+pub use sync::{
+    SYNC_MAX_BYTES, SYNC_MAX_RECORDS, SyncAuthorization, SyncEntry, SyncManifest, SyncRecord,
+    SyncState, SyncVersion,
+};
 
 pub use agent_connector::{
     AgentAuditConfirmation, AgentAuditDecision, AgentAuditEvent, AgentAuditResultClass,

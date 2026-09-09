@@ -799,3 +799,102 @@ fn api_environment_write_failure_preserves_file_memory_revision_and_catalog() {
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(directory).unwrap();
 }
+
+#[test]
+fn ct_lan_sync_format_upgrade_keeps_backup_and_rolls_back_both_write_failures() {
+    let old=include_bytes!("../../vault-core/tests/fixtures/format3.vault");
+    for fail in [1,2,0] {
+        let dir=std::env::temp_dir().join(format!("vaultmesh-migration-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&dir).unwrap();let path=dir.join("test.vault");std::fs::write(&path,old).unwrap();
+        let mut runtime=DesktopRuntime::new(path.clone()).unwrap();
+        crate::storage::FAIL_WRITE.with(|n|n.set(fail));
+        let result=runtime.unlock("synthetic format3 master".into());
+        crate::storage::FAIL_WRITE.with(|n|n.set(0));
+        if fail>0 {assert!(result.is_err());assert_eq!(std::fs::read(&path).unwrap(),old);assert!(!runtime.status().unlocked);}
+        else {
+            assert!(result.is_ok());assert_eq!(runtime.status().item_count,1);
+            let backups:Vec<_>=std::fs::read_dir(&dir).unwrap().flatten().filter(|e|e.file_name().to_string_lossy().ends_with(".backup")).collect();assert_eq!(backups.len(),1);assert_eq!(std::fs::read(backups[0].path()).unwrap(),old);
+            assert_eq!(vaultmesh_core::VaultSession::unlock("synthetic format3 master",&std::fs::read(&path).unwrap()).unwrap().format_version().unwrap(),4);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn ct_compat_pin_explains_required_upgrade_and_original_key_works_after_migration() {
+    let dir = std::env::temp_dir().join(format!("vaultmesh-pin-upgrade-{}", Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("test.vault");
+    let old = include_bytes!("../../vault-core/tests/fixtures/format3.vault");
+    std::fs::write(&path, old).unwrap();
+    let mut runtime = DesktopRuntime::new(path.clone()).unwrap();
+    let key = [7_u8; 32]; // Synthetic fixture's original Vault Key, as wrapped by PIN.
+    let error = runtime.unlock_with_quick_key(path.clone(), &key).unwrap_err();
+    assert!(error.public_message().contains("主密码"));
+    assert!(error.public_message().contains("升级"));
+    assert_eq!(std::fs::read(&path).unwrap(), old);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    assert!(!runtime.status().unlocked);
+    runtime.unlock("synthetic format3 master".into()).unwrap();
+    runtime.lock();
+    assert!(runtime.unlock_with_quick_key(path.clone(), &key).unwrap().unlocked);
+    runtime.lock();
+    assert!(runtime.unlock_with_biometric_key(path, &key).unwrap().unlocked);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ct_lan_sync_merge_failure_restores_file_and_memory_and_restore_clears_authority() {
+    let dir=std::env::temp_dir().join(format!("vaultmesh-sync-atomic-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&dir).unwrap();
+    let mut a=DesktopRuntime::new(dir.join("a.vault")).unwrap();let mut b=DesktopRuntime::new(dir.join("b.vault")).unwrap();a.create("test master a".into()).unwrap();b.create("test master b".into()).unwrap();
+    a.execute("items.add",serde_json::json!({"title":"test item","username":"u","password":"test secret","url":null,"notes":null,"folder":null,"favorite":false,"totpSecret":null,"recoveryCodes":[],"additionalUrls":[],"customFields":[],"autofillOnPageLoad":false,"masterPasswordReprompt":false})).unwrap();
+    let peer=format!("lan-peer-{}","a".repeat(32));let fp="b".repeat(64);let av=a.sync_state().unwrap().vault_id;let bv=b.sync_state().unwrap().vault_id;
+    a.sync_authorize(&peer,&fp,true).unwrap();b.sync_authorize(&peer,&fp,true).unwrap();a.sync_bind(&peer,&fp,bv,av).unwrap();b.sync_bind(&peer,&fp,av,bv).unwrap();
+    let batch=a.sync_export(&peer,&fp,bv,av,&Default::default()).unwrap();let before=std::fs::read(dir.join("b.vault")).unwrap();
+    crate::storage::FAIL_WRITE.with(|n|n.set(1));assert!(b.sync_merge(&peer,&fp,av,bv,&batch).is_err());crate::storage::FAIL_WRITE.with(|n|n.set(0));
+    assert_eq!(std::fs::read(dir.join("b.vault")).unwrap(),before);assert_eq!(b.status().item_count,0);
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    assert!(b.sync_merge_cancellable(&peer,&fp,av,bv,&batch,&cancelled).is_err());
+    assert_eq!(std::fs::read(dir.join("b.vault")).unwrap(),before);assert_eq!(b.status().item_count,0);
+    // Cancellation observed at the final commit boundary restores the prior file and state.
+    let vault=b.vault.as_mut().unwrap();
+    let blocked=crate::browser_ops::transaction_guarded(vault,|s| { s.sync_merge(&batch,100).unwrap(); Ok(json!({})) },||false);
+    assert!(blocked.is_err());assert_eq!(std::fs::read(dir.join("b.vault")).unwrap(),before);assert_eq!(b.status().item_count,0);
+    assert_eq!(b.sync_merge(&peer,&fp,av,bv,&batch).unwrap(),1);assert_eq!(b.status().item_count,1);
+    let backup=dir.join("restore.backup");b.backup_to(&backup).unwrap();b.restore_from(&backup,"test master b".into()).unwrap();
+    assert!(b.sync_state().unwrap().authorizations.is_empty());assert_ne!(b.sync_state().unwrap().vault_id,bv);assert_eq!(b.status().item_count,1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ct_lan_sync_related_records_merge_together_and_invalidate_credential_policy() {
+    let dir = std::env::temp_dir().join(format!("vaultmesh-sync-refs-{}", Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let mut a = DesktopRuntime::new(dir.join("a.vault")).unwrap();
+    let mut b = DesktopRuntime::new(dir.join("b.vault")).unwrap();
+    a.create("test master a".into()).unwrap(); b.create("test master b".into()).unwrap();
+    let service = a.execute("services.add", json!({"name":"Test API", "description":null,"tags":[],"sites":["https://api.example.test"]})).unwrap();
+    let mut token_input = json!({"title":"Test token", "kind":"access-token", "secret":"synthetic original", "provider":null,"account":null,"environment":null,"scopes":[],"expiresAt":null,"website":null,"notes":null,"folder":null,"favorite":false,"masterPasswordReprompt":false});
+    let token = a.execute("secrets.add", token_input.clone()).unwrap();
+    let env = a.execute("api-environments.add", json!({"serviceId":service["id"],"name":"Test", "kind":"production", "origin":"https://api.example.test", "basePath":null,"openapiUrl":null,"auth":{"type":"bearer","credential":{"itemKind":"secret","itemId":token["id"],"field":"secret-value","expectedSecretKind":"access-token"}},"fixedHeaders":[]})).unwrap();
+    let peer=format!("lan-peer-{}", "a".repeat(32)); let fp="b".repeat(64);
+    let av=a.sync_state().unwrap().vault_id; let bv=b.sync_state().unwrap().vault_id;
+    a.sync_authorize(&peer,&fp,true).unwrap(); b.sync_authorize(&peer,&fp,true).unwrap();
+    a.sync_bind(&peer,&fp,bv,av).unwrap(); b.sync_bind(&peer,&fp,av,bv).unwrap();
+    let initial=a.sync_export(&peer,&fp,bv,av,&Default::default()).unwrap();
+    b.sync_merge(&peer,&fp,av,bv,&initial).unwrap();
+    let before=b.execute("api-environments.detail",json!({"id":env["id"]})).unwrap();
+    assert_eq!(before["serviceId"],service["id"]);
+    assert_eq!(before["auth"]["credential"]["itemId"],token["id"]);
+    token_input["id"]=token["id"].clone(); token_input["secret"]=json!("synthetic changed");
+    a.execute("secrets.update",token_input).unwrap();
+    for _ in 0..3 {
+        let am=a.sync_state().unwrap().entries; let bm=b.sync_state().unwrap().entries;
+        let ar=a.sync_export(&peer,&fp,bv,av,&bm).unwrap(); let br=b.sync_export(&peer,&fp,av,bv,&am).unwrap();
+        b.sync_merge(&peer,&fp,av,bv,&ar).unwrap(); a.sync_merge(&peer,&fp,bv,av,&br).unwrap();
+    }
+    let after=b.execute("api-environments.detail",json!({"id":env["id"]})).unwrap();
+    assert!(after["revision"].as_u64().unwrap()>before["revision"].as_u64().unwrap());
+    assert_ne!(after["policyDigest"],before["policyDigest"]);
+    assert_eq!(a.sync_state().unwrap().entries,b.sync_state().unwrap().entries);
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -356,11 +356,23 @@ pub fn record_agent_audit(
             read_vault(source)
                 .map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?,
         );
-        let session = VaultSession::unlock(&master_password, encrypted.as_slice())
-            .map_err(map_runtime_core_error);
+        let session = match VaultSession::unlock(&master_password, encrypted.as_slice()) {
+            Err(vaultmesh_core::VaultError::UnsupportedFormat) if matches!(unlock_source, UnlockEventSource::Desktop) => {
+                VaultSession::upgrade_format3(&master_password, &encrypted).and_then(|session| {
+                    let backup = self.path.with_file_name(format!("{}.format3-{}.backup",self.path.file_name().unwrap_or_default().to_string_lossy(),Uuid::new_v4()));
+                    write_vault(&backup,&encrypted).map_err(|_|vaultmesh_core::VaultError::Serialization)?;
+                    Ok(session)
+                })
+            },
+            other => other,
+        }.map_err(map_runtime_core_error);
         master_password.zeroize();
         let mut session = session?;
+        session.sync_reset_after_restore().map_err(map_runtime_core_error)?;
+        session.sync_checkpoint(0).map_err(map_runtime_core_error)?;
         let canonical = Zeroizing::new(session.save().map_err(map_runtime_core_error)?);
+        let mutation_lock = crate::vault::mutation_lock(&self.path);
+        let _guard = mutation_lock.lock().map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
         write_vault(&self.path, canonical.as_slice())
             .map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
         session
@@ -435,7 +447,12 @@ fn parse_id(input: &Value) -> Result<Uuid, DesktopRuntimeError> {
 }
 
 fn map_runtime_core_error(error: VaultError) -> DesktopRuntimeError {
-    DesktopRuntimeError::from(map_core_error(error))
+    let message = match &error {
+        VaultError::UnsupportedFormat => Some("此解锁方式不支持当前保险库格式。旧版保险库请先在桌面使用主密码解锁，完成升级后再使用 PIN 或指纹。"),
+        VaultError::InvalidPayload => Some("保险库数据格式无法读取。"),
+        _ => None,
+    };
+    DesktopRuntimeError { status: map_core_error(error), message }
 }
 
 #[cfg(test)]

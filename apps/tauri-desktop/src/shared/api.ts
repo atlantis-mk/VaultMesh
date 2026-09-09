@@ -91,6 +91,8 @@ import type {
   ApiRequestInput,
   ApiRequestPreview,
   LanPairingStatus,
+  LanSyncStatus,
+  LanSyncConflict,
   LanTrustedPeer,
 } from './contracts';
 import type { SshCommandImport } from '@vaultmesh/ssh-command-parser';
@@ -111,6 +113,7 @@ export interface VaultMeshApi {
     backup(): Promise<DialogOperationResult>;
     restore(input: MasterPasswordInput): Promise<VaultOperationResult>;
     changeMasterPassword(input: ChangeMasterPasswordInput): Promise<VaultStatus>;
+    onChanged(callback: () => void): () => void;
     onLocked(callback: () => void): () => void;
     biometricStatus(): Promise<BiometricStatus>;
     enableBiometric(): Promise<BiometricStatus>;
@@ -126,6 +129,13 @@ export interface VaultMeshApi {
     updateSettings(input: SecuritySettings): Promise<SecuritySettings>;
   };
   lan: {
+    syncStatus(): Promise<LanSyncStatus>;
+    enableSync(pairingRef: string): Promise<{ ok: true }>;
+    disableSync(pairingRef: string): Promise<{ ok: true }>;
+    retrySync(pairingRef: string): Promise<{ ok: true }>;
+    syncConflicts(): Promise<LanSyncConflict[]>;
+    restoreSyncConflict(id: string): Promise<{ ok: true }>;
+    clearSyncConflicts(): Promise<{ ok: true }>;
     status(): Promise<LanPairingStatus>;
     startDiscovery(): Promise<LanPairingStatus>;
     stopDiscovery(): Promise<LanPairingStatus>;

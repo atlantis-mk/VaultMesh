@@ -3,10 +3,11 @@
 <plist version="1.0">
 <dict>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>VaultMesh 使用本地网络发现并验证你主动配对的附近 VaultMesh 设备。</string>
+  <string>VaultMesh 使用本地网络发现和配对附近设备，并在双方保险库解锁时自动同步已授权的凭据。</string>
   <key>NSBonjourServices</key>
   <array>
     <string>_vaultmesh-pair._tcp</string>
+    <string>_vaultmesh-sync._tcp</string>
   </array>
 </dict>
 </plist>

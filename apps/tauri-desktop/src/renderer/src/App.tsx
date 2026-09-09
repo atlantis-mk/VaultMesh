@@ -5,10 +5,6 @@ import { useActivityMonitor } from './hooks/use-activity-monitor';
 import { router } from './routes';
 import { useVaultStore } from './stores/vault-store';
 
-export function keepsIndependentPageOnVaultLock(pathname: string): boolean {
-  return pathname === '/nearby';
-}
-
 export function App() {
   const ready = useVaultStore((state) => state.ready);
   const refresh = useVaultStore((state) => state.refresh);
@@ -19,14 +15,14 @@ export function App() {
     void refresh();
     const removeLockedListener = window.vaultMesh.vault.onLocked(() => {
       handleLocked();
-      if (!keepsIndependentPageOnVaultLock(router.state.location.pathname)) {
-        void router.navigate({ to: '/unlock', replace: true });
-      }
+      void router.navigate({ to: '/unlock', replace: true });
     });
+    const removeChangedListener = window.vaultMesh.vault.onChanged(() => { void refresh().then(() => router.invalidate()); });
     const onFocus = (): void => void refresh();
     window.addEventListener('focus', onFocus);
     return () => {
       removeLockedListener();
+      removeChangedListener();
       window.removeEventListener('focus', onFocus);
     };
   }, [handleLocked, refresh]);

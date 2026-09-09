@@ -564,8 +564,13 @@ pub fn run() {
                 integration.start();
                 Arc::new(Mutex::new(integration))
             };
+            let lan_sync = Arc::new(Mutex::new(LanSyncService::new(
+                runtime.clone(),
+                lan_peer_trust_path.clone(),
+            )));
             let state = RuntimeState {
                 runtime,
+                lan_sync,
                 agent_vault_access,
                 agent_pin,
                 agent_broker,
@@ -610,12 +615,13 @@ pub fn run() {
             agent_authorization_window::prepare_agent_authorization_window(app.handle());
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             let lan_session_state = state.clone();
+            let lan_app_handle = app.handle().clone();
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             let update_state = state.clone();
             let app_handle = app.handle().clone();
             std::thread::spawn(move || monitor_idle_lock(app_handle, state));
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            std::thread::spawn(move || monitor_lan_session_lock(lan_session_state));
+            std::thread::spawn(move || monitor_lan_session_lock(lan_app_handle, lan_session_state));
             let email_state = app.state::<RuntimeState>().inner().clone();
             let email_app = app.handle().clone();
             std::thread::spawn(move || monitor_email_otp(email_app, email_state));
@@ -665,22 +671,56 @@ pub fn run() {
 }
 
 fn stop_lan_pairing(state: &RuntimeState) {
+    if let Ok(mut sync) = state.lan_sync.lock() {
+        sync.stop();
+    }
     if let Ok(mut lan_pairing) = state.lan_pairing.lock() {
         lan_pairing.stop();
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn monitor_lan_session_lock(state: RuntimeState) {
+fn monitor_lan_session_lock(app: AppHandle, state: RuntimeState) {
     loop {
         std::thread::sleep(Duration::from_millis(250));
-        let active = state
-            .lan_pairing
+        let unlocked = state
+            .runtime
             .lock()
-            .map(|service| service.is_active())
-            .unwrap_or(false);
-        if active && system_session_locked() {
+            .ok()
+            .is_some_and(|r| r.status().unlocked);
+        if system_session_locked() || !unlocked {
             stop_lan_pairing(&state);
+            continue;
+        }
+        let authorizations = if let Ok(mut pairing) = state.lan_pairing.lock() {
+            if pairing.is_active() {
+                pairing.status(std::time::Instant::now(), unix_millis());
+            }
+            pairing.take_sync_authorizations()
+        } else {
+            vec![]
+        };
+        for (vault, peer, fingerprint) in authorizations {
+            if let Ok(mut runtime) = state.runtime.lock() {
+                if runtime.sync_state().is_ok_and(|s| s.vault_id == vault) {
+                    let _ = runtime.sync_authorize(&peer, &fingerprint, true);
+                }
+            }
+        }
+        let changed = if let Ok(mut sync) = state.lan_sync.lock() {
+            sync.tick();
+            sync.take_changes() > 0
+        } else {
+            false
+        };
+        if changed {
+            if let Ok(mut requests) = state.api_requests.lock() {
+                requests.clear();
+            }
+            if let Ok(mut broker) = state.agent_broker.lock() {
+                broker.restart_connection_sessions(unix_millis());
+            }
+            let _ = app.emit("vault-data-changed", ());
         }
     }
 }

@@ -3,6 +3,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  Navigate,
   redirect,
 } from '@tanstack/react-router';
 
@@ -105,8 +106,15 @@ const agentManagementRoute = createRoute({
 const nearbyDevicesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'nearby',
-  component: NearbyDevicesPage,
+  beforeLoad: requireUnlocked,
+  component: NearbyDevicesRoute,
 });
+
+function NearbyDevicesRoute() {
+  const unlocked = useVaultStore((state) => state.status?.unlocked);
+  // Also unmount immediately when a status refresh observes a lock without an event.
+  return unlocked ? <NearbyDevicesPage /> : <Navigate to="/unlock" replace />;
+}
 
 const emailOtpRoute = createRoute({
   getParentRoute: () => rootRoute,

@@ -1,0 +1,23 @@
+id: "CHG-2026-042-aivo-document-governance"
+title: "将文档治理升级为 Aivo schema-v2 模式"
+type: "governance"
+status: "Verified"
+spec_revision: "0.1.52-active"
+target_release: null
+requirements: []
+tests: []
+adrs: []
+context_refs:
+  - "docs/09-document-governance.md"
+  - "docs/07-test-release-plan.md#常用命令"
+  - "docs/08-traceability.md"
+related_changes: []
+affected_surfaces:
+  - "documentation governance"
+  - "documentation validation scripts"
+affected_formats: []
+affected_versions:
+  - "0.1.52-active"
+security_impact: "none"
+migration: "legacy Work、archive 和封存摘要保持兼容；新 Work 改用 schema-v2"
+supersedes: []

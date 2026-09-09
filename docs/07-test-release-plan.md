@@ -15,6 +15,7 @@
 从仓库根目录执行最窄相关 Gate：
 
 ```sh
+pnpm docs:trace
 pnpm docs:check
 cargo fmt --all -- --check
 cargo check -p vaultmesh-core -p vaultmesh-ffi
@@ -62,7 +63,7 @@ pnpm typecheck
 | `CT-AGENT-SSH-001`、`CT-AGENT-PTY-001`、`CT-AGENT-HTTP-001`、`CT-AGENT-HTTP-PATH-001`、`CT-AGENT-WEB-001`、`CT-AGENT-AUTHN-001` | Tauri Rust adapter contract/adversarial tests；HTTP CT 覆盖 exact 账户 origin、HTTP/HTTPS、public/private/loopback/link-local/metadata literal target、self-signed TLS、DNS 当次连接固定、redirect/cross-origin denial、Bearer 注入与有界输出；HTTP path CT 额外覆盖 access-token Secret direct schema、method risk floor、base-path confinement、单次 canonicalization、encoded separator/dot 拒绝、exact/`*`/terminal `**` predicate、method 隔离、Deny 优先与 matcher revision；protected-auth CT 覆盖 OTP、recovery code 与 Passkey 的 opaque target、single-use、成功提交和清理；固定测试 server/browser fixture，不使用生产凭据 |
 | `CT-AGENT-CODEX-001`、`CT-AGENT-OPENCODE-001` | packaged stdio shim 的 tools/list/call/cancel/revoke/multi-account client E2E |
 | `CT-TAURI-SHELL-*`、`CT-TAURI-COMMAND-*` | `apps/tauri-desktop` config/adapter/Rust command 与 Electron data migration contract tests |
-| `CT-LAN-PAIRING-001` | Tauri Rust LAN advertisement parser、protocol/version/size rejection、同链路双栈 listener、随机六码生命周期、TLS 内 SPAKE2/key-confirmation、错误码/尝试上限/timeout/replay、单端发起与双端同时发起的唯一会话仲裁、双方 persistence acknowledgement、credential/index rollback、revoke/restart/lock cleanup 与 renderer-safe typed operation tests |
+| `CT-LAN-PAIRING-001` | Tauri Rust LAN advertisement parser、protocol/version/size rejection、同链路双栈 listener、随机六码生命周期、TLS 内 SPAKE2/key-confirmation、错误码/尝试上限/timeout/replay、单端发起与双端同时发起的唯一会话仲裁、双方 persistence acknowledgement、credential/index rollback、revoke/restart/lock cleanup 与 renderer-safe typed operation tests；renderer 真实路由覆盖锁定时直接访问拦截、解锁后显示、手动锁定/锁定事件/聚焦刷新后的页面卸载、配对码与设备列表清除和停止发现 |
 | `CT-TAURI-VAULT-*`、`CT-TAURI-DESKTOP-*` | Tauri Rust runtime integration tests + shared renderer tests |
 | `CT-TAURI-TRAY-THEME-001` | Windows light/dark/unknown 主题选择、黑白托盘资源尺寸/解码、macOS Retina 模板资源保持测试 |
 | `CT-DESKTOP-STARTUP-*` | Tauri Rust autostart owner、固定参数、初始化标记、隐藏窗口配置、主窗口关闭销毁 WebView 与托盘重建、typed adapter 与设置 UI contract tests |
@@ -95,12 +96,17 @@ pnpm typecheck
 | `AT-NATIVE-MACOS-*` | 历史 Native Preview AT；不再作为当前产品验收入口 |
 | `AT-LAN-PAIRING-001` | packaged macOS↔macOS、Windows↔Windows、macOS↔Windows 同一 LAN 的显式发现、本机展示码→对端输入码→自动完成、错误码/尝试上限、重连、撤销、超时、系统锁定/睡眠与 firewall rejection 验收 |
 
+## LAN 同步验收
+
+- `CT-LAN-SYNC-001`：Core 版本/墓碑/合并/历史、format 3→4 安全升级与恢复、真实 Rust 双实例 TLS、授权与锁定清理、重试与原子回滚、renderer-safe contracts。
+- `AT-LAN-SYNC-001`：packaged macOS↔macOS、Windows↔Windows、macOS↔Windows，双端独立主密码、离线修改与删除、重连、系统锁定/睡眠、防火墙、备份升级恢复及新旧 Passkey。
+
 ## 发布门禁
 
 ### GATE-1 规格与追踪
 
 - `pnpm docs:check` 通过。
-- Change 状态允许实施/发布；Requirement、Spec、ADR 和 Traceability 一致。
+- Direct change 或适用 Work 状态允许实施/发布；Requirement、Spec、ADR 和生成的 Traceability 一致。
 - 所有新增公开行为有稳定 Requirement/Test ID。
 - 没有未解释的范围或兼容空白。
 
@@ -165,8 +171,8 @@ pnpm typecheck
   与 Firefox ZIP 必须来自同一 source SHA，且两个 ZIP 已通过 R2 公网下载校验；Draft 必须保持 Draft、不得创建 Git Tag，并且不得在平台
   AT、Work 封存、Release record 门禁完成前公开。
 - Release record 与 Git Tag 存在。
-- Release 中引用的 Work 均已列入 `changes/archive.json`，且 `VAULTMESH_ARCHIVE_BASE_REF` 基线校验通过。
+- Release 中引用的 Work 均为 schema-v2 Done 或已列入 `changes/archive.json` 的 legacy Work，且 `VAULTMESH_ARCHIVE_BASE_REF` 基线校验通过。
 
 ## 完成声明
 
-代码合并不等于 Verified，Verified 也不等于已发布。只有适用自动化和平台 AT 有可定位证据才能标记 Verified，并且完成态 Work 必须在同一任务结束前封存。只有 Gate 1–6 中适用于该版本的项目通过、Release 记录和 Git Tag 存在才算已发布；Release 只引用已封存 Work，不回写其状态或正文。
+代码合并不等于完成，也不等于已发布。schema-v2 Work 只有在适用自动化和平台 AT 通过后才能标记 Done；legacy Work 仍以 Verified 并封存完成。只有 Gate 1–6 中适用于该版本的项目通过、Release 记录和 Git Tag 存在才算已发布；Release 只引用 Done schema-v2 Work 或已封存 legacy Work，不回写历史状态或正文。

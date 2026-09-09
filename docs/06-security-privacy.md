@@ -6,11 +6,11 @@
 
 范围内风险：offline guessing、ciphertext/header modification、nonce 生命周期、日志/源码/UI/extension storage 泄漏、未启用平台可用的窗口内容捕获保护、desktop/browser/page 授权混淆、RPC replay/expiry/origin substitution、失败提交回滚。
 
-范围外风险：已被攻陷的 OS/process/browser/keylogger/accessibility tool、攻击者观察已授权 session、用户提交秘密后的远端服务泄漏、当前范围外的 sync/share/account recovery。
+范围外风险：已被攻陷的 OS/process/browser/keylogger/accessibility tool、攻击者观察已授权 session、用户提交秘密后的远端服务泄漏、当前范围外的跨网络同步/share/account recovery。
 
 ## LAN peer pairing
 
-LAN peer discovery 默认关闭且只在用户显式开启的有限窗口内运行。mDNS 记录是未认证输入，不能包含用户、主机、Vault、配对码或秘密数据，也不能单独授予信任。每次发现窗口的随机六码只在生成端 UI 与 LAN service 内存中存在；输入端通过 bounded typed operation 提交后，双方必须在首次 TLS 内完成 SPAKE2 与绑定 TLS exporter、设备身份、证书、实例和 nonce 的双向 key confirmation，网络中不得直接发送配对码。错误码和重放必须失败，失败尝试有界；停止、超时、锁定、睡眠或退出立即清除配对码。双方同时发起时只保留按临时实例 ID 确定的规范 TLS 会话。双方还必须交换本地持久化成功状态，任一端失败时不得进入 connected。已配对身份固定到 OS-protected proof，证书漂移、记录损坏、取消、超时或撤销均拒绝。LAN service 不接触 Vault runtime、Agent broker、Browser RPC、clipboard、renderer persistence、analytics 或 crash payload。
+LAN peer discovery 默认关闭且只在用户显式开启的有限窗口内运行。mDNS 记录是未认证输入，不能包含用户、主机、Vault、配对码或秘密数据，也不能单独授予信任。每次发现窗口的随机六码只在生成端 UI 与 LAN service 内存中存在；输入端通过 bounded typed operation 提交后，双方必须在首次 TLS 内完成 SPAKE2 与绑定 TLS exporter、设备身份、证书、实例和 nonce 的双向 key confirmation，网络中不得直接发送配对码。错误码和重放必须失败，失败尝试有界；停止、超时、锁定、睡眠或退出立即清除配对码。双方同时发起时只保留按临时实例 ID 确定的规范 TLS 会话。双方还必须交换本地持久化成功状态，任一端失败时不得进入 connected。已配对身份固定到 OS-protected proof，证书漂移、记录损坏、取消、超时或撤销均拒绝。配对 transport 不承载 Vault 数据。独立同步 service 只通过 Rust typed API 访问当前已授权 Vault；版本清单和秘密记录仅经固定证书 mutual TLS 传输，主密码、Vault Key、本地授权、邮件连接凭据与 SSH 部署绑定不传输。桌面锁定立即撤销同步运行权限，Browser/Agent 解锁不得借用。renderer、日志和持久化非秘密 settings 不得包含同步记录。
 
 ## Vault 与文件边界
 

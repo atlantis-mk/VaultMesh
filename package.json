@@ -14,7 +14,11 @@
   },
   "packageManager": "pnpm@11.24.0",
   "scripts": {
+    "docs:trace": "node scripts/generate-traceability.mjs",
     "docs:check": "node scripts/docs-check.mjs",
+    "work:new": "node scripts/work-new.mjs",
+    "work:start": "node scripts/work-start.mjs",
+    "work:finish": "node scripts/work-finish.mjs",
     "work:archive": "node scripts/archive-work.mjs",
     "scripts:test": "node --test scripts/*.test.mjs",
     "tauri:dev": "pnpm --filter @vaultmesh/tauri-desktop tauri dev",

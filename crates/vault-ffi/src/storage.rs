@@ -12,7 +12,25 @@ pub(crate) fn read_vault(path: &Path) -> Result<Vec<u8>, ()> {
     fs::read(path).map_err(|_| ())
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_WRITE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 pub(crate) fn write_vault(path: &Path, bytes: &[u8]) -> Result<(), ()> {
+    #[cfg(test)]
+    if FAIL_WRITE.with(|count| {
+        let n = count.get();
+        if n > 0 {
+            count.set(n - 1);
+            n == 1
+        } else {
+            false
+        }
+    }) {
+        return Err(());
+    }
+    if bytes.len() as u64 > MAX_VAULT_BYTES {
+        return Err(());
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|_| ())?;
     }

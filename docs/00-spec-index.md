@@ -2,9 +2,9 @@
 
 ## 当前基线
 
-- 规格修订：`0.1.52-active`
+- 规格修订：`0.1.53-active`
 - 产品版本：`0.0.9-review`
-- Vault 格式：`3`（唯一写入和读取格式；所有其他版本在 KDF 前拒绝，不提供迁移或降级）
+- Vault 格式：`4`（唯一写入格式；format 3 仅允许 desktop 主密码验证、备份后升级；不提供降级）
 - Browser RPC：`2`
 - Native ABI：`1`
 - 状态：Tauri 2、Chromium MV3 与 Firefox MV2 扩展为当前实现；Firefox 不包含 Chromium-only Passkey proxy；Electron/Native Preview 源码已移除；`0.0.1-review` 为独立 Review 安装基线，当前 Review 更新版本为 `0.0.9-review`，正式发布门禁未完成
@@ -28,8 +28,8 @@
 | `05-data-model.md` | Vault envelope、payload 与兼容规则 | Active |
 | `06-security-privacy.md` | 威胁范围、秘密生命周期和安全决策 | Active |
 | `07-test-release-plan.md` | 测试层次、命令和发布 Gate | Active |
-| `08-traceability.md` | Requirement→Spec/ADR→Test→状态 | Active |
-| `09-document-governance.md` | AI Change、Bug、ADR、版本维护规则 | Active |
+| `08-traceability.md` | 由 Requirements 和 Work routing 生成的索引 | Generated |
+| `09-document-governance.md` | AI Direct/Work、ADR、版本维护规则 | Active |
 
 ## 专项规格
 
@@ -39,6 +39,8 @@
 - `../specs/native-desktop-migration.md`：已停止的 SwiftUI/WinUI 迁移历史证据
 - `../specs/tauri-desktop-migration.md`：Tauri 2 统一桌面运行时与发布 Gate
 - `../specs/lan-peer-pairing.md`：显式局域网客户端发现、双向短码验证与设备信任
+
+- `../specs/lan-vault-sync.md`：已授权桌面设备的局域网自动双向同步
 
 ## 已接受 ADR
 
@@ -60,6 +62,7 @@
 - `../adr/0016-desktop-api-request-network-boundary.md`
 - `../adr/0017-cross-browser-extension-native-messaging.md`
 - `../adr/0018-lan-peer-discovery-trust-model.md`
+- `../adr/0019-lan-vault-sync.md`
 
 ## Change 与 Release 入口
 
@@ -69,7 +72,7 @@
 - `../releases/README.md`
 - `../releases/_template.md`
 
-Change 的状态和路由元数据只由各自 `change.yaml` 手写拥有。本索引不复制活动或历史 Change 状态；定位任务时只搜索 YAML 元数据，确认候选后才读取正文。
+新 schema-v2 Work 的状态和路由只由 `change.yaml` 手写拥有；`docs/08-traceability.md` 由 `pnpm docs:trace` 生成。legacy Work 保持其历史 YAML 与正文。定位任务时只搜索 YAML 元数据，确认候选后才读取正文。
 
 ## 权威代码定位
 

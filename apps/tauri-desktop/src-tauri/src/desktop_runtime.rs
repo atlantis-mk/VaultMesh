@@ -578,6 +578,12 @@ pub(super) fn lock_runtime_on_window_blur(
 }
 
 pub(super) fn finish_policy_lock(app: &AppHandle, state: &RuntimeState) {
+    if let Ok(mut sync) = state.lan_sync.lock() {
+        sync.stop();
+    }
+    if let Ok(mut pairing) = state.lan_pairing.lock() {
+        pairing.stop();
+    }
     clear_clipboard_if_unchanged(app, state);
     clear_imports(state);
     clear_privileged_sessions(state);
@@ -595,6 +601,9 @@ pub(super) fn finish_policy_lock(app: &AppHandle, state: &RuntimeState) {
 /// Vault replacement/switch and platform lock events cross the Agent storage
 /// boundary even though ordinary desktop lock/unlock remains independent.
 pub(super) fn finish_agent_boundary_lock(state: &RuntimeState) {
+    if let Ok(mut sync) = state.lan_sync.lock() {
+        sync.stop();
+    }
     if let Ok(mut broker) = state.agent_broker.lock() {
         broker.suspend_for_vault_lock();
     }

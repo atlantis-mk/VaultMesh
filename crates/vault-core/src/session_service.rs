@@ -300,6 +300,7 @@ impl VaultSession {
     }
 
     pub fn clear_service_history(&mut self, id: Uuid) -> Result<(), VaultError> {
+        crate::sync::record_history_clear(self.payload_mut()?, "service_history", id)?;
         self.payload_mut()?
             .service_history
             .retain(|revision| revision.service_id != id);
