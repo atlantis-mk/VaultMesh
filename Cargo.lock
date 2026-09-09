@@ -879,6 +879,7 @@ dependencies = [
  "fiat-crypto",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -1909,6 +1910,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac",
+]
 
 [[package]]
 name = "hmac"
@@ -4355,6 +4365,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "secret-utils"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e85c88b9ea19c359226abc9ed4bcc9b0ac6ce8498fd7e1cc388b44a8c38b4c19"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "security-framework"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4734,6 +4753,22 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "spake2-conflux"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "078c7cbb3cf4ffdd0a1a01bbd139e2ed704cc0d4e8b5fdf7302c11c56f131cf8"
+dependencies = [
+ "curve25519-dalek",
+ "hkdf",
+ "rand 0.9.5",
+ "rand_core 0.9.5",
+ "secret-utils",
+ "sha2",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -5943,6 +5978,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2",
+ "spake2-conflux",
  "ssh-key",
  "ssh2",
  "tauri",
@@ -6997,6 +7033,20 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"

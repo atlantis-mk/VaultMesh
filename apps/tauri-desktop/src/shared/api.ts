@@ -131,9 +131,7 @@ export interface VaultMeshApi {
     stopDiscovery(): Promise<LanPairingStatus>;
     scan(): Promise<LanPairingStatus>;
     listTrusted(): Promise<LanTrustedPeer[]>;
-    begin(pairingRef: string): Promise<{ started: true }>;
-    confirm(pairingRef: string): Promise<{ resolved: true }>;
-    cancel(pairingRef: string): Promise<{ resolved: true }>;
+    begin(pairingRef: string, pairingCode: string): Promise<{ started: true }>;
     revoke(pairingRef: string): Promise<{ revoked: true }>;
     rename(pairingRef: string, label: string): Promise<{ renamed: true }>;
   };

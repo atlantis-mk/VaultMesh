@@ -15,6 +15,7 @@ use std::{
 
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use hmac::{Hmac, Mac};
 use mdns_sd::{IfKind, IfPredicate, ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperties};
 use rand_core::{OsRng, RngCore};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -26,17 +27,18 @@ use rustls::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
+use spake2_conflux::{Identity as SpakeIdentity, Password, RistrettoGroup, Spake2};
 use zeroize::{Zeroize, Zeroizing};
 
 const PROTOCOL: u8 = 1;
 const SERVICE_TYPE: &str = "_vaultmesh-pair._tcp.local.";
 const DISCOVERY_TTL: Duration = Duration::from_secs(600);
-const PAIRING_TTL: Duration = Duration::from_secs(120);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PEERS: usize = 32;
 const MAX_FRAME: usize = 16 * 1024;
 const MAX_CERT: usize = 8 * 1024;
 const MAX_HANDSHAKES: usize = 8;
+const MAX_CODE_ATTEMPTS: usize = 5;
 const KEYRING_SERVICE: &str = "com.vaultmesh.desktop.lan-pairing";
 const IDENTITY_ACCOUNT: &str = "device-identity-v1";
 const PREFACE: &[u8; 8] = b"VMPAIR01";
@@ -46,14 +48,6 @@ const PREFACE: &[u8; 8] = b"VMPAIR01";
 pub(crate) struct LanNearbyDevice {
     pub pairing_ref: String,
     pub status: &'static str,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct LanPendingPairing {
-    pub pairing_ref: String,
-    pub safety_code: String,
-    pub expires_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -78,8 +72,8 @@ pub(crate) struct LanTrustedPeerDto {
 pub(crate) struct LanPairingStatus {
     pub discoverable: bool,
     pub expires_at: Option<u64>,
+    pub pairing_code: Option<String>,
     pub nearby: Vec<LanNearbyDevice>,
-    pub pending: Vec<LanPendingPairing>,
     pub trusted: Vec<LanTrustedPeerDto>,
 }
 
@@ -354,6 +348,8 @@ struct Active {
     browse: mdns_sd::Receiver<ServiceEvent>,
     instance: String,
     nonce: String,
+    pairing_code: Arc<Zeroizing<String>>,
+    failed_code_attempts: Arc<AtomicUsize>,
     endpoints: HashMap<String, Endpoint>,
     stop: Arc<AtomicBool>,
     sessions: Arc<SessionRegistry>,
@@ -364,13 +360,11 @@ struct PairingContext {
     identity: Arc<Identity>,
     instance: String,
     nonce: String,
+    pairing_code: Arc<Zeroizing<String>>,
+    failed_code_attempts: Arc<AtomicUsize>,
     tx: Sender<Event>,
     trust: TrustStore,
     sessions: Arc<SessionRegistry>,
-}
-struct Pending {
-    public: LanPendingPairing,
-    decision: Sender<bool>,
 }
 #[derive(Default)]
 struct SessionRegistry {
@@ -477,12 +471,6 @@ impl Drop for SessionGuard {
     }
 }
 enum Event {
-    Pending {
-        instance: String,
-        peer: LanTrustedPeer,
-        code: String,
-        decision: Sender<bool>,
-    },
     Complete {
         peer: LanTrustedPeer,
         persisted: Sender<bool>,
@@ -513,8 +501,13 @@ struct Hello {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Confirmation {
-    confirm: bool,
+struct PakeMessage {
+    message: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KeyConfirmation {
+    mac: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -574,21 +567,11 @@ impl TlsStream {
         }
         .map_err(|_| ())
     }
-
-    fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), ()> {
-        match self {
-            Self::Client(stream) => &stream.sock,
-            Self::Server(stream) => &stream.sock,
-        }
-        .set_read_timeout(timeout)
-        .map_err(|_| ())
-    }
 }
 
 pub(crate) struct LanPairingService {
     active: Option<Active>,
     nearby: HashMap<String, LanNearbyDevice>,
-    pending: HashMap<String, Pending>,
     in_flight: HashSet<String>,
     auto_attempted: HashSet<String>,
     tx: Sender<Event>,
@@ -602,7 +585,6 @@ impl LanPairingService {
         Self {
             active: None,
             nearby: HashMap::new(),
-            pending: HashMap::new(),
             in_flight: HashSet::new(),
             auto_attempted: HashSet::new(),
             tx,
@@ -622,17 +604,14 @@ impl LanPairingService {
             .map(|a| now_ms + a.expires.saturating_duration_since(now).as_millis() as u64);
         let mut nearby = self.nearby.values().cloned().collect::<Vec<_>>();
         nearby.sort_by(|a, b| a.pairing_ref.cmp(&b.pairing_ref));
-        let mut pending = self
-            .pending
-            .values()
-            .map(|p| p.public.clone())
-            .collect::<Vec<_>>();
-        pending.sort_by(|a, b| a.pairing_ref.cmp(&b.pairing_ref));
         LanPairingStatus {
             discoverable: self.active.is_some(),
             expires_at,
+            pairing_code: self.active.as_ref().and_then(|active| {
+                (active.failed_code_attempts.load(Ordering::Acquire) < MAX_CODE_ATTEMPTS)
+                    .then(|| active.pairing_code.as_ref().as_str().to_owned())
+            }),
             nearby,
-            pending,
             trusted: self
                 .trust
                 .load()
@@ -655,6 +634,8 @@ impl LanPairingService {
             .port();
         let instance = random_token();
         let nonce = random_token();
+        let pairing_code = Arc::new(Zeroizing::new(random_pairing_code()));
+        let failed_code_attempts = Arc::new(AtomicUsize::new(0));
         let hostname = format!("{}.local.", random_token());
         let props = [("v", "1"), ("i", instance.as_str()), ("n", nonce.as_str())];
         let mut info = ServiceInfo::new(SERVICE_TYPE, &instance, &hostname, "", port, &props[..])
@@ -686,6 +667,8 @@ impl LanPairingService {
                 identity: identity.clone(),
                 instance: instance.clone(),
                 nonce: nonce.clone(),
+                pairing_code: pairing_code.clone(),
+                failed_code_attempts: failed_code_attempts.clone(),
                 tx: self.tx.clone(),
                 trust: self.trust.clone(),
                 sessions: sessions.clone(),
@@ -698,6 +681,8 @@ impl LanPairingService {
             browse,
             instance,
             nonce,
+            pairing_code,
+            failed_code_attempts,
             endpoints: HashMap::new(),
             stop,
             sessions,
@@ -714,16 +699,27 @@ impl LanPairingService {
     pub(crate) fn is_active(&self) -> bool {
         self.active.is_some()
     }
-    pub(crate) fn begin(&mut self, reference: &str) -> Result<(), String> {
+    pub(crate) fn begin(
+        &mut self,
+        reference: &str,
+        pairing_code: Zeroizing<String>,
+    ) -> Result<(), String> {
+        if !valid_pairing_code(&pairing_code) {
+            return Err("请输入六位数字配对码。".into());
+        }
         self.collect_discovery();
-        self.spawn_connection(reference, true)
+        self.spawn_connection(reference, Some(pairing_code))
     }
-    fn spawn_connection(&mut self, reference: &str, pairing_intent: bool) -> Result<(), String> {
+    fn spawn_connection(
+        &mut self,
+        reference: &str,
+        pairing_code: Option<Zeroizing<String>>,
+    ) -> Result<(), String> {
         let id = reference
             .strip_prefix("lan-peer-")
             .filter(|v| valid_token(v))
             .ok_or("设备引用无效。")?;
-        if self.pending.contains_key(reference) || self.in_flight.contains(reference) {
+        if self.in_flight.contains(reference) {
             return Err("该设备已有进行中的配对会话。".into());
         }
         let (endpoint, context) = {
@@ -738,13 +734,15 @@ impl LanPairingService {
                     identity: self.identity.clone().ok_or("局域网设备身份不可用。")?,
                     instance: active.instance.clone(),
                     nonce: active.nonce.clone(),
+                    pairing_code: active.pairing_code.clone(),
+                    failed_code_attempts: active.failed_code_attempts.clone(),
                     tx: self.tx.clone(),
                     trust: self.trust.clone(),
                     sessions: active.sessions.clone(),
                 },
             )
         };
-        if pairing_intent {
+        if pairing_code.is_some() {
             context
                 .sessions
                 .mark_pairing_intent(&endpoint.instance)
@@ -754,26 +752,7 @@ impl LanPairingService {
         if let Some(device) = self.nearby.get_mut(id) {
             device.status = "connecting";
         }
-        thread::spawn(move || outbound(endpoint, pairing_intent, context));
-        Ok(())
-    }
-    pub(crate) fn resolve(&mut self, reference: &str, allow: bool) -> Result<(), String> {
-        if !valid_reference(reference) {
-            return Err("设备引用无效。".into());
-        }
-        self.collect_events(Instant::now(), now_ms());
-        let pending = self.pending.remove(reference).ok_or("配对请求已过期。")?;
-        pending
-            .decision
-            .send(allow)
-            .map_err(|_| "配对请求已结束。".to_owned())?;
-        if let Some(device) = self
-            .nearby
-            .values_mut()
-            .find(|device| device.pairing_ref == reference)
-        {
-            device.status = if allow { "confirming" } else { "unverified" };
-        }
+        thread::spawn(move || outbound(endpoint, pairing_code, context));
         Ok(())
     }
     pub(crate) fn revoke(&mut self, reference: &str) -> Result<(), String> {
@@ -811,14 +790,8 @@ impl LanPairingService {
             let _ = a.daemon.stop_browse(SERVICE_TYPE);
             shutdown_daemon(&a.daemon);
         }
-        for (_, p) in self.pending.drain() {
-            let _ = p.decision.send(false);
-        }
         while let Ok(event) = self.rx.try_recv() {
             match event {
-                Event::Pending { decision, .. } => {
-                    let _ = decision.send(false);
-                }
                 Event::Complete { persisted, .. } => {
                     let _ = persisted.send(false);
                 }
@@ -836,20 +809,9 @@ impl LanPairingService {
         self.auto_attempted.clear();
         self.identity = None;
     }
-    fn prune(&mut self, now: Instant, ms: u64) {
+    fn prune(&mut self, now: Instant, _ms: u64) {
         if self.active.as_ref().is_some_and(|a| a.expires <= now) {
             self.stop();
-        }
-        let expired = self
-            .pending
-            .iter()
-            .filter(|(_, p)| p.public.expires_at <= ms)
-            .map(|(k, _)| k.clone())
-            .collect::<Vec<_>>();
-        for key in expired {
-            if let Some(p) = self.pending.remove(&key) {
-                let _ = p.decision.send(false);
-            }
         }
     }
     fn collect_discovery(&mut self) {
@@ -867,7 +829,6 @@ impl LanPairingService {
                         self.auto_attempted.remove(&format!("lan-peer-{instance}"));
                         if let Some(device) = self.nearby.remove(&instance) {
                             a.sessions.shutdown_peer(&device.pairing_ref);
-                            self.pending.remove(&device.pairing_ref);
                         }
                     }
                 }
@@ -907,36 +868,9 @@ impl LanPairingService {
                 });
         }
     }
-    fn collect_events(&mut self, _now: Instant, ms: u64) {
+    fn collect_events(&mut self, _now: Instant, _ms: u64) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
-                Event::Pending {
-                    instance,
-                    peer,
-                    code,
-                    decision,
-                } => {
-                    let r = peer.pairing_ref.clone();
-                    self.in_flight.remove(&format!("lan-peer-{instance}"));
-                    if let Some(device) = self.nearby.get_mut(&instance) {
-                        device.pairing_ref = r.clone();
-                    }
-                    if self.pending.contains_key(&r) {
-                        let _ = decision.send(false);
-                        continue;
-                    }
-                    self.pending.insert(
-                        r.clone(),
-                        Pending {
-                            public: LanPendingPairing {
-                                pairing_ref: r,
-                                safety_code: code,
-                                expires_at: ms + PAIRING_TTL.as_millis() as u64,
-                            },
-                            decision,
-                        },
-                    );
-                }
                 Event::Complete { peer, persisted } => {
                     self.in_flight.remove(&peer.pairing_ref);
                     let _ = persisted.send(self.trust.approve(peer).is_ok());
@@ -960,9 +894,7 @@ impl LanPairingService {
                     failure,
                 } => {
                     self.in_flight.remove(&format!("lan-peer-{instance}"));
-                    if let Some(reference) = peer_ref {
-                        self.pending.remove(&reference);
-                    }
+                    let _ = peer_ref;
                     if let Some(device) = self.nearby.get_mut(&instance) {
                         device.pairing_ref = format!("lan-peer-{instance}");
                         device.status = failure.unwrap_or("unverified");
@@ -988,7 +920,6 @@ impl LanPairingService {
             .map(|instance| format!("lan-peer-{instance}"))
             .filter(|reference| !self.auto_attempted.contains(reference))
             .filter(|reference| !self.in_flight.contains(reference))
-            .filter(|reference| !self.pending.contains_key(reference))
             .filter(|reference| {
                 self.nearby
                     .get(reference.trim_start_matches("lan-peer-"))
@@ -997,7 +928,7 @@ impl LanPairingService {
             .collect::<Vec<_>>();
         for reference in candidates {
             self.auto_attempted.insert(reference.clone());
-            let _ = self.spawn_connection(&reference, false);
+            let _ = self.spawn_connection(&reference, None);
         }
     }
 
@@ -1045,7 +976,7 @@ fn accept_loop(listener: TcpListener, stop: Arc<AtomicBool>, context: PairingCon
                     let handshakes = handshakes.clone();
                     thread::spawn(move || {
                         let _session = session;
-                        let _ = pair(s, false, false, None, &context, &_session);
+                        let _ = pair(s, false, None, None, &context, &_session);
                         handshakes.fetch_sub(1, Ordering::AcqRel);
                     });
                 }
@@ -1058,7 +989,7 @@ fn accept_loop(listener: TcpListener, stop: Arc<AtomicBool>, context: PairingCon
         }
     });
 }
-fn outbound(ep: Endpoint, pairing_intent: bool, context: PairingContext) {
+fn outbound(ep: Endpoint, pairing_code: Option<Zeroizing<String>>, context: PairingContext) {
     let instance = ep.instance.clone();
     for address in ep.addresses.clone() {
         if let Ok(s) = TcpStream::connect_timeout(&SocketAddr::new(address, ep.port), IO_TIMEOUT) {
@@ -1068,7 +999,7 @@ fn outbound(ep: Endpoint, pairing_intent: bool, context: PairingContext) {
             let result = pair(
                 s,
                 true,
-                pairing_intent,
+                pairing_code.as_ref().map(|code| code.as_str()),
                 Some((ep.instance.clone(), ep.nonce.clone())),
                 &context,
                 &session,
@@ -1111,11 +1042,12 @@ impl From<()> for PairError {
 fn pair(
     mut socket: TcpStream,
     client: bool,
-    pairing_intent: bool,
+    submitted_code: Option<&str>,
     expected: Option<(String, String)>,
     context: &PairingContext,
     session: &SessionGuard,
 ) -> Result<(), PairError> {
+    let pairing_intent = submitted_code.is_some();
     socket.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     socket.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     let peer_cert = if client {
@@ -1161,7 +1093,7 @@ fn pair(
         // Bluetooth-style collision handling: when both users select each
         // other, the lower ephemeral instance is the sole TLS client. Both
         // endpoints therefore keep the same transport and silently discard
-        // the competing one before a safety code is exposed.
+        // the competing one before authenticating either submitted code.
         let local_is_canonical_client = context.instance < hello.instance;
         if client != local_is_canonical_client {
             return Err(PairError::Superseded);
@@ -1190,36 +1122,29 @@ fn pair(
     if !pairing_intent && !hello.pairing_intent {
         return Err(PairError::Failed);
     }
-    let code = safety_code(
-        &tls.exporter()?,
-        &context.identity.cert,
-        &peer_cert,
-        context.nonce.as_bytes(),
-        hello.nonce.as_bytes(),
-    );
+    let reserved_code_attempt = if client {
+        false
+    } else {
+        reserve_pairing_attempt(&context.failed_code_attempts).map_err(|_| PairError::Failed)?;
+        true
+    };
+    let code = if client {
+        submitted_code.ok_or(PairError::Failed)?
+    } else {
+        context.pairing_code.as_ref().as_str()
+    };
     let peer = LanTrustedPeer {
         pairing_ref: reference.clone(),
         certificate_fingerprint: fingerprint,
         label: format!("VaultMesh {}", &hello.instance[..6]),
         protocol_major: PROTOCOL,
     };
-    let (dt, dr) = mpsc::channel();
-    context
-        .tx
-        .send(Event::Pending {
-            instance: hello.instance.clone(),
-            peer: peer.clone(),
-            code,
-            decision: dt,
-        })
-        .map_err(|_| ())?;
-    let confirm = dr.recv_timeout(PAIRING_TTL).unwrap_or(false);
-    // Once the comparison prompt exists, allow the full human confirmation
-    // window. Only the pre-prompt transport handshake uses the shorter bound.
-    tls.set_read_timeout(Some(PAIRING_TTL))?;
-    write_frame(&mut tls, &Confirmation { confirm })?;
-    let remote: Confirmation = read_frame(&mut tls)?;
-    if confirm && remote.confirm {
+    let code_authenticated =
+        authenticate_pairing_code(&mut tls, client, code, context, &hello, &peer_cert).is_ok();
+    if code_authenticated && reserved_code_attempt {
+        context.failed_code_attempts.fetch_sub(1, Ordering::AcqRel);
+    }
+    if code_authenticated {
         let (persisted_tx, persisted_rx) = mpsc::channel();
         context
             .tx
@@ -1275,10 +1200,124 @@ fn pair(
         let _ = context.tx.send(Event::Closed {
             instance: hello.instance,
             peer_ref: Some(reference),
-            failure: None,
+            failure: Some("code-rejected"),
         });
+        return Err(PairError::Reported);
     }
     Ok(())
+}
+
+fn reserve_pairing_attempt(attempts: &AtomicUsize) -> Result<(), ()> {
+    attempts
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |attempts| {
+            (attempts < MAX_CODE_ATTEMPTS).then_some(attempts + 1)
+        })
+        .map(|_| ())
+        .map_err(|_| ())
+}
+
+fn authenticate_pairing_code(
+    tls: &mut TlsStream,
+    client: bool,
+    code: &str,
+    context: &PairingContext,
+    hello: &Hello,
+    peer_cert: &[u8],
+) -> Result<(), ()> {
+    if !valid_pairing_code(code) {
+        return Err(());
+    }
+    let (client_id, server_id) = if client {
+        (&context.identity.device_id, &hello.device_id)
+    } else {
+        (&hello.device_id, &context.identity.device_id)
+    };
+    let password = Password::new(code.as_bytes());
+    let client_identity = SpakeIdentity::new(client_id.as_bytes());
+    let server_identity = SpakeIdentity::new(server_id.as_bytes());
+    let (state, outbound) = if client {
+        Spake2::<RistrettoGroup>::start_a(&password, &client_identity, &server_identity)
+            .map_err(|_| ())?
+    } else {
+        Spake2::<RistrettoGroup>::start_b(&password, &client_identity, &server_identity)
+            .map_err(|_| ())?
+    };
+    write_frame(
+        tls,
+        &PakeMessage {
+            message: BASE64.encode(outbound),
+        },
+    )?;
+    let remote: PakeMessage = read_frame(tls)?;
+    if remote.message.len() > 256 {
+        return Err(());
+    }
+    let remote = BASE64.decode(remote.message.as_bytes()).map_err(|_| ())?;
+    let shared = state.finish(&remote).map_err(|_| ())?;
+    let transcript = pairing_confirmation_transcript(tls, client, context, hello, peer_cert)?;
+    let local_role = if client { b"client" } else { b"server" };
+    let remote_role = if client { b"server" } else { b"client" };
+    let local_mac = pairing_confirmation_mac(shared.as_ref(), &transcript, local_role)?;
+    write_frame(
+        tls,
+        &KeyConfirmation {
+            mac: BASE64.encode(local_mac),
+        },
+    )?;
+    let remote: KeyConfirmation = read_frame(tls)?;
+    if remote.mac.len() > 128 {
+        return Err(());
+    }
+    let remote_mac = BASE64.decode(remote.mac.as_bytes()).map_err(|_| ())?;
+    let mut verifier = Hmac::<Sha256>::new_from_slice(shared.as_ref()).map_err(|_| ())?;
+    verifier.update(&transcript);
+    verifier.update(remote_role);
+    verifier.verify_slice(&remote_mac).map_err(|_| ())
+}
+
+fn pairing_confirmation_transcript(
+    tls: &TlsStream,
+    client: bool,
+    context: &PairingContext,
+    hello: &Hello,
+    peer_cert: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, ()> {
+    let exporter = Zeroizing::new(tls.exporter()?);
+    let mut transcript = Zeroizing::new(Vec::with_capacity(512));
+    transcript.extend_from_slice(b"vaultmesh-lan-pairing-code-v1");
+    append_transcript_field(&mut transcript, &exporter[..]);
+    if client {
+        append_transcript_field(&mut transcript, context.identity.device_id.as_bytes());
+        append_transcript_field(&mut transcript, hello.device_id.as_bytes());
+        append_transcript_field(&mut transcript, &context.identity.cert);
+        append_transcript_field(&mut transcript, peer_cert);
+        append_transcript_field(&mut transcript, context.instance.as_bytes());
+        append_transcript_field(&mut transcript, hello.instance.as_bytes());
+        append_transcript_field(&mut transcript, context.nonce.as_bytes());
+        append_transcript_field(&mut transcript, hello.nonce.as_bytes());
+    } else {
+        append_transcript_field(&mut transcript, hello.device_id.as_bytes());
+        append_transcript_field(&mut transcript, context.identity.device_id.as_bytes());
+        append_transcript_field(&mut transcript, peer_cert);
+        append_transcript_field(&mut transcript, &context.identity.cert);
+        append_transcript_field(&mut transcript, hello.instance.as_bytes());
+        append_transcript_field(&mut transcript, context.instance.as_bytes());
+        append_transcript_field(&mut transcript, hello.nonce.as_bytes());
+        append_transcript_field(&mut transcript, context.nonce.as_bytes());
+    }
+    Ok(transcript)
+}
+
+fn append_transcript_field(transcript: &mut Vec<u8>, field: &[u8]) {
+    transcript.extend_from_slice(&(field.len() as u32).to_be_bytes());
+    transcript.extend_from_slice(field);
+}
+
+fn pairing_confirmation_mac(key: &[u8], transcript: &[u8], role: &[u8]) -> Result<Vec<u8>, ()> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| ())?;
+    mac.update(transcript);
+    mac.update(role);
+    Ok(mac.finalize().into_bytes().to_vec())
 }
 
 fn peer_trust_state(
@@ -1429,28 +1468,20 @@ fn read_frame<T: for<'de> Deserialize<'de>>(s: &mut TlsStream) -> Result<T, ()> 
     serde_json::from_slice(&b).map_err(|_| ())
 }
 
-pub(crate) fn safety_code(exporter: &[u8], a: &[u8], b: &[u8], c: &[u8], d: &[u8]) -> String {
-    let mut certs = [a, b];
-    certs.sort();
-    let mut nonces = [c, d];
-    nonces.sort();
-    let mut h = Sha256::new();
-    h.update(b"vaultmesh-lan-pairing-v1");
-    h.update(exporter);
-    for f in certs.into_iter().chain(nonces) {
-        h.update((f.len() as u64).to_be_bytes());
-        h.update(f)
-    }
-    let x = h.finalize();
-    format!(
-        "{:06}",
-        u32::from_be_bytes([x[0], x[1], x[2], x[3]]) % 1_000_000
-    )
-}
 fn random_token() -> String {
     let mut b = [0; 16];
     OsRng.fill_bytes(&mut b);
     hex(&b)
+}
+fn random_pairing_code() -> String {
+    loop {
+        let mut bytes = [0_u8; 3];
+        OsRng.fill_bytes(&mut bytes);
+        let value = u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]);
+        if value < 16_000_000 {
+            return format!("{:06}", value % 1_000_000);
+        }
+    }
 }
 fn hex_digest(v: &[u8]) -> String {
     hex(&Sha256::digest(v))
@@ -1462,6 +1493,9 @@ fn valid_token(v: &str) -> bool {
     v.len() == 32
         && v.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn valid_pairing_code(value: &str) -> bool {
+    value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 fn valid_fingerprint(v: &str) -> bool {
     v.len() == 64
@@ -1521,13 +1555,6 @@ fn same_link(remote: IpAddr) -> bool {
 fn proof_account(r: &str) -> String {
     format!("peer-{:x}", Sha256::digest(r.as_bytes()))
 }
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn secret_set(a: &str, v: &[u8]) -> Result<(), ()> {
     keyring::Entry::new(KEYRING_SERVICE, a)
@@ -1784,6 +1811,8 @@ mod tests {
             identity,
             instance: instance.into(),
             nonce: nonce.into(),
+            pairing_code: Arc::new(Zeroizing::new("123456".to_owned())),
+            failed_code_attempts: Arc::new(AtomicUsize::new(0)),
             tx,
             trust: empty_store(store),
             sessions: Arc::new(SessionRegistry::default()),
@@ -1791,11 +1820,21 @@ mod tests {
     }
 
     #[test]
-    fn sas_is_symmetric() {
-        let a = safety_code(b"e", b"a", b"b", b"c", b"d");
-        let b = safety_code(b"e", b"b", b"a", b"d", b"c");
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 6)
+    fn pairing_codes_are_bounded_and_randomized() {
+        let codes = (0..32)
+            .map(|_| random_pairing_code())
+            .collect::<HashSet<_>>();
+        assert!(codes.iter().all(|code| valid_pairing_code(code)));
+        assert!(codes.len() > 1);
+    }
+    #[test]
+    fn pairing_code_attempts_are_atomically_bounded() {
+        let attempts = AtomicUsize::new(0);
+        for _ in 0..MAX_CODE_ATTEMPTS {
+            reserve_pairing_attempt(&attempts).unwrap();
+        }
+        assert!(reserve_pairing_attempt(&attempts).is_err());
+        assert_eq!(attempts.load(Ordering::Acquire), MAX_CODE_ATTEMPTS);
     }
     #[test]
     fn values_are_bounded() {
@@ -1803,6 +1842,9 @@ mod tests {
         assert!(!valid_token("AABBCCDDEEFF00112233445566778899"));
         assert!(!valid_token("host.local"));
         assert!(valid_fingerprint(&"ab".repeat(32)));
+        assert!(valid_pairing_code("000000"));
+        assert!(!valid_pairing_code("12345"));
+        assert!(!valid_pairing_code("12345a"));
         assert!(same_link(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
         assert!(same_link(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
         assert!(!same_link(IpAddr::V4(std::net::Ipv4Addr::new(
@@ -1854,6 +1896,13 @@ mod tests {
             ("hostname", "private-machine"),
         ]);
         assert!(parse_discovery_record(&unknown, own).is_none());
+        let leaked_code = txt_properties(&[
+            ("v", "1"),
+            ("i", "00112233445566778899aabbccddeeff"),
+            ("n", "ffeeddccbbaa99887766554433221100"),
+            ("code", "123456"),
+        ]);
+        assert!(parse_discovery_record(&leaked_code, own).is_none());
         let overlong = txt_properties(&[
             ("v", "1"),
             ("i", "00112233445566778899aabbccddeeff00"),
@@ -1866,8 +1915,8 @@ mod tests {
         let v = serde_json::to_string(&LanPairingStatus {
             discoverable: true,
             expires_at: Some(1),
+            pairing_code: Some("123456".into()),
             nearby: vec![],
-            pending: vec![],
             trusted: vec![LanTrustedPeerDto {
                 pairing_ref: "lan-peer-00112233445566778899aabbccddeeff".into(),
                 label: "Safe label".into(),
@@ -1880,10 +1929,11 @@ mod tests {
         assert!(!v.contains("nonce"));
         assert!(!v.contains("fingerprint"));
         assert!(!v.contains("certificate"));
+        assert!(v.contains("123456"));
     }
 
     #[test]
-    fn ct_lan_pairing_one_sided_intent_prompts_both_peers_with_the_same_code() {
+    fn ct_lan_pairing_one_sided_code_entry_authenticates_and_connects_both_peers() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let server_identity = identity();
@@ -1904,12 +1954,14 @@ mod tests {
             client_tx,
             "client",
         );
+        let server_store = server_context.trust.clone();
+        let client_store = client_context.trust.clone();
+        let server_sessions = server_context.sessions.clone();
+        let client_sessions = client_context.sessions.clone();
         let server = thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
             let session = server_context.sessions.register(&socket).unwrap();
-            // The receiving device did not press Pair. The initiator's encrypted
-            // Hello must still cause both devices to enter explicit confirmation.
-            pair(socket, false, false, None, &server_context, &session)
+            pair(socket, false, None, None, &server_context, &session)
         });
         let client = thread::spawn(move || {
             let socket = TcpStream::connect(address).unwrap();
@@ -1917,7 +1969,7 @@ mod tests {
             pair(
                 socket,
                 true,
-                true,
+                Some("123456"),
                 Some((
                     "11111111111111111111111111111111".into(),
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -1926,48 +1978,122 @@ mod tests {
                 &session,
             )
         });
-        let (server_code, server_decision) =
-            match server_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                Event::Pending { code, decision, .. } => (code, decision),
-                _ => panic!("expected server pairing prompt"),
-            };
-        let (client_code, client_decision) =
-            match client_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                Event::Pending { code, decision, .. } => (code, decision),
-                _ => panic!("expected client pairing prompt"),
-            };
-        assert_eq!(server_code, client_code);
-        assert_eq!(server_code.len(), 6);
-        server_decision.send(false).unwrap();
-        client_decision.send(false).unwrap();
+        match server_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Complete { peer, persisted } => {
+                persisted.send(server_store.approve(peer).is_ok()).unwrap()
+            }
+            _ => panic!("expected automatic server persistence"),
+        }
+        match client_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Complete { peer, persisted } => {
+                persisted.send(client_store.approve(peer).is_ok()).unwrap()
+            }
+            _ => panic!("expected automatic client persistence"),
+        }
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::Connected { .. }
+        ));
+        assert!(matches!(
+            client_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::Connected { .. }
+        ));
+        assert_eq!(server_store.load().unwrap().len(), 1);
+        assert_eq!(client_store.load().unwrap().len(), 1);
+        server_sessions.shutdown_all();
+        client_sessions.shutdown_all();
         assert!(server.join().unwrap().is_ok());
         assert!(client.join().unwrap().is_ok());
-        assert!(matches!(server_rx.try_recv(), Ok(Event::Closed { .. })));
-        assert!(matches!(client_rx.try_recv(), Ok(Event::Closed { .. })));
+        let _ = std::fs::remove_file(server_store.path);
+        let _ = std::fs::remove_file(client_store.path);
     }
 
     #[test]
-    fn ct_lan_pairing_simultaneous_intent_converges_on_one_safety_code() {
+    fn ct_lan_pairing_wrong_code_fails_without_persisting_trust() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (server_tx, server_rx) = mpsc::channel();
+        let (client_tx, client_rx) = mpsc::channel();
+        let server_context = context(
+            identity(),
+            "11111111111111111111111111111111",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            server_tx,
+            "wrong-code-server",
+        );
+        let server_attempts = server_context.failed_code_attempts.clone();
+        let client_context = context(
+            identity(),
+            "22222222222222222222222222222222",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            client_tx,
+            "wrong-code-client",
+        );
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let session = server_context.sessions.register(&socket).unwrap();
+            pair(socket, false, None, None, &server_context, &session)
+        });
+        let client = thread::spawn(move || {
+            let socket = TcpStream::connect(address).unwrap();
+            let session = client_context.sessions.register(&socket).unwrap();
+            pair(
+                socket,
+                true,
+                Some("654321"),
+                Some((
+                    "11111111111111111111111111111111".into(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                )),
+                &client_context,
+                &session,
+            )
+        });
+        assert_eq!(server.join().unwrap(), Err(PairError::Reported));
+        assert_eq!(client.join().unwrap(), Err(PairError::Reported));
+        assert_eq!(server_attempts.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Event::Closed {
+                failure: Some("code-rejected"),
+                ..
+            }
+        ));
+        assert!(matches!(
+            client_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Event::Closed {
+                failure: Some("code-rejected"),
+                ..
+            }
+        ));
+        assert!(server_rx.try_recv().is_err());
+        assert!(client_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ct_lan_pairing_simultaneous_code_entry_converges_on_one_session() {
         let listener_a = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let listener_b = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address_a = listener_a.local_addr().unwrap();
         let address_b = listener_b.local_addr().unwrap();
         let (tx_a, rx_a) = mpsc::channel();
         let (tx_b, rx_b) = mpsc::channel();
-        let context_a = context(
+        let mut context_a = context(
             identity(),
             "11111111111111111111111111111111",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             tx_a,
             "simultaneous-a",
         );
-        let context_b = context(
+        let mut context_b = context(
             identity(),
             "22222222222222222222222222222222",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             tx_b,
             "simultaneous-b",
         );
+        context_a.pairing_code = Arc::new(Zeroizing::new("111111".to_owned()));
+        context_b.pairing_code = Arc::new(Zeroizing::new("222222".to_owned()));
         context_a
             .sessions
             .mark_pairing_intent("22222222222222222222222222222222")
@@ -1981,13 +2107,13 @@ mod tests {
         let inbound_a = thread::spawn(move || {
             let (socket, _) = listener_a.accept().unwrap();
             let session = inbound_a_context.sessions.register(&socket).unwrap();
-            pair(socket, false, false, None, &inbound_a_context, &session)
+            pair(socket, false, None, None, &inbound_a_context, &session)
         });
         let inbound_b_context = context_b.clone();
         let inbound_b = thread::spawn(move || {
             let (socket, _) = listener_b.accept().unwrap();
             let session = inbound_b_context.sessions.register(&socket).unwrap();
-            pair(socket, false, false, None, &inbound_b_context, &session)
+            pair(socket, false, None, None, &inbound_b_context, &session)
         });
         let outbound_a_context = context_a.clone();
         let outbound_a = thread::spawn(move || {
@@ -1996,7 +2122,7 @@ mod tests {
             pair(
                 socket,
                 true,
-                true,
+                Some("222222"),
                 Some((
                     "22222222222222222222222222222222".into(),
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
@@ -2012,7 +2138,7 @@ mod tests {
             pair(
                 socket,
                 true,
-                true,
+                Some("111111"),
                 Some((
                     "11111111111111111111111111111111".into(),
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -2022,24 +2148,22 @@ mod tests {
             )
         });
 
-        let (code_a, decision_a) = match rx_a.recv_timeout(Duration::from_secs(5)).unwrap() {
-            Event::Pending { code, decision, .. } => (code, decision),
-            _ => panic!("expected one canonical pairing prompt on A"),
-        };
-        let (code_b, decision_b) = match rx_b.recv_timeout(Duration::from_secs(5)).unwrap() {
-            Event::Pending { code, decision, .. } => (code, decision),
-            _ => panic!("expected one canonical pairing prompt on B"),
-        };
-        assert_eq!(code_a, code_b);
-        assert!(rx_a.try_recv().is_err());
-        assert!(rx_b.try_recv().is_err());
-        decision_a.send(false).unwrap();
-        decision_b.send(false).unwrap();
-
-        assert_eq!(inbound_a.join().unwrap(), Err(PairError::Superseded));
-        assert!(inbound_b.join().unwrap().is_ok());
-        assert!(outbound_a.join().unwrap().is_ok());
-        assert_eq!(outbound_b.join().unwrap(), Err(PairError::Failed));
+        for (receiver, store) in [(&rx_a, &context_a.trust), (&rx_b, &context_b.trust)] {
+            match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Complete { peer, persisted } => {
+                    persisted.send(store.approve(peer).is_ok()).unwrap()
+                }
+                _ => panic!("expected one automatic persistence request"),
+            }
+        }
+        assert!(matches!(
+            rx_a.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::Connected { .. }
+        ));
+        assert!(matches!(
+            rx_b.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::Connected { .. }
+        ));
         assert!(
             context_b
                 .sessions
@@ -2053,10 +2177,15 @@ mod tests {
             &context_a,
             "22222222222222222222222222222222"
         ));
-        assert!(matches!(rx_a.try_recv(), Ok(Event::Closed { .. })));
-        assert!(matches!(rx_b.try_recv(), Ok(Event::Closed { .. })));
-        assert!(rx_a.try_recv().is_err());
-        assert!(rx_b.try_recv().is_err());
+        context_a.sessions.shutdown_all();
+        context_b.sessions.shutdown_all();
+
+        assert_eq!(inbound_a.join().unwrap(), Err(PairError::Superseded));
+        assert!(inbound_b.join().unwrap().is_ok());
+        assert!(outbound_a.join().unwrap().is_ok());
+        assert_eq!(outbound_b.join().unwrap(), Err(PairError::Failed));
+        let _ = std::fs::remove_file(&context_a.trust.path);
+        let _ = std::fs::remove_file(&context_b.trust.path);
     }
 
     #[test]
@@ -2074,6 +2203,8 @@ mod tests {
             identity: identity(),
             instance: "11111111111111111111111111111111".into(),
             nonce: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            pairing_code: Arc::new(Zeroizing::new("123456".to_owned())),
+            failed_code_attempts: Arc::new(AtomicUsize::new(0)),
             tx: server_tx,
             trust: server_store.clone(),
             sessions: Arc::new(SessionRegistry::default()),
@@ -2082,6 +2213,8 @@ mod tests {
             identity: identity(),
             instance: "22222222222222222222222222222222".into(),
             nonce: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            pairing_code: Arc::new(Zeroizing::new("654321".to_owned())),
+            failed_code_attempts: Arc::new(AtomicUsize::new(0)),
             tx: client_tx,
             trust: client_store.clone(),
             sessions: Arc::new(SessionRegistry::default()),
@@ -2089,7 +2222,7 @@ mod tests {
         let server = thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
             let session = server_context.sessions.register(&socket).unwrap();
-            pair(socket, false, false, None, &server_context, &session)
+            pair(socket, false, None, None, &server_context, &session)
         });
         let client = thread::spawn(move || {
             let socket = TcpStream::connect(address).unwrap();
@@ -2097,7 +2230,7 @@ mod tests {
             pair(
                 socket,
                 true,
-                true,
+                Some("123456"),
                 Some((
                     "11111111111111111111111111111111".into(),
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -2107,12 +2240,6 @@ mod tests {
             )
         });
 
-        for rx in [&server_rx, &client_rx] {
-            match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                Event::Pending { decision, .. } => decision.send(true).unwrap(),
-                _ => panic!("expected pairing prompt"),
-            }
-        }
         match server_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             Event::Complete { peer, persisted } => {
                 persisted.send(server_store.approve(peer).is_ok()).unwrap()
@@ -2158,7 +2285,7 @@ mod tests {
     }
 
     #[test]
-    fn ct_lan_pairing_double_confirmation_persists_and_connects_both_peers() {
+    fn ct_lan_pairing_code_entry_persists_and_connects_both_peers() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let store_a = empty_store("success-a");
@@ -2171,6 +2298,8 @@ mod tests {
             identity: identity(),
             instance: "11111111111111111111111111111111".into(),
             nonce: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            pairing_code: Arc::new(Zeroizing::new("123456".to_owned())),
+            failed_code_attempts: Arc::new(AtomicUsize::new(0)),
             tx: tx_a,
             trust: store_a.clone(),
             sessions: Arc::new(SessionRegistry::default()),
@@ -2179,6 +2308,8 @@ mod tests {
             identity: identity(),
             instance: "22222222222222222222222222222222".into(),
             nonce: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            pairing_code: Arc::new(Zeroizing::new("654321".to_owned())),
+            failed_code_attempts: Arc::new(AtomicUsize::new(0)),
             tx: tx_b,
             trust: store_b.clone(),
             sessions: Arc::new(SessionRegistry::default()),
@@ -2188,7 +2319,7 @@ mod tests {
         let server = thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
             let session = context_a.sessions.register(&socket).unwrap();
-            pair(socket, false, false, None, &context_a, &session)
+            pair(socket, false, None, None, &context_a, &session)
         });
         let client = thread::spawn(move || {
             let socket = TcpStream::connect(address).unwrap();
@@ -2196,7 +2327,7 @@ mod tests {
             pair(
                 socket,
                 true,
-                true,
+                Some("123456"),
                 Some((
                     "11111111111111111111111111111111".into(),
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -2206,12 +2337,6 @@ mod tests {
             )
         });
 
-        for receiver in [&rx_a, &rx_b] {
-            match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
-                Event::Pending { decision, .. } => decision.send(true).unwrap(),
-                _ => panic!("expected numeric comparison prompt"),
-            }
-        }
         match rx_a.recv_timeout(Duration::from_secs(5)).unwrap() {
             Event::Complete { peer, persisted } => {
                 persisted.send(store_a.approve(peer).is_ok()).unwrap()
@@ -2268,7 +2393,7 @@ mod tests {
         let server = thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
             let session = server_context.sessions.register(&socket).unwrap();
-            pair(socket, false, true, None, &server_context, &session)
+            pair(socket, false, None, None, &server_context, &session)
         });
         let client = thread::spawn(move || {
             let socket = TcpStream::connect(address).unwrap();
@@ -2276,7 +2401,7 @@ mod tests {
             pair(
                 socket,
                 true,
-                true,
+                Some("123456"),
                 Some((
                     "11111111111111111111111111111111".into(),
                     "cccccccccccccccccccccccccccccccc".into(),
@@ -2399,40 +2524,6 @@ mod tests {
     }
 
     #[test]
-    fn ct_lan_pairing_local_confirmation_waits_for_the_other_device() {
-        let mut service = LanPairingService::new(
-            std::env::temp_dir().join(format!("vaultmesh-lan-confirming-{}.json", random_token())),
-        );
-        let instance = "00112233445566778899aabbccddeeff";
-        let reference = "lan-peer-ffeeddccbbaa99887766554433221100";
-        service.nearby.insert(
-            instance.into(),
-            LanNearbyDevice {
-                pairing_ref: reference.into(),
-                status: "unverified",
-            },
-        );
-        let (decision, resolved) = mpsc::channel();
-        service.pending.insert(
-            reference.into(),
-            Pending {
-                public: LanPendingPairing {
-                    pairing_ref: reference.into(),
-                    safety_code: "482913".into(),
-                    expires_at: u64::MAX,
-                },
-                decision,
-            },
-        );
-
-        service.resolve(reference, true).unwrap();
-
-        assert_eq!(resolved.recv_timeout(Duration::from_secs(1)), Ok(true));
-        assert_eq!(service.nearby.get(instance).unwrap().status, "confirming");
-        assert!(!service.pending.contains_key(reference));
-    }
-
-    #[test]
     fn ct_lan_pairing_restores_pin_by_stable_device_id_and_blocks_cert_change() {
         let store = empty_store("pin-restore");
         let reference = "lan-peer-00112233445566778899aabbccddeeff";
@@ -2479,80 +2570,32 @@ mod tests {
         let mut service = LanPairingService::new(
             std::env::temp_dir().join(format!("vaultmesh-lan-stop-{}.json", random_token())),
         );
-        let (decision, result) = mpsc::channel();
         let reference = "lan-peer-00112233445566778899aabbccddeeff".to_owned();
-        service.pending.insert(
-            reference.clone(),
-            Pending {
-                public: LanPendingPairing {
-                    pairing_ref: reference.clone(),
-                    safety_code: "123456".into(),
-                    expires_at: u64::MAX,
-                },
-                decision,
-            },
-        );
         service.in_flight.insert(reference);
-        let (queued_decision, queued_result) = mpsc::channel();
-        service
-            .tx
-            .send(Event::Pending {
-                instance: "ffeeddccbbaa99887766554433221100".into(),
-                peer: LanTrustedPeer {
-                    pairing_ref: "lan-peer-ffeeddccbbaa99887766554433221100".into(),
-                    certificate_fingerprint: "ab".repeat(32),
-                    label: "Queued peer".into(),
-                    protocol_major: PROTOCOL,
-                },
-                code: "654321".into(),
-                decision: queued_decision,
-            })
-            .unwrap();
         service.stop();
-        assert!(!result.recv_timeout(Duration::from_secs(1)).unwrap());
-        assert!(!queued_result.recv_timeout(Duration::from_secs(1)).unwrap());
-        assert!(service.pending.is_empty());
         assert!(service.in_flight.is_empty());
         assert!(service.identity.is_none());
     }
 
     #[test]
-    fn ct_lan_pairing_timeout_and_duplicate_confirmation_fail_closed() {
+    fn ct_lan_pairing_rejects_invalid_code_before_connecting() {
         let mut service = LanPairingService::new(
             std::env::temp_dir().join(format!("vaultmesh-lan-expiry-{}.json", random_token())),
         );
         let reference = "lan-peer-00112233445566778899aabbccddeeff".to_owned();
-        let (decision, result) = mpsc::channel();
-        service.pending.insert(
-            reference.clone(),
-            Pending {
-                public: LanPendingPairing {
-                    pairing_ref: reference.clone(),
-                    safety_code: "123456".into(),
-                    expires_at: 99,
-                },
-                decision,
-            },
+        assert_eq!(
+            service
+                .begin(&reference, Zeroizing::new("12345".into()))
+                .unwrap_err(),
+            "请输入六位数字配对码。"
         );
-        let _ = service.status(Instant::now(), 100);
-        assert!(!result.recv_timeout(Duration::from_secs(1)).unwrap());
-        assert!(service.resolve(&reference, true).is_err());
-
-        let (decision, result) = mpsc::channel();
-        service.pending.insert(
-            reference.clone(),
-            Pending {
-                public: LanPendingPairing {
-                    pairing_ref: reference.clone(),
-                    safety_code: "654321".into(),
-                    expires_at: u64::MAX,
-                },
-                decision,
-            },
+        assert_eq!(
+            service
+                .begin(&reference, Zeroizing::new("12345a".into()))
+                .unwrap_err(),
+            "请输入六位数字配对码。"
         );
-        service.resolve(&reference, true).unwrap();
-        assert!(result.recv_timeout(Duration::from_secs(1)).unwrap());
-        assert!(service.resolve(&reference, true).is_err());
+        assert!(!service.in_flight.contains(&reference));
     }
 
     #[cfg(unix)]

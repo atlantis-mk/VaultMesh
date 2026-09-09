@@ -326,6 +326,20 @@ struct LanPairingRefInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LanPairingBeginInput {
+    pairing_ref: String,
+    pairing_code: String,
+}
+
+impl Drop for LanPairingBeginInput {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.pairing_code.zeroize();
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentPermissionActionResolveInput {
     permission_ref: String,
     choice: PermissionChoice,
@@ -776,22 +790,11 @@ fn handle_lan_pairing(
                 .map_err(|_| "局域网配对服务暂时不可用。".to_owned())
         }
         "lan.pairing.begin" => {
-            let input: LanPairingRefInput =
+            let mut input: LanPairingBeginInput =
                 serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
-            service.begin(&input.pairing_ref)?;
+            let pairing_code = zeroize::Zeroizing::new(std::mem::take(&mut input.pairing_code));
+            service.begin(&input.pairing_ref, pairing_code)?;
             Ok(json!({ "started": true }))
-        }
-        "lan.pairing.confirm" => {
-            let input: LanPairingRefInput =
-                serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
-            service.resolve(&input.pairing_ref, true)?;
-            Ok(json!({ "resolved": true }))
-        }
-        "lan.pairing.cancel" => {
-            let input: LanPairingRefInput =
-                serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
-            service.resolve(&input.pairing_ref, false)?;
-            Ok(json!({ "resolved": true }))
         }
         "lan.pairing.revoke" => {
             let input: LanPairingRefInput =

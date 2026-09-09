@@ -37,6 +37,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 socket2 = "0.6.5"
+spake2-conflux.workspace = true
 ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
 ssh-key = { version = "0.6.7", features = ["ed25519", "encryption", "getrandom", "p256", "p384", "p521", "rsa"] }
 tauri = { version = "2.11.5", features = ["image-png", "tray-icon"] }

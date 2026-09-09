@@ -644,17 +644,12 @@ export const LanNearbyDeviceSchema = z.object({
   status: z.enum([
     'unverified',
     'connecting',
-    'confirming',
+    'code-rejected',
     'failed',
     'local-storage-failed',
     'peer-storage-failed',
     'connected',
   ]),
-}).strict();
-export const LanPendingPairingSchema = z.object({
-  pairingRef: z.string().regex(/^lan-peer-[a-f0-9]{32}$/),
-  safetyCode: z.string().regex(/^\d{6}$/),
-  expiresAt: z.number().int().nonnegative(),
 }).strict();
 export const LanTrustedPeerSchema = z.object({
   pairingRef: z.string().regex(/^lan-peer-[a-f0-9]{32}$/),
@@ -664,8 +659,8 @@ export const LanTrustedPeerSchema = z.object({
 export const LanPairingStatusSchema = z.object({
   discoverable: z.boolean(),
   expiresAt: z.number().int().nonnegative().nullable(),
+  pairingCode: z.string().regex(/^\d{6}$/).nullable(),
   nearby: z.array(LanNearbyDeviceSchema).max(32),
-  pending: z.array(LanPendingPairingSchema).max(32),
   trusted: z.array(LanTrustedPeerSchema).max(32),
 }).strict();
 
@@ -731,7 +726,6 @@ export type PinStatus = z.infer<typeof PinStatusSchema>;
 export type SecuritySettings = z.infer<typeof SecuritySettingsSchema>;
 export type LanNearbyDevice = z.infer<typeof LanNearbyDeviceSchema>;
 export type LanPairingStatus = z.infer<typeof LanPairingStatusSchema>;
-export type LanPendingPairing = z.infer<typeof LanPendingPairingSchema>;
 export type LanTrustedPeer = z.infer<typeof LanTrustedPeerSchema>;
 export type RevealedPassword = z.infer<typeof RevealedPasswordSchema>;
 

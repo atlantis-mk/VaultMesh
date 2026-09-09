@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CheckIcon, Link2Icon, RadioTowerIcon, RefreshCwIcon, ShieldCheckIcon, UnplugIcon } from 'lucide-react';
+import { Link2Icon, RadioTowerIcon, RefreshCwIcon, ShieldCheckIcon, UnplugIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
 import {
@@ -34,6 +34,8 @@ export function NearbyDevicesPage() {
   const [revokePeer, setRevokePeer] = useState<LanTrustedPeer | null>(null);
   const [editingPeer, setEditingPeer] = useState<string | null>(null);
   const [label, setLabel] = useState('');
+  const [pairingPeer, setPairingPeer] = useState<string | null>(null);
+  const [pairingCode, setPairingCode] = useState('');
 
   const refresh = async (): Promise<void> => {
     setStatus(await window.vaultMesh.lan.status());
@@ -89,7 +91,16 @@ export function NearbyDevicesPage() {
             <Badge variant={status?.discoverable ? 'default' : 'outline'}>{status?.discoverable ? '可被发现' : '发现已关闭'}</Badge>
             {status?.discoverable ? <span className="text-xs text-muted-foreground">剩余 {remainingLabel(status.expiresAt)}</span> : null}
           </div>
-          <p className="text-sm text-muted-foreground">广播不包含主机名、账号、保险库元数据或秘密。配对只验证另一台 VaultMesh 客户端的设备身份。</p>
+          {status?.discoverable && status.pairingCode ? (
+            <div className="grid gap-2 rounded-xl bg-muted px-4 py-5 text-center">
+              <p className="text-xs font-medium text-muted-foreground">本机配对码</p>
+              <div className="font-mono text-4xl font-semibold tracking-[0.3em]" aria-label={`本机配对码 ${status.pairingCode}`}>{status.pairingCode}</div>
+              <p className="text-xs text-muted-foreground">在另一台设备选择本机并输入此码，验证成功后会自动完成配对。</p>
+            </div>
+          ) : status?.discoverable ? (
+            <p className="text-sm text-destructive">错误尝试次数过多。请停止发现后重新开启，以生成新的配对码。</p>
+          ) : null}
+          <p className="text-sm text-muted-foreground">配对码不会广播、记录或持久化。广播也不包含主机名、账号、保险库元数据或秘密。</p>
         </CardContent>
         <CardFooter className="flex flex-wrap gap-2">
           {status?.discoverable ? (
@@ -109,46 +120,62 @@ export function NearbyDevicesPage() {
         </CardFooter>
       </Card>
 
-      {status?.pending.map((pending) => (
-        <Card key={pending.pairingRef} className="ring-2 ring-primary/40">
-          <CardHeader>
-            <CardTitle>配对请求：核对安全短码</CardTitle>
-            <CardDescription>这与蓝牙数字比较相同：确认另一台设备显示完全相同的六码，再在两台设备上分别确认。任何差异都必须取消。</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-3">
-            <div className="rounded-xl bg-muted px-4 py-5 text-center font-mono text-4xl font-semibold tracking-[0.3em]" aria-label={`安全短码 ${pending.safetyCode}`}>
-              {pending.safetyCode}
-            </div>
-            <p className="text-center text-xs text-muted-foreground">设备 {shortPeer(pending.pairingRef)} · {remainingLabel(pending.expiresAt)} 后失效</p>
-          </CardContent>
-          <CardFooter className="flex gap-2">
-            <Button variant="outline" type="button" disabled={busy} onClick={() => void run(() => window.vaultMesh.lan.cancel(pending.pairingRef).then(() => undefined), '配对已取消。')}>取消</Button>
-            <Button type="button" disabled={busy} onClick={() => void run(() => window.vaultMesh.lan.confirm(pending.pairingRef).then(() => undefined), '已确认；正在等待另一台设备确认。')}>
-              <CheckIcon data-icon="inline-start" />短码一致
-            </Button>
-          </CardFooter>
+      {pairingPeer ? (
+        <Card className="ring-2 ring-primary/40">
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            const target = pairingPeer;
+            const code = pairingCode;
+            void run(async () => {
+              await window.vaultMesh.lan.begin(target, code);
+              setPairingPeer(null);
+              setPairingCode('');
+            }, '配对码已提交，正在安全验证。');
+          }}>
+            <CardHeader>
+              <CardTitle>输入另一台设备的配对码</CardTitle>
+              <CardDescription>请输入设备 {shortPeer(pairingPeer)} 当前显示的六码。正确后两端会自动完成，不需要再次确认。</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Input
+                value={pairingCode}
+                autoFocus
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                maxLength={6}
+                pattern="[0-9]{6}"
+                placeholder="000000"
+                aria-label="六位配对码"
+                className="text-center font-mono text-2xl tracking-[0.3em]"
+                onChange={(event) => setPairingCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+              />
+            </CardContent>
+            <CardFooter className="flex gap-2">
+              <Button variant="outline" type="button" disabled={busy} onClick={() => { setPairingPeer(null); setPairingCode(''); }}>取消</Button>
+              <Button type="submit" disabled={busy || !/^\d{6}$/.test(pairingCode)}><Link2Icon data-icon="inline-start" />开始配对</Button>
+            </CardFooter>
+          </form>
         </Card>
-      ))}
+      ) : null}
 
       <div className="grid gap-5 md:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle>发现的设备</CardTitle>
-            <CardDescription>任一端点击一次“配对”即可，对端会自动显示同一短码；即使两端同时点击，也会自动合并为一个请求。</CardDescription>
+            <CardDescription>查看另一台设备显示的本机配对码，选择对应设备并输入该六码。</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
             {status?.nearby.length ? status.nearby.map((device) => {
               const trusted = trustedByRef.get(device.pairingRef);
               const connecting = device.status === 'connecting';
-              const confirming = device.status === 'confirming';
               return (
                 <div key={device.pairingRef} className="flex items-center justify-between gap-3 rounded-lg border p-3">
                   <div className="min-w-0">
                     <p className="truncate font-medium">{trusted?.label ?? `VaultMesh ${shortPeer(device.pairingRef)}`}</p>
-                    <p className="text-xs text-muted-foreground">{device.status === 'connected' ? '已通过证书固定验证连通' : connecting ? '正在建立加密连接并生成安全短码' : confirming ? '本机已确认，正在等待另一台设备' : device.status === 'local-storage-failed' ? '本机无法安全保存设备信任' : device.status === 'peer-storage-failed' ? '另一台设备无法安全保存信任' : device.status === 'failed' ? '配对未完成，请重试' : trusted ? '已信任，等待双方重连' : '尚未验证'}</p>
+                    <p className="text-xs text-muted-foreground">{device.status === 'connected' ? '已通过证书固定验证连通' : connecting ? '正在验证配对码并建立信任' : device.status === 'code-rejected' ? '配对码不正确或安全验证失败' : device.status === 'local-storage-failed' ? '本机无法安全保存设备信任' : device.status === 'peer-storage-failed' ? '另一台设备无法安全保存信任' : device.status === 'failed' ? '无法建立安全连接，请重试' : trusted ? '已信任，等待双方重连' : '尚未验证'}</p>
                   </div>
-                  {device.status === 'connected' ? <Badge><ShieldCheckIcon data-icon="inline-start" />已验证</Badge> : connecting ? <Badge variant="outline"><RefreshCwIcon className="animate-spin" data-icon="inline-start" />正在配对</Badge> : confirming ? <Badge variant="outline"><RefreshCwIcon className="animate-spin" data-icon="inline-start" />等待确认</Badge> : trusted ? <Badge variant="outline">等待重连</Badge> : (
-                    <Button size="sm" type="button" disabled={busy || status.pending.some((item) => item.pairingRef === device.pairingRef)} onClick={() => void run(() => window.vaultMesh.lan.begin(device.pairingRef).then(() => undefined))}>
+                  {device.status === 'connected' ? <Badge><ShieldCheckIcon data-icon="inline-start" />已验证</Badge> : connecting ? <Badge variant="outline"><RefreshCwIcon className="animate-spin" data-icon="inline-start" />正在配对</Badge> : trusted ? <Badge variant="outline">等待重连</Badge> : (
+                    <Button size="sm" type="button" disabled={busy} onClick={() => { setPairingPeer(device.pairingRef); setPairingCode(''); }}>
                       <Link2Icon data-icon="inline-start" />配对
                     </Button>
                   )}

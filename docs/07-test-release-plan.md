@@ -62,7 +62,7 @@ pnpm typecheck
 | `CT-AGENT-SSH-001`、`CT-AGENT-PTY-001`、`CT-AGENT-HTTP-001`、`CT-AGENT-HTTP-PATH-001`、`CT-AGENT-WEB-001`、`CT-AGENT-AUTHN-001` | Tauri Rust adapter contract/adversarial tests；HTTP CT 覆盖 exact 账户 origin、HTTP/HTTPS、public/private/loopback/link-local/metadata literal target、self-signed TLS、DNS 当次连接固定、redirect/cross-origin denial、Bearer 注入与有界输出；HTTP path CT 额外覆盖 access-token Secret direct schema、method risk floor、base-path confinement、单次 canonicalization、encoded separator/dot 拒绝、exact/`*`/terminal `**` predicate、method 隔离、Deny 优先与 matcher revision；protected-auth CT 覆盖 OTP、recovery code 与 Passkey 的 opaque target、single-use、成功提交和清理；固定测试 server/browser fixture，不使用生产凭据 |
 | `CT-AGENT-CODEX-001`、`CT-AGENT-OPENCODE-001` | packaged stdio shim 的 tools/list/call/cancel/revoke/multi-account client E2E |
 | `CT-TAURI-SHELL-*`、`CT-TAURI-COMMAND-*` | `apps/tauri-desktop` config/adapter/Rust command 与 Electron data migration contract tests |
-| `CT-LAN-PAIRING-001` | Tauri Rust LAN advertisement parser、protocol/version/size rejection、同链路双栈 listener、TLS pin/SAS transcript、单端发起与双端同时发起的唯一会话仲裁、double-confirm/cancel/timeout/replay、双方 persistence acknowledgement、credential/index rollback、revoke/restart/lock cleanup 与 renderer-safe typed operation tests |
+| `CT-LAN-PAIRING-001` | Tauri Rust LAN advertisement parser、protocol/version/size rejection、同链路双栈 listener、随机六码生命周期、TLS 内 SPAKE2/key-confirmation、错误码/尝试上限/timeout/replay、单端发起与双端同时发起的唯一会话仲裁、双方 persistence acknowledgement、credential/index rollback、revoke/restart/lock cleanup 与 renderer-safe typed operation tests |
 | `CT-TAURI-VAULT-*`、`CT-TAURI-DESKTOP-*` | Tauri Rust runtime integration tests + shared renderer tests |
 | `CT-TAURI-TRAY-THEME-001` | Windows light/dark/unknown 主题选择、黑白托盘资源尺寸/解码、macOS Retina 模板资源保持测试 |
 | `CT-DESKTOP-STARTUP-*` | Tauri Rust autostart owner、固定参数、初始化标记、隐藏窗口配置、主窗口关闭销毁 WebView 与托盘重建、typed adapter 与设置 UI contract tests |
@@ -93,7 +93,7 @@ pnpm typecheck
 | `AT-AGENT-SSH-001`、`AT-AGENT-HTTP-001`、`AT-AGENT-WEB-001`、`AT-AGENT-AUTHN-001` | packaged app 的动作 adapter、多账号、失败/取消/锁定与无 secret response 验收；HTTP 额外验收 exact 账户绑定的 HTTP/HTTPS、localhost/私网/link-local/metadata literal target 与 self-signed TLS，以及 Agent 不能替换 origin/port/base path |
 | `AT-AGENT-MACOS-001`、`AT-AGENT-WINDOWS-001` | 签名 packaged app 的 socket/pipe ACL、shim identity、OS pairing proof、Codex/OpenCode、sleep/system lock、upgrade/uninstall 与 child cleanup |
 | `AT-NATIVE-MACOS-*` | 历史 Native Preview AT；不再作为当前产品验收入口 |
-| `AT-LAN-PAIRING-001` | packaged macOS↔macOS、Windows↔Windows、macOS↔Windows 同一 LAN 的显式发现、双方短码、重连、撤销、超时、系统锁定/睡眠与 firewall rejection 验收 |
+| `AT-LAN-PAIRING-001` | packaged macOS↔macOS、Windows↔Windows、macOS↔Windows 同一 LAN 的显式发现、本机展示码→对端输入码→自动完成、错误码/尝试上限、重连、撤销、超时、系统锁定/睡眠与 firewall rejection 验收 |
 
 ## 发布门禁
 

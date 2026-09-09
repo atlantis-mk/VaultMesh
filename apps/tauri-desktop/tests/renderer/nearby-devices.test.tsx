@@ -15,8 +15,8 @@ vi.mock('sonner', () => ({
 const emptyStatus: LanPairingStatus = {
   discoverable: false,
   expiresAt: null,
+  pairingCode: null,
   nearby: [],
-  pending: [],
   trusted: [],
 };
 
@@ -36,8 +36,6 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
           scan: vi.fn().mockResolvedValue(emptyStatus),
           listTrusted: vi.fn().mockResolvedValue([]),
           begin: vi.fn().mockResolvedValue({ started: true }),
-          confirm: vi.fn().mockResolvedValue({ resolved: true }),
-          cancel: vi.fn().mockResolvedValue({ resolved: true }),
           rename: vi.fn().mockResolvedValue({ renamed: true }),
           revoke: vi.fn().mockResolvedValue({ revoked: true }),
         },
@@ -68,7 +66,7 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     await waitFor(() => expect(window.vaultMesh.lan.stopDiscovery).toHaveBeenCalledOnce());
   });
 
-  it('shows an in-flight pairing immediately and prevents a duplicate begin', async () => {
+  it('requires the displayed six-digit code before starting a pairing', async () => {
     const pairingRef = 'lan-peer-00112233445566778899aabbccddeeff';
     const discovered: LanPairingStatus = {
       ...emptyStatus,
@@ -85,9 +83,14 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     render(<NearbyDevicesPage />);
 
     fireEvent.click(await screen.findByRole('button', { name: '配对' }));
+    expect(window.vaultMesh.lan.begin).not.toHaveBeenCalled();
+    const input = screen.getByRole('textbox', { name: '六位配对码' });
+    fireEvent.change(input, { target: { value: '12a3456' } });
+    expect((input as HTMLInputElement).value).toBe('123456');
+    fireEvent.click(screen.getByRole('button', { name: '开始配对' }));
+    await waitFor(() => expect(window.vaultMesh.lan.begin).toHaveBeenCalledWith(pairingRef, '123456'));
     expect(await screen.findByText('正在配对')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '配对' })).toBeNull();
-    expect(window.vaultMesh.lan.begin).toHaveBeenCalledOnce();
   });
 
   it('returns a failed pre-prompt handshake to a visible retry action', async () => {
@@ -100,23 +103,22 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     });
     render(<NearbyDevicesPage />);
 
-    expect(await screen.findByText('配对未完成，请重试')).toBeTruthy();
+    expect(await screen.findByText('无法建立安全连接，请重试')).toBeTruthy();
     expect(screen.getByRole('button', { name: '配对' })).toBeTruthy();
   });
 
-  it('shows the Bluetooth-style wait state after this device confirms', async () => {
+  it('shows an explicit rejected-code state and allows retry', async () => {
     const pairingRef = 'lan-peer-00112233445566778899aabbccddeeff';
     vi.mocked(window.vaultMesh.lan.status).mockResolvedValue({
       ...emptyStatus,
       discoverable: true,
       expiresAt: Date.now() + 60_000,
-      nearby: [{ pairingRef, status: 'confirming' }],
+      nearby: [{ pairingRef, status: 'code-rejected' }],
     });
     render(<NearbyDevicesPage />);
 
-    expect(await screen.findByText('本机已确认，正在等待另一台设备')).toBeTruthy();
-    expect(screen.getByText('等待确认')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: '配对' })).toBeNull();
+    expect(await screen.findByText('配对码不正确或安全验证失败')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '配对' })).toBeTruthy();
   });
 
   it('distinguishes local and peer trust-storage failures without exposing internals', async () => {
@@ -136,30 +138,19 @@ describe('CT-LAN-PAIRING-001 nearby devices UI', () => {
     expect(document.body.textContent).not.toMatch(/DACL|Keychain|Credential Manager|fingerprint/i);
   });
 
-  it('shows only the six-digit comparison code and routes both decisions by opaque peer ref', async () => {
+  it('shows only this discovery window code and never exposes network or PAKE material', async () => {
     const pairingRef = 'lan-peer-00112233445566778899aabbccddeeff';
     vi.mocked(window.vaultMesh.lan.status).mockResolvedValue({
       ...emptyStatus,
       discoverable: true,
       expiresAt: Date.now() + 60_000,
-      pending: [{ pairingRef, safetyCode: '482913', expiresAt: Date.now() + 60_000 }],
+      pairingCode: '482913',
+      nearby: [{ pairingRef, status: 'unverified' }],
     });
     render(<NearbyDevicesPage />);
 
     expect(await screen.findByText('482913')).toBeTruthy();
-    expect(screen.getByText(/蓝牙数字比较/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '短码一致' }));
-    await waitFor(() => expect(window.vaultMesh.lan.confirm).toHaveBeenCalledWith(pairingRef));
-
-    vi.mocked(window.vaultMesh.lan.status).mockResolvedValue({
-      ...emptyStatus,
-      discoverable: true,
-      expiresAt: Date.now() + 60_000,
-      pending: [{ pairingRef, safetyCode: '482913', expiresAt: Date.now() + 60_000 }],
-    });
-    fireEvent.click(screen.getByRole('button', { name: '取消' }));
-    await waitFor(() => expect(window.vaultMesh.lan.cancel).toHaveBeenCalledWith(pairingRef));
-
-    expect(document.body.textContent).not.toMatch(/192\.168\.|证书指纹|公钥|TLS exporter/i);
+    expect(screen.getByText(/验证成功后会自动完成配对/)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/192\.168\.|证书指纹|公钥|TLS exporter|PAKE/i);
   });
 });

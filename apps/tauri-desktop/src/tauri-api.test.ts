@@ -63,20 +63,16 @@ describe('CT-TAURI-COMMAND-001 typed adapter', () => {
     await api.lan.startDiscovery();
     await api.lan.scan();
     await api.lan.listTrusted();
-    await api.lan.begin(pairingRef);
-    await api.lan.confirm(pairingRef);
-    await api.lan.cancel(pairingRef);
+    await api.lan.begin(pairingRef, '482913');
     await api.lan.rename(pairingRef, '办公室电脑');
     await api.lan.revoke(pairingRef);
     await api.lan.stopDiscovery();
-    expect(invoke.mock.calls.slice(-10)).toEqual([
+    expect(invoke.mock.calls.slice(-8)).toEqual([
       ['desktop_invoke', { request: { operation: 'lan.pairing.status', input: {} } }],
       ['desktop_invoke', { request: { operation: 'lan.discovery.start', input: {} } }],
       ['desktop_invoke', { request: { operation: 'lan.discovery.scan', input: {} } }],
       ['desktop_invoke', { request: { operation: 'lan.pairing.list', input: {} } }],
-      ['desktop_invoke', { request: { operation: 'lan.pairing.begin', input: { pairingRef } } }],
-      ['desktop_invoke', { request: { operation: 'lan.pairing.confirm', input: { pairingRef } } }],
-      ['desktop_invoke', { request: { operation: 'lan.pairing.cancel', input: { pairingRef } } }],
+      ['desktop_invoke', { request: { operation: 'lan.pairing.begin', input: { pairingRef, pairingCode: '482913' } } }],
       ['desktop_invoke', { request: { operation: 'lan.pairing.rename', input: { pairingRef, label: '办公室电脑' } } }],
       ['desktop_invoke', { request: { operation: 'lan.pairing.revoke', input: { pairingRef } } }],
       ['desktop_invoke', { request: { operation: 'lan.discovery.stop', input: {} } }],
@@ -88,14 +84,14 @@ describe('CT-TAURI-COMMAND-001 typed adapter', () => {
     const safe = {
       discoverable: true,
       expiresAt: 1,
+      pairingCode: '482913',
       nearby: [{ pairingRef: 'lan-peer-00112233445566778899aabbccddeeff', status: 'connecting' }],
-      pending: [],
       trusted: [],
     };
     expect(LanPairingStatusSchema.safeParse(safe).success).toBe(true);
     expect(LanPairingStatusSchema.safeParse({
       ...safe,
-      nearby: [{ ...safe.nearby[0], status: 'confirming' }],
+      nearby: [{ ...safe.nearby[0], status: 'code-rejected' }],
     }).success).toBe(true);
     expect(LanPairingStatusSchema.safeParse({
       ...safe,
@@ -119,6 +115,9 @@ describe('CT-TAURI-COMMAND-001 typed adapter', () => {
       }],
     }).success).toBe(false);
     expect(LanPairingStatusSchema.safeParse({ ...safe, tlsExporter: 'secret' }).success).toBe(false);
+    expect(LanPairingStatusSchema.safeParse({ ...safe, pairingCode: '12345' }).success).toBe(false);
+    expect(LanPairingStatusSchema.safeParse({ ...safe, pairingCode: '12345a' }).success).toBe(false);
+    expect(LanPairingStatusSchema.safeParse({ ...safe, pending: [] }).success).toBe(false);
   });
 
   it('exposes only the pairing event to the main renderer bridge', async () => {

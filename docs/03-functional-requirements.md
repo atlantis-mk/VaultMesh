@@ -12,9 +12,9 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 ### REQ-LAN-PEER-001 局域网客户端发现与可信配对
 
-- 必须：macOS/Windows VaultMesh desktop 可以在用户显式开启、最长十分钟的局域网发现窗口内，发现同一协议主版本的 VaultMesh desktop 并通过双方比较、双方确认的六码安全短码建立可撤销设备信任。
+- 必须：macOS/Windows VaultMesh desktop 可以在用户显式开启、最长十分钟的局域网发现窗口内，生成本次窗口专用的随机六码配对码并发现同一协议主版本的 VaultMesh desktop；另一台设备选择该客户端并输入其当前配对码后，双方必须通过与当前 TLS 会话绑定的密码认证密钥交换自动建立可撤销设备信任，不得再要求被发现端二次确认。
 - 必须：非秘密的附近设备页面不依赖 Vault 解锁；窗口失焦仍按既有策略锁定 Vault，但不得因此中断正在显示的 LAN 配对页。发现、配对、重连状态与 desktop/browser/Agent unlock 相互独立；不读取、复制、传输或操作 Vault、秘密、账号、授权、Browser RPC 或 Agent IPC。
-- 必须：mDNS TXT 只能包含协议版本、随机实例 ID 与一次性 nonce，SRV/A/AAAA 只能使用随机会话 hostname 与临时 endpoint；不得披露系统 hostname、用户信息、Vault metadata、证书、公钥或受保护值。renderer-safe DTO 不得包含 hostname、IP、port、证书、公钥、固定指纹、nonce 或协议帧；证书变化、协议不兼容、超时、取消、重复、撤销和损坏持久化必须 fail closed。
+- 必须：mDNS TXT 只能包含协议版本、随机实例 ID 与一次性 nonce，SRV/A/AAAA 只能使用随机会话 hostname 与临时 endpoint；不得披露系统 hostname、用户信息、Vault metadata、证书、公钥、配对码或受保护值。renderer-safe DTO 除本机当前的短时配对码外，不得包含 hostname、IP、port、证书、公钥、固定指纹、nonce 或协议帧；错误配对码、证书变化、协议不兼容、超时、取消、重复、撤销和损坏持久化必须 fail closed。
 - 验收：`CT-LAN-PAIRING-001`、`AT-LAN-PAIRING-001`。
 
 ### REQ-VAULT-001 创建、解锁和锁定

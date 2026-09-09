@@ -14,7 +14,7 @@
 | Tauri 窗口内容捕获保护 | Required（启用平台提示；现代 macOS 不承诺通用截屏阻断） | Required（Windows 10 2004+ 公共系统捕获排除） | `CHG-2026-018` 实现；目标平台 AT 未完成前保持发布 Gate |
 | Chromium MV3 + Firefox MV2 extension + native host | Required | Required | 共享 WXT remote UI 与 Browser RPC；浏览器特定固定身份/Native Messaging manifest；Firefox 不包含 Chromium-only Passkey proxy；发布安装/签名验证待完成 |
 | 本地标准 stdio MCP client + owner-only Agent IPC | Required | Required | `CHG-2026-020` 实施中；Codex/OpenCode 是兼容性验收客户端，不构成产品白名单；只允许动作级 capability，目标平台打包与独立安全评审完成前保持发布 Gate |
-| 显式 LAN VaultMesh peer discovery/pairing | Required | Required | `CHG-2026-040`：默认关闭、十分钟 mDNS/TLS 双向短码配对；不传输 Vault 或提供远程操作 |
+| 显式 LAN VaultMesh peer discovery/pairing | Required | Required | `CHG-2026-040`：默认关闭、十分钟 mDNS/TLS + 一次性配对码认证；不传输 Vault 或提供远程操作 |
 | 远程 MCP、云端 Agent、常驻网络监听 broker | Out | Out | 不引入 VaultMesh 服务端、远程 bearer 管理面或端口映射 |
 | SwiftUI/AppKit client | Out | N/A | 产品源码已移除；历史 contract 证据保留在 Rejected Change |
 | WinUI 3 client | N/A | Out | reserved source root 已移除 |
