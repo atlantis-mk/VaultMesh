@@ -28,6 +28,8 @@ test("Review publication is isolated from the existing test channel", async () =
   const workflow = await readFile(new URL(".github/workflows/r2-review-release.yml", workspace), "utf8");
   assert.match(workflow, /name: Publish R2 review release/);
   assert.match(workflow, /default: "0\.0\.10-review"/);
+  assert.equal(workflow.match(/uses: pnpm\/action-setup@v6/g)?.length, 2);
+  assert.doesNotMatch(workflow, /pnpm\/action-setup@v6\n\s+with:\n\s+version:/);
   assert.match(workflow, /channels\/review\/latest\.json/);
   assert.doesNotMatch(workflow, /channels\/test\/latest\.json/);
   assert.match(workflow, /Review version matches source metadata/);
