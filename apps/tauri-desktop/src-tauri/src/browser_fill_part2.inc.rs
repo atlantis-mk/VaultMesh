@@ -40,6 +40,7 @@ fn fill_values(
             }
         }
         "card" => {
+            put(&mut result, "brand", detail.get("network"));
             put(&mut result, "cardholderName", detail.get("cardholderName"));
             let number = runtime
                 .protected_value(
@@ -207,6 +208,9 @@ fn identity_values(result: &mut FillValues, detail: &Value) {
             }
         }
     }
+    let address = ["addressLine1", "addressLine2"].into_iter()
+        .filter_map(|key| result.values.get(key).map(String::as_str)).collect::<Vec<_>>().join(", ");
+    if !address.is_empty() { result.values.insert("fullAddress".into(), address); }
 }
 
 fn map_field(kind: &str, values: &FillValues, field: &DiscoveredField) -> Option<String> {

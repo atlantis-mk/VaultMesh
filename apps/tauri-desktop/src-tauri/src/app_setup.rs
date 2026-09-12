@@ -518,7 +518,7 @@ pub fn run() {
                             Arc::clone(&native_dialog_focus),
                             Arc::clone(&email_otp),
                         ));
-                        BrowserBrokerCore::new_with_platform(vault_path, secret, platform).ok()
+                        BrowserBrokerCore::new_with_platform(vault_path.clone(), secret, platform).ok()
                     })
                     .and_then(|broker| {
                         BrowserBrokerUnixListener::start(
@@ -564,6 +564,32 @@ pub fn run() {
                 integration.start();
                 Arc::new(Mutex::new(integration))
             };
+            // Opt-in debug-only parallel authorization, never a second ID on the existing host.
+            let bitwarden_development_listener = if cfg!(debug_assertions)
+                && std::env::var("VAULTMESH_BITWARDEN_DEVELOPMENT").as_deref() == Ok("1")
+            {
+                let secret = BrowserPairingService::new_bitwarden_development(
+                    app_data.join(browser_development_identity::DIRECTORY).join("pairing.json"),
+                ).load_or_create();
+                secret.ok().and_then(|secret| {
+                    let platform = TauriBrowserPlatform::new(
+                        app.handle().clone(), app_data.clone(), Arc::clone(&settings),
+                        settings_path.clone(), Arc::clone(&clipboard_value),
+                        Arc::clone(&native_dialog_focus), Arc::clone(&email_otp),
+                    ).into_bitwarden_development(&app_data);
+                    BrowserBrokerCore::new_with_platform(vault_path.clone(), secret, Arc::new(platform)).ok()
+                }).and_then(|broker| {
+                    #[cfg(unix)]
+                    let listener = BrowserBrokerUnixListener::start(
+                        std::env::temp_dir().join(browser_development_identity::SOCKET_NAME), Arc::new(Mutex::new(broker)),
+                    );
+                    #[cfg(target_os = "windows")]
+                    let listener = browser_broker_windows::BrowserBrokerWindowsListener::start_with_pipe_name(
+                        browser_development_identity::PIPE_NAME.to_owned(), Arc::new(Mutex::new(broker)),
+                    );
+                    listener.ok().map(Arc::new)
+                })
+            } else { None };
             let lan_sync = Arc::new(Mutex::new(LanSyncService::new(
                 runtime.clone(),
                 lan_peer_trust_path.clone(),
@@ -587,6 +613,7 @@ pub fn run() {
                 _agent_pipe_listener: agent_pipe_listener,
                 #[cfg(unix)]
                 _browser_listener: browser_listener,
+                _bitwarden_development_listener: bitwarden_development_listener,
                 #[cfg(target_os = "windows")]
                 browser_integration,
                 app_data,
@@ -681,6 +708,9 @@ fn stop_lan_pairing(state: &RuntimeState) {
 }
 
 fn lock_system_authorizations(app: &AppHandle, state: &RuntimeState) {
+    if let Some(listener) = &state._bitwarden_development_listener {
+        listener.lock_vault();
+    }
     if let Ok(mut runtime) = state.runtime.lock() {
         runtime.lock();
     }
@@ -844,6 +874,9 @@ pub(super) fn cleanup_app_state(handle: &AppHandle) {
     let Some(state) = handle.try_state::<RuntimeState>() else {
         return;
     };
+    if let Some(listener) = &state._bitwarden_development_listener {
+        listener.stop();
+    }
     if let Ok(mut runtime) = state.runtime.lock() {
         runtime.lock();
     }

@@ -1,0 +1,164 @@
+// FIXME: Update this file to be type safe and remove this and next line
+// @ts-strict-ignore
+import { CommonModule } from "@angular/common";
+import {
+  ChangeDetectorRef,
+  Component,
+  EventEmitter,
+  Input,
+  OnChanges,
+  Output,
+  SimpleChanges,
+} from "@angular/core";
+
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { PasswordStrengthServiceAbstraction } from "@bitwarden/common/tools/password-strength";
+import { ProgressBarComponent, FormFieldModule } from "@bitwarden/components";
+
+import { JslibModule } from "../../jslib.module";
+
+export interface PasswordColorText {
+  color: BackgroundTypes;
+  text: string;
+}
+export type PasswordStrengthScore = 0 | 1 | 2 | 3 | 4;
+
+type SizeTypes = "small" | "default" | "large";
+type BackgroundTypes = "danger" | "primary" | "success" | "warning";
+
+// FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
+// eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
+@Component({
+  selector: "tools-password-strength",
+  templateUrl: "password-strength-v2.component.html",
+  imports: [CommonModule, JslibModule, ProgressBarComponent, FormFieldModule],
+})
+export class PasswordStrengthV2Component implements OnChanges {
+  /**
+   * The size (height) of the password strength component.
+   * Possible values are "default", "small" and "large".
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() size: SizeTypes = "default";
+  /**
+   * Determines whether to show the password strength score text on the progress bar or not.
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() showText = false;
+  /**
+   * Optional email address which can be used as input for the password strength calculation
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() email: string;
+  /**
+   * Optional name which can be used as input for the password strength calculation
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() name: string;
+  /**
+   * Sets the password value and updates the password strength.
+   *
+   * @param value - password provided by the hosting component
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() set password(value: string) {
+    this.updatePasswordStrength(value);
+  }
+  /**
+   * Emits the password strength score.
+   *
+   * @remarks
+   * The password strength score represents the strength of a password.
+   * It is emitted as an event when the password strength changes.
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
+  @Output() passwordStrengthScore = new EventEmitter<PasswordStrengthScore>();
+
+  /**
+   * Emits an event with the password score text and color.
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
+  @Output() passwordScoreTextWithColor = new EventEmitter<PasswordColorText>();
+
+  passwordScore: PasswordStrengthScore;
+  scoreWidth = 0;
+  color: BackgroundTypes = "danger";
+  text: string;
+
+  private passwordStrengthTimeout: number | NodeJS.Timeout;
+
+  constructor(
+    private i18nService: I18nService,
+    private passwordStrengthService: PasswordStrengthServiceAbstraction,
+    private readonly cdr: ChangeDetectorRef,
+  ) {}
+
+  ngOnChanges(changes: SimpleChanges): void {
+    // Password changes are handled synchronously by the setter; only debounce
+    // when email or name changed so we avoid a redundant render after each keystroke.
+    if (changes["password"]) {
+      return;
+    }
+
+    this.passwordStrengthTimeout = setTimeout(() => {
+      this.applyVisuals();
+      this.cdr.markForCheck();
+    }, 300);
+  }
+
+  updatePasswordStrength(password: string) {
+    if (this.passwordStrengthTimeout != null) {
+      clearTimeout(this.passwordStrengthTimeout);
+    }
+
+    if (!password) {
+      this.passwordScore = null;
+    } else {
+      const strengthResult = this.passwordStrengthService.getPasswordStrength(
+        password,
+        this.email,
+        this.name?.trim().toLowerCase().split(" "),
+      );
+      this.passwordScore = strengthResult == null ? null : strengthResult.score;
+    }
+
+    this.passwordStrengthScore.emit(this.passwordScore);
+    this.applyVisuals();
+    this.cdr.markForCheck();
+  }
+
+  private applyVisuals() {
+    this.scoreWidth = this.passwordScore == null ? 0 : (this.passwordScore + 1) * 20;
+
+    switch (this.passwordScore) {
+      case 4:
+        this.color = "success";
+        this.text = this.i18nService.t("strong");
+        break;
+      case 3:
+        this.color = "primary";
+        this.text = this.i18nService.t("good");
+        break;
+      case 2:
+        this.color = "warning";
+        this.text = this.i18nService.t("weak");
+        break;
+      default:
+        this.color = "danger";
+        this.text = this.passwordScore != null ? this.i18nService.t("weak") : null;
+        break;
+    }
+
+    this.passwordScoreTextWithColor.emit({
+      color: this.color,
+      text: this.text,
+    } as PasswordColorText);
+  }
+}

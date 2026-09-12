@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "angularCompilerOptions": {
+    "strictTemplates": true
+  },
+  "include": [
+    "src",
+    "./libs/common/src/autofill/constants",
+    "./libs/common/custom-matchers.d.ts"
+  ]
+}

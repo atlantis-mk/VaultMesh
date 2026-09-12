@@ -1,0 +1,79 @@
+<bit-section *ngIf="sends?.length > 0" disableMargin>
+  <bit-section-header>
+    <h2 class="tw-font-medium" bitTypography="h6">
+      {{ headerText }}
+    </h2>
+    <span bitTypography="body1" slot="end">{{ sends.length }}</span>
+  </bit-section-header>
+  <bit-item-group>
+    <bit-item *ngFor="let send of sends">
+      <button
+        bit-item-content
+        appA11yTitle="{{ 'edit' | i18n }} - {{ send.name }}"
+        routerLink="/edit-send"
+        [queryParams]="{ sendId: send.id, type: send.type }"
+        appStopClick
+        type="button"
+      >
+        <div slot="start" class="tw-justify-start">
+          @if (send.type === sendType.Text) {
+            <bit-icon name="bwi-file-text" class="bwi-lg tw-text-muted tw-w-6" />
+          }
+          @if (send.type === sendType.File) {
+            <bit-icon name="bwi-file" class="bwi-lg tw-text-muted tw-w-6" />
+          }
+        </div>
+        {{ send.name }}
+        <div slot="default-trailing" class="tw-flex tw-gap-2 tw-relative tw-z-10">
+          @if (send.authType !== authType.None) {
+            <bit-icon
+              name="bwi-lock"
+              [bitTooltip]="
+                (send.authType === authType.Email ? 'emailProtected' : 'passwordProtected') | i18n
+              "
+            ></bit-icon>
+          }
+          @if (send.disabled) {
+            <bit-icon
+              name="bwi-exclamation-triangle"
+              [bitTooltip]="'sendNotCompliantWithYourOrgsPolicy' | i18n"
+            ></bit-icon>
+          }
+          @if (send.expired) {
+            <bit-icon name="bwi-clock" [bitTooltip]="'expired' | i18n"></bit-icon>
+          }
+          @if (send.maxAccessCountReached) {
+            <bit-icon
+              name="bwi-exclamation-triangle"
+              [bitTooltip]="'maxAccessCountReached' | i18n"
+            ></bit-icon>
+          }
+        </div>
+        <span slot="secondary">
+          {{ "deletionDate" | i18n }}:&nbsp;{{ send.deletionDate | date: "mediumDate" }}
+        </span>
+      </button>
+      <ng-container slot="end">
+        <bit-item-action>
+          <button
+            class="tw-p-1"
+            bitIconButton="bwi-clone"
+            size="small"
+            type="button"
+            (click)="copySendLink(send)"
+            label="{{ 'copyLink' | i18n }} - {{ send.name }}"
+          ></button>
+        </bit-item-action>
+        <bit-item-action>
+          <button
+            bitIconButton="bwi-trash"
+            size="small"
+            type="button"
+            (click)="deleteSend(send)"
+            label="{{ 'delete' | i18n }} - {{ send.name }}"
+          ></button>
+        </bit-item-action>
+      </ng-container>
+    </bit-item>
+  </bit-item-group>
+</bit-section>

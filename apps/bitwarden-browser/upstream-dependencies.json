@@ -1,0 +1,61 @@
+{
+  "browserVersion": "2026.9.0",
+  "importedOn": "2026-09-10",
+  "source": "User-supplied clients-main archive; no verified Git commit",
+  "libraries": [
+    "admin-console",
+    "angular",
+    "assets",
+    "auth",
+    "auto-confirm",
+    "automation-driver",
+    "client-type",
+    "common",
+    "components",
+    "core-test-utils",
+    "guid",
+    "importer",
+    "key-management",
+    "key-management-ui",
+    "legacy-crypto",
+    "logging",
+    "logging-angular",
+    "managed-settings",
+    "messaging",
+    "organization-invite-link",
+    "platform",
+    "pricing",
+    "scheduling",
+    "serialization",
+    "shared",
+    "state",
+    "state-internal",
+    "state-test-utils",
+    "storage-core",
+    "storage-test-utils",
+    "subscription",
+    "tools",
+    "ui",
+    "unlock",
+    "user-core",
+    "user-crypto-management",
+    "vault"
+  ],
+  "sourceHashes": {
+    "package.json": "c6bef4e91aa92b07cae5d27e10d27ead79973eb6b6b5994dd2835fbcfa9134e1",
+    "package-lock.json": "ffc0eb57d3ba0912512a3f02c04a798edbc3287d011ef594fdd8b9b757050363",
+    "tsconfig.base.json": "ae3323a8d9e9e4cae3520aabc433034b0a5cf590c1100350eda4cddcd853e54e",
+    "LICENSE.txt": "01fe7fd5a624e6a81557ff4b76c4a7b9a3d89c6a1b58083b74aff7bce843bb41"
+  },
+  "excluded": [
+    "Other apps",
+    "bitwarden_license",
+    "commercial-sdk-internal",
+    "desktop-napi",
+    "Nx workspace",
+    "Storybook toolchain"
+  ],
+  "localAdditions": [
+    "zod: runtime schema validation for the VaultMesh RPC adapter"
+  ]
+}

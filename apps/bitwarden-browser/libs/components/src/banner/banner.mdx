@@ -1,0 +1,66 @@
+import { Canvas, Controls, Description, Meta, Primary, Title } from "@storybook/addon-docs/blocks";
+
+import * as stories from "./banner.stories";
+
+<Meta of={stories} />
+
+```ts
+import { BannerModule } from "@bitwarden/components";
+```
+
+<Title />
+<Description />
+<Primary />
+<Controls />
+
+## Banner With Title
+
+<Canvas of={stories.TitleBannerBase} />
+
+## Content Slots
+
+Banners support two content projection slots.
+
+### Default slot
+
+Plain text or inline elements. Use `bitLink` with `[linkType]` matching the banner `variant` for
+inline links.
+
+### Actions slot (`slot="actions"`)
+
+Only visible when a `[title]` is provided. At wide widths the actions are right-aligned; at narrow
+widths they appear below the body text. Wrap action elements in `ng-container slot="actions"`.
+
+Use `[buttonType]` matching the banner `variant` for action buttons (e.g. `buttonType="primary"` on
+a `primary` banner). The banner variant values map directly to button types of the same name.
+
+## Variants
+
+Use the following guidelines to help choose the correct variant.
+
+<Canvas of={stories.AllVariantsNoTitle} />
+
+<Canvas of={stories.AllVariantsWithTitle} />
+
+## Icons
+
+Icons should remain consistent across these types. Do not change the icon without consulting
+designers.
+
+The default icon for each variant can be overridden by passing any `bwi` icon class to the `[icon]`
+input. Pass `[icon]="null"` to suppress the icon entirely.
+
+<Canvas of={stories.AllVariantsCustomIcon} />
+
+## Dismissibility
+
+The close (X) button is only rendered when the consumer binds the `(dismiss)` output. If no listener
+is attached, the banner has no dismiss control. This applies to both simple and titled banners.
+
+<Canvas of={stories.NotDismissible} />
+
+## Accessibility
+
+Banners set the `role="status"` and `aria-live="polite"` attributes to ensure screen readers
+announce the content prior to the rest of the page. This behavior can be disabled by setting
+`[useAlertRole]="false"`.

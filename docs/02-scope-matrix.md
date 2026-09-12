@@ -18,7 +18,8 @@
 | 远程 MCP、云端 Agent、常驻网络监听 broker | Out | Out | 不引入 VaultMesh 服务端、远程 bearer 管理面或端口映射 |
 | SwiftUI/AppKit client | Out | N/A | 产品源码已移除；历史 contract 证据保留在 Rejected Change |
 | WinUI 3 client | N/A | Out | reserved source root 已移除 |
-| Linux/mobile/web client | Out | Out | 不在当前范围 |
+| Android Compose client | N/A | N/A | Partial；`CHG-2026-047` 实施 create/unlock/status/lock、app-private storage 与 lifecycle lock；Autofill、Credential Manager、Passkey、LAN 后台同步、导入导出和 quick unlock 暂不属于首切片 |
+| Linux/iOS/web client | Out | Out | 不在当前范围 |
 
 ## Vault 能力
 
@@ -44,7 +45,8 @@
 | 能力 | 状态 |
 | --- | --- |
 | 固定 ID 配对、独立 unlock/lock、撤销 | Required |
-| Popup 管理 Vault workflow | Required |
+| Popup 管理 Vault workflow | Required；实验性 Bitwarden 副本按下列桌面集中范围裁剪 |
+| 实验性 Bitwarden 副本的 Vault 备份/恢复、批量文件导入、SSH 扫描导入入口 | Out；由桌面端完成，不计入插件迁移缺口；不移除既有桌面/原插件兼容 RPC |
 | Popup Login 编辑的受控恢复码文件导入 | Required |
 | Login/card/identity/secret/SSH 显式填充 | Required |
 | 策略控制的 login/OTP page-load fill | Required |

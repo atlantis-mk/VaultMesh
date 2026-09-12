@@ -60,6 +60,7 @@ pub const TAURI_BROWSER_SLICE_OPERATIONS: &[&str] = &[
     "browser.pairing.status",
     "browser.pairing.revoke",
     "browser.autofill.candidates",
+    "browser.autofill.profile",
     "browser.autofill.execute",
     "browser.card.capture-status",
     "browser.login.password-changed",
@@ -182,6 +183,7 @@ fn requires_gesture(operation: &str) -> bool {
             | "events.poll"
             | "browser.pairing.status"
             | "browser.autofill.candidates"
+            | "browser.autofill.profile"
             | "browser.autofill.execute"
             | "browser.card.capture-status"
             | "browser.login.password-changed"
@@ -523,7 +525,9 @@ impl BrowserBrokerCore {
                 "请先在 VaultMesh 插件中单独解锁。",
             );
         }
-        if requires_gesture(&request.operation) && !valid_gesture(&request.input) {
+        if (requires_gesture(&request.operation)
+            || (request.operation == "browser.autofill.execute" && (request.input.contains_key("nativeItemPlan") || request.input.contains_key("nativeLoginPlan") && request.input.get("mode").and_then(Value::as_str) != Some("automatic"))))
+            && !valid_gesture(&request.input) {
             return rpc_failure(
                 envelope_request_id,
                 "invalid-request",
@@ -635,6 +639,12 @@ impl BrowserBrokerCore {
             }
             "browser.autofill.candidates" => {
                 match self.fill.candidates(&mut self.runtime, &request.input) {
+                    Ok(result) => rpc_success(envelope_request_id, result),
+                    Err(error) => rpc_failure(envelope_request_id, error.code, &error.message),
+                }
+            }
+            "browser.autofill.profile" => {
+                match self.fill.profile(&mut self.runtime, &request.input) {
                     Ok(result) => rpc_success(envelope_request_id, result),
                     Err(error) => rpc_failure(envelope_request_id, error.code, &error.message),
                 }

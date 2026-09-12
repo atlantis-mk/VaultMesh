@@ -1,0 +1,15 @@
+@if (type === "password") {
+  <tools-password-generator
+    [disableMargin]="disableMargin"
+    (onGenerated)="onCredentialGenerated($event)"
+    (onAlgorithm)="onAlgorithmSelected($event)"
+  ></tools-password-generator>
+}
+@if (type === "username") {
+  <tools-username-generator
+    [website]="uri"
+    [disableMargin]="disableMargin"
+    (onGenerated)="onCredentialGenerated($event)"
+    (onAlgorithm)="onAlgorithmSelected($event)"
+  ></tools-username-generator>
+}

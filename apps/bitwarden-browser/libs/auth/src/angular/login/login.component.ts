@@ -1,0 +1,938 @@
+import { CommonModule } from "@angular/common";
+import {
+  Component,
+  DestroyRef,
+  ElementRef,
+  NgZone,
+  OnDestroy,
+  OnInit,
+  ViewChild,
+} from "@angular/core";
+import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
+import { FormBuilder, FormControl, ReactiveFormsModule, Validators } from "@angular/forms";
+import { ActivatedRoute, Params, Router, RouterModule } from "@angular/router";
+import { firstValueFrom, Subject, take, takeUntil, skip, combineLatest, startWith } from "rxjs";
+
+import { JslibModule } from "@bitwarden/angular/jslib.module";
+import { LockIcon, VaultIcon, WaveIcon } from "@bitwarden/assets/svg";
+import {
+  LoginEmailServiceAbstraction,
+  LoginStrategyServiceAbstraction,
+  LoginSuccessHandlerService,
+  PasswordLoginCredentials,
+} from "@bitwarden/auth/common";
+import { InternalPolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
+import { MasterPasswordPolicyOptions } from "@bitwarden/common/admin-console/models/domain/master-password-policy-options";
+import { DevicesApiServiceAbstraction } from "@bitwarden/common/auth/abstractions/devices-api.service.abstraction";
+import { SsoLoginServiceAbstraction } from "@bitwarden/common/auth/abstractions/sso-login.service.abstraction";
+import { AuthResult } from "@bitwarden/common/auth/models/domain/auth-result";
+import { OrganizationInviteService } from "@bitwarden/common/auth/organization-invite";
+import { PasswordPreloginService } from "@bitwarden/common/auth/password-prelogin";
+import { ClientType, HttpStatusCode } from "@bitwarden/common/enums";
+import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
+import { ErrorResponse } from "@bitwarden/common/models/response/error.response";
+import { AppIdService } from "@bitwarden/common/platform/abstractions/app-id.service";
+import { BroadcasterService } from "@bitwarden/common/platform/abstractions/broadcaster.service";
+import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
+import { EnvironmentService } from "@bitwarden/common/platform/abstractions/environment.service";
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
+import { MessagingService } from "@bitwarden/common/platform/abstractions/messaging.service";
+import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
+import { ValidationService } from "@bitwarden/common/platform/abstractions/validation.service";
+import { Utils } from "@bitwarden/common/platform/misc/utils";
+import { PasswordStrengthServiceAbstraction } from "@bitwarden/common/tools/password-strength";
+// This import has been flagged as unallowed for this class. It may be involved in a circular dependency loop.
+// eslint-disable-next-line no-restricted-imports
+import {
+  AnonLayoutWrapperData,
+  AnonLayoutWrapperDataService,
+  AsyncActionsModule,
+  ButtonModule,
+  CheckboxModule,
+  FormFieldModule,
+  IconButtonModule,
+  IconModule,
+  LinkModule,
+  ToastService,
+  TooltipDirective,
+} from "@bitwarden/components";
+
+import { LoginComponentService, PasswordPolicies } from "./login-component.service";
+
+const BroadcasterSubscriptionId = "LoginComponent";
+
+// FIXME: update to use a const object instead of a typescript enum
+// eslint-disable-next-line @bitwarden/platform/no-enums
+export enum LoginUiState {
+  /** Display the email input field + continue button */
+  EMAIL_ENTRY = "EmailEntry",
+  /** Display the master password input field + login submit button */
+  MASTER_PASSWORD_ENTRY = "MasterPasswordEntry",
+}
+
+// FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
+// eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
+@Component({
+  templateUrl: "./login.component.html",
+  imports: [
+    AsyncActionsModule,
+    ButtonModule,
+    CheckboxModule,
+    CommonModule,
+    FormFieldModule,
+    IconButtonModule,
+    IconModule,
+    LinkModule,
+    JslibModule,
+    ReactiveFormsModule,
+    RouterModule,
+    TooltipDirective,
+  ],
+})
+export class LoginComponent implements OnInit, OnDestroy {
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @ViewChild("masterPasswordInputRef") masterPasswordInputRef: ElementRef | undefined;
+
+  private destroy$ = new Subject<void>();
+  readonly Icons = { WaveIcon, VaultIcon, LockIcon };
+
+  clientType: ClientType;
+  ClientType = ClientType;
+  orgPoliciesFromInvite: PasswordPolicies | null = null;
+  LoginUiState = LoginUiState;
+  isKnownDevice = false;
+  loginUiState: LoginUiState = LoginUiState.EMAIL_ENTRY;
+  ssoRequired = false;
+
+  formGroup = this.formBuilder.group(
+    {
+      email: ["", [Validators.required, Validators.email]],
+      masterPassword: [
+        "",
+        [Validators.required, Validators.minLength(Utils.originalMinimumPasswordLength)],
+      ],
+      rememberEmail: [false],
+    },
+    { updateOn: "submit" },
+  );
+
+  get emailFormControl(): FormControl<string | null> {
+    return this.formGroup.controls.email;
+  }
+
+  // Desktop properties
+  deferFocus: boolean | null = null;
+
+  constructor(
+    private activatedRoute: ActivatedRoute,
+    private anonLayoutWrapperDataService: AnonLayoutWrapperDataService,
+    private appIdService: AppIdService,
+    private broadcasterService: BroadcasterService,
+    private destroyRef: DestroyRef,
+    private devicesApiService: DevicesApiServiceAbstraction,
+    private formBuilder: FormBuilder,
+    private i18nService: I18nService,
+    private loginEmailService: LoginEmailServiceAbstraction,
+    private loginComponentService: LoginComponentService,
+    private loginStrategyService: LoginStrategyServiceAbstraction,
+    private messagingService: MessagingService,
+    private ngZone: NgZone,
+    private passwordStrengthService: PasswordStrengthServiceAbstraction,
+    private platformUtilsService: PlatformUtilsService,
+    private policyService: InternalPolicyService,
+    private router: Router,
+    private toastService: ToastService,
+    private logService: LogService,
+    private validationService: ValidationService,
+    private loginSuccessHandlerService: LoginSuccessHandlerService,
+    private configService: ConfigService,
+    private ssoLoginService: SsoLoginServiceAbstraction,
+    private environmentService: EnvironmentService,
+    private passwordPreloginService: PasswordPreloginService,
+    private organizationInviteService: OrganizationInviteService,
+  ) {
+    this.clientType = this.platformUtilsService.getClientType();
+  }
+
+  async ngOnInit(): Promise<void> {
+    // Add popstate listener to listen for browser back button clicks
+    window.addEventListener("popstate", this.handlePopState);
+
+    const redirected = await this.defaultOnInit();
+    if (redirected) {
+      // defaultOnInit navigated to another route. Skip everything below
+      return;
+    }
+
+    if (this.clientType === ClientType.Desktop) {
+      await this.desktopOnInit();
+    }
+
+    // Push the open-org-invite title last so it wins over any chrome the steps above
+    // (route data, defaultOnInit's auto-submit override) may have set. Harmless on
+    // the auto-submit path — autoProgressToMpEntry already writes the same
+    // "Join <org>" title for the same org, and setAnonLayoutWrapperData merges only
+    // defined fields so the subtitle/icon set by the SSO override are preserved.
+    // TODO: consider replacing with a `pageTitle` route resolver so the correct title
+    // renders on first paint instead of flashing the default first.
+    await this.applyOpenOrgInviteTitleOverride();
+  }
+
+  ngOnDestroy(): void {
+    // Remove popstate listener
+    window.removeEventListener("popstate", this.handlePopState);
+
+    if (this.clientType === ClientType.Desktop) {
+      // TODO: refactor to not use deprecated broadcaster service.
+      this.broadcasterService.unsubscribe(BroadcasterSubscriptionId);
+    }
+
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
+  /**
+   * Runs the shared default init. Returns `true` when the client-specific
+   * `handleQueryParamErrors` navigated away from /login, so callers can skip
+   * any further init that would be torn down immediately.
+   */
+  private async defaultOnInit(): Promise<boolean> {
+    const params = await firstValueFrom(this.activatedRoute.queryParams);
+    const paramEmailIsSet = this.applyEmailFromQueryParams(params);
+
+    if (!paramEmailIsSet) {
+      await this.loadRememberedEmail();
+    }
+
+    // Check to see if the device is known so that we can show the Login with Device option
+    if (this.emailFormControl.value) {
+      await this.getKnownDevice(this.emailFormControl.value);
+    }
+
+    // Let the client decide whether to auto-progress past email entry and how to
+    // respond to error codes in /login query params (e.g. SSO invited-user server redirects).
+    const queryParamResult = params
+      ? await this.loginComponentService.handleQueryParamErrors?.(params)
+      : undefined;
+
+    // Handler already navigated to another route; stop running the rest of init
+    // so we don't set up subscriptions/state that Angular is about to tear down.
+    if (queryParamResult?.kind === "redirected") {
+      return true;
+    }
+
+    // Auto-progress when the hook signals it. Via continuePressed (not continue) so its
+    // pushState lets back-button return to email entry rather than the SSO callback URL.
+    if (queryParamResult?.kind === "auto-submit" && paramEmailIsSet) {
+      await this.continuePressed(queryParamResult.mpEntryLayoutOverride);
+    }
+
+    // This SSO required tracking should be initialized after email has had a chance to be pre-filled
+    // (if it was found in query params or was the remembered email)
+    await this.initSsoRequiredTracking();
+
+    // Listen for region/environment changes after initialization.
+    // If the user switches region while on the password entry screen, we need to clear
+    // any stale authentication errors from the previous region and refresh the prelogin
+    // data (KDF settings) for the new environment.
+    this.environmentService.environment$
+      .pipe(
+        skip(1), // Skip the initial emission, only react to subsequent changes
+        takeUntil(this.destroy$),
+      )
+      .subscribe((env) => {
+        if (this.loginUiState === LoginUiState.MASTER_PASSWORD_ENTRY) {
+          // Clear previous login attempt errors as they are no longer valid for the new region
+          this.formGroup.controls.masterPassword.setErrors(null);
+          this.formGroup.controls.masterPassword.updateValueAndValidity();
+          // Fetch new prelogin data for the updated region
+          this.prefetchPasswordPreloginData();
+        }
+      });
+
+    return false;
+  }
+
+  /**
+   * Pre-fills the email form control from `?email=…` if the param is present and
+   * looks like an email. Returns whether the form control was set so the caller
+   * can decide whether to fall back to the remembered email.
+   */
+  private applyEmailFromQueryParams(params: Params | null): boolean {
+    const qParamsEmail = params?.email;
+    if (qParamsEmail != null && qParamsEmail.indexOf("@") > -1) {
+      this.formGroup.controls.email.setValue(qParamsEmail);
+      return true;
+    }
+    return false;
+  }
+
+  private async desktopOnInit(): Promise<void> {
+    // TODO: refactor to not use deprecated broadcaster service.
+    this.broadcasterService.subscribe(BroadcasterSubscriptionId, async (message: any) => {
+      this.ngZone.run(() => {
+        switch (message.command) {
+          case "windowHidden":
+            this.onWindowHidden();
+            break;
+          case "windowIsFocused":
+            if (this.deferFocus === null) {
+              this.deferFocus = !message.windowIsFocused;
+              if (!this.deferFocus) {
+                this.focusInput();
+              }
+            } else if (this.deferFocus && message.windowIsFocused) {
+              this.focusInput();
+              this.deferFocus = false;
+            }
+            break;
+          default:
+        }
+      });
+    });
+
+    this.messagingService.send("getWindowIsFocused");
+  }
+
+  private async initSsoRequiredTracking() {
+    const ssoRequiredCache = await firstValueFrom(this.ssoLoginService.ssoRequiredCache$);
+
+    // Only set up a subscription if there is actually a populated ssoRequiredCache
+    if (ssoRequiredCache == null || ssoRequiredCache.length < 1) {
+      return;
+    }
+
+    // React to both email and environment changes
+    combineLatest([
+      // startWith email form field value (it could be empty, a remembered email, or pre-filled from query params)
+      this.formGroup.controls.email.valueChanges.pipe(startWith(this.emailFormControl.value)),
+      // Changing environments on Extension/Desktop does not reload the page, so we must listen for environment
+      // changes and re-evaluate the SSO required state accordingly. Web only ever uses the initial emission, because
+      // changing environments on Web navigates the page.
+      this.environmentService.globalEnvironment$,
+    ])
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(([email, env]) => {
+        const emailValue = email?.toLowerCase();
+        const webVaultUrl = env.getWebVaultUrl();
+
+        this.ssoRequired = emailValue
+          ? ssoRequiredCache.some((e) => e.email === emailValue && e.webVaultUrl === webVaultUrl)
+          : false;
+      });
+  }
+
+  submit = async (): Promise<void> => {
+    if (this.clientType === ClientType.Desktop) {
+      if (this.loginUiState !== LoginUiState.MASTER_PASSWORD_ENTRY) {
+        return;
+      }
+    }
+
+    const { email, masterPassword } = this.formGroup.value;
+
+    this.formGroup.markAllAsTouched();
+    if (this.formGroup.invalid) {
+      return;
+    }
+
+    if (!email || !masterPassword) {
+      this.logService.error("Email and master password are required");
+      return;
+    }
+
+    // Try to retrieve any org policies from an org invite now so we can send it to the
+    // login strategies. Since it is optional and we only want to be doing this on the
+    // web we will only send in content in the right context.
+    this.orgPoliciesFromInvite = this.loginComponentService.getOrgPoliciesFromOrgInvite
+      ? await this.loginComponentService.getOrgPoliciesFromOrgInvite(email)
+      : null;
+
+    const orgMasterPasswordPolicyOptions =
+      this.orgPoliciesFromInvite?.enforcedPasswordPolicyOptions;
+
+    // This was kicked off when the user hit continue to the MP entry
+    // so await the result before continuing to login to ensure we
+    // don't call to get password prelogin data twice.
+    // Other MP login flows in the app don't prefetch this data.
+    const preFetchedPreloginData = await firstValueFrom(
+      this.passwordPreloginService.getPreloginData$(email),
+    );
+
+    const credentials = new PasswordLoginCredentials(
+      email,
+      masterPassword,
+      undefined,
+      orgMasterPasswordPolicyOptions,
+      preFetchedPreloginData,
+    );
+
+    try {
+      const authResult = await this.loginStrategyService.logIn(credentials);
+
+      await this.handleAuthResult(authResult);
+    } catch (error) {
+      this.logService.error(error);
+      await this.handleSubmitError(error);
+    }
+  };
+
+  /**
+   * Handles the error from the submit function.
+   *
+   * @param error The error object.
+   */
+  private async handleSubmitError(error: unknown) {
+    // Handle error responses
+    if (error instanceof ErrorResponse) {
+      switch (error.statusCode) {
+        case HttpStatusCode.BadRequest: {
+          if (error.message?.toLowerCase().includes("username or password is incorrect")) {
+            const env = await firstValueFrom(this.environmentService.environment$);
+            const host = Utils.getHost(env.getWebVaultUrl());
+
+            this.formGroup.controls.masterPassword.setErrors({
+              error: {
+                message: this.i18nService.t("invalidMasterPasswordConfirmEmailAndHost", host),
+              },
+            });
+          } else {
+            // Allow other 400 responses to be handled by toast
+            this.validationService.showError(error);
+          }
+          break;
+        }
+        default: {
+          // Allow all other error codes to be handled by toast
+          this.validationService.showError(error);
+        }
+      }
+    } else {
+      // Allow all other errors to be handled by toast
+      this.validationService.showError(error);
+    }
+  }
+
+  /**
+   * Handles the result of the authentication process.
+   *
+   * @param authResult
+   * @returns A simple `return` statement for each conditional check.
+   *          If you update this method, do not forget to add a `return`
+   *          to each if-condition block where necessary to stop code execution.
+   */
+  private async handleAuthResult(authResult: AuthResult): Promise<void> {
+    if (authResult.requiresEncryptionKeyMigration) {
+      /* Legacy accounts used the master key to encrypt data.
+         This is now unsupported and requires a downgraded client */
+      this.toastService.showToast({
+        variant: "error",
+        title: this.i18nService.t("errorOccurred"),
+        message: this.i18nService.t("legacyEncryptionUnsupported"),
+      });
+      return;
+    }
+
+    if (authResult.requiresTwoFactor) {
+      await this.router.navigate(["2fa"]);
+      return;
+    }
+
+    // Redirect to device verification if this is an unknown device
+    if (authResult.requiresDeviceVerification) {
+      await this.router.navigate(["device-verification"]);
+      return;
+    }
+
+    // redirect to SSO if ssoOrganizationIdentifier is present in token response
+    if (authResult.requiresSso) {
+      const email = this.formGroup?.value?.email;
+      if (!email) {
+        this.toastService.showToast({
+          variant: "error",
+          title: this.i18nService.t("errorOccurred"),
+          message: this.i18nService.t("emailRequiredForSsoLogin"),
+        });
+        return;
+      }
+      await this.loginComponentService.redirectToSsoLoginWithOrganizationSsoIdentifier(
+        email,
+        authResult.ssoOrganizationIdentifier,
+      );
+      return;
+    }
+
+    // User logged in successfully so execute side effects
+    await this.loginSuccessHandlerService.run(authResult.userId, authResult.masterPassword);
+
+    // Determine where to send the user next
+    // The AuthGuard will handle routing to change-password based on state
+
+    // TODO: PM-18269 - evaluate if we can combine this with the
+    // password evaluation done in the password login strategy.
+    if (this.orgPoliciesFromInvite) {
+      const isPasswordChangeRequired = await this.isPasswordChangeRequiredByOrgPolicy(
+        this.orgPoliciesFromInvite.enforcedPasswordPolicyOptions,
+      );
+      if (isPasswordChangeRequired) {
+        await this.router.navigate(["change-password"]);
+        return;
+      }
+    }
+
+    if (this.clientType === ClientType.Browser) {
+      await this.router.navigate(["/tabs/vault"]);
+    } else {
+      await this.router.navigate(["vault"]);
+    }
+  }
+
+  /**
+   * Checks if the master password meets the enforced policy requirements
+   * and if the user is required to change their password.
+   *
+   * TODO: PM-18269 - this duplicates the evaluation done in PasswordLoginStrategy.
+   * Consolidate so the WeakMasterPassword ForceSetPasswordReason flow is the single
+   * mechanism that drives the redirect to change-password post-login.
+   */
+  private async isPasswordChangeRequiredByOrgPolicy(
+    enforcedPasswordPolicyOptions: MasterPasswordPolicyOptions,
+  ): Promise<boolean> {
+    try {
+      if (enforcedPasswordPolicyOptions == undefined) {
+        return false;
+      }
+
+      // Note: we deliberately do not check enforcedPasswordPolicyOptions.enforceOnLogin
+      // as existing users who are logging in after getting an org invite should
+      // always be forced to set a password that meets the org's policy.
+      // Org Invite -> Registration also works this way for new BW users as well.
+
+      const masterPassword = this.formGroup.controls.masterPassword.value;
+
+      // Return false if masterPassword is null/undefined since this is only evaluated after successful login
+      if (!masterPassword) {
+        return false;
+      }
+
+      const passwordStrength = this.passwordStrengthService.getPasswordStrength(
+        masterPassword,
+        this.formGroup.value.email ?? undefined,
+      )?.score;
+
+      return !this.policyService.evaluateMasterPassword(
+        passwordStrength,
+        masterPassword,
+        enforcedPasswordPolicyOptions,
+      );
+    } catch (e) {
+      // Do not prevent unlock if there is an error evaluating policies
+      this.logService.error(e);
+      return false;
+    }
+  }
+
+  protected async startAuthRequestLogin(): Promise<void> {
+    this.formGroup.get("masterPassword")?.clearValidators();
+    this.formGroup.get("masterPassword")?.updateValueAndValidity();
+
+    if (!this.formGroup.valid) {
+      return;
+    }
+
+    await this.router.navigate(["/login-with-device"]);
+  }
+
+  protected async toggleLoginUiState(
+    value: LoginUiState,
+    mpEntryLayoutOverride?: Partial<AnonLayoutWrapperData>,
+  ): Promise<void> {
+    this.loginUiState = value;
+
+    if (this.loginUiState === LoginUiState.EMAIL_ENTRY) {
+      this.loginComponentService.showBackButton(false);
+
+      this.anonLayoutWrapperDataService.setAnonLayoutWrapperData({
+        pageTitle: { key: "loginPageEmailEntryScreenTitle" },
+        pageIcon: this.Icons.VaultIcon, // layout decides whether to render it via hidePageIcon
+        pageSubtitle: null, // remove subtitle when going back to email entry
+      });
+
+      // Re-apply the open-org-invite title for back-nav from MP entry; the default push
+      // above would otherwise clobber it.
+      await this.applyOpenOrgInviteTitleOverride();
+
+      // Reset master password only when going from validated to not validated so that autofill can work properly
+      this.formGroup.controls.masterPassword.reset();
+
+      // Reset known device state when going back to email entry if it is supported
+      this.isKnownDevice = false;
+    } else if (this.loginUiState === LoginUiState.MASTER_PASSWORD_ENTRY) {
+      this.loginComponentService.showBackButton(true);
+
+      this.anonLayoutWrapperDataService.setAnonLayoutWrapperData(
+        mpEntryLayoutOverride ?? {
+          pageTitle: { key: "loginPageMasterPasswordEntryScreenTitle" },
+          pageSubtitle: this.emailFormControl.value,
+          pageIcon: this.Icons.WaveIcon, // layout decides whether to render it via hidePageIcon
+        },
+      );
+
+      // Mark MP as untouched so that, when users enter email and hit enter, the MP field doesn't load with validation errors
+      this.formGroup.controls.masterPassword.markAsUntouched();
+
+      // When email is validated, focus on master password after waiting for input to be rendered
+      if (this.ngZone.isStable) {
+        this.masterPasswordInputRef?.nativeElement?.focus();
+      } else {
+        this.ngZone.onStable.pipe(take(1), takeUntil(this.destroy$)).subscribe(() => {
+          this.masterPasswordInputRef?.nativeElement?.focus();
+        });
+      }
+
+      // Check to see if the device is known so we can show the Login with Device option
+      const email = this.emailFormControl.value;
+      if (email) {
+        await this.getKnownDevice(email);
+      }
+    }
+  }
+
+  isLoginWithPasskeySupported() {
+    return this.loginComponentService.isLoginWithPasskeySupported();
+  }
+
+  protected async goToHint(): Promise<void> {
+    await this.router.navigateByUrl("/hint");
+  }
+
+  /**
+   * Continue button clicked (or enter key pressed).
+   * Adds the login url to the browser's history so that the back button can be used to go back to the email entry state.
+   * Needs to be separate from the continue() function because that can be triggered by the browser's forward button.
+   * @param mpEntryLayoutOverride Optional override for the default MP-entry anon-layout. Used by
+   * client-specific flows (e.g. SSO invited-user redirect) that need a different title/subtitle/icon.
+   */
+  protected async continuePressed(mpEntryLayoutOverride?: Partial<AnonLayoutWrapperData>) {
+    // Add a new entry to the browser's history so that there is a history entry to go back to
+    history.pushState({}, "", window.location.href);
+    await this.continue(mpEntryLayoutOverride);
+  }
+
+  /**
+   * Continue to the master password entry state (only if email is validated)
+   * @param mpEntryLayoutOverride See {@link continuePressed}.
+   */
+  protected async continue(mpEntryLayoutOverride?: Partial<AnonLayoutWrapperData>): Promise<void> {
+    const isEmailValid = this.validateEmail();
+    if (!isEmailValid) {
+      return;
+    }
+
+    const email = this.emailFormControl.value;
+    if (email && !(await this.openOrgInviteDomainAllowed(email))) {
+      return;
+    }
+
+    // SSO-callback overrides (currently direct-invite only) take precedence; otherwise
+    // synthesize an override for the open-org-invite path so "Join <org>" survives the
+    // transition. Falls through to toggleLoginUiState's built-in default when neither
+    // applies.
+    const override = mpEntryLayoutOverride ?? (await this.buildOpenOrgInviteMpEntryOverride());
+
+    this.prefetchPasswordPreloginData();
+    await this.toggleLoginUiState(LoginUiState.MASTER_PASSWORD_ENTRY, override);
+  }
+
+  /**
+   * Pre-auth UX check for open-org-invite domain restrictions. Layered UX only — the
+   * accept endpoint enforces the policy server-side, so this fails open on transient
+   * errors (returns true) rather than blocking login. Also returns true when no
+   * open-org invite is stashed or the feature is off.
+   */
+  private async openOrgInviteDomainAllowed(email: string): Promise<boolean> {
+    const invite = await this.organizationInviteService.getOpenOrgInvite();
+    if (invite == null) {
+      return true;
+    }
+    // Defense in depth: stale flag-on state may persist into a flag-off session.
+    // Skip the domain check when disabled.
+    // TODO: clean up when FeatureFlag.GenerateInviteLink is removed — drop this
+    // guard clause.
+    if (!(await this.configService.getFeatureFlag(FeatureFlag.GenerateInviteLink))) {
+      return true;
+    }
+    const result = await this.organizationInviteService.validateOpenOrgInviteEmailDomain(
+      invite.organizationId,
+      invite.inviteLinkCode,
+      email,
+    );
+    switch (result.kind) {
+      case "allowed":
+        return true;
+      case "not-allowed":
+        this.emailFormControl.setErrors({
+          error: { message: this.i18nService.t("openOrgInviteEmailDomainNotAllowed") },
+        });
+        return false;
+      case "link-invalid":
+        await this.organizationInviteService.clearOpenOrgInvite();
+        await this.router.navigate(["/organization-invite-link-invalid"], {
+          queryParams: { orgName: invite.organizationName, returnTo: "login" },
+        });
+        return false;
+      case "unexpected":
+        this.validationService.showError(result.errorMessage);
+        return true;
+    }
+  }
+
+  /**
+   * Returns the open-org-invite if one is in state and the feature is enabled; otherwise
+   * `null`. Centralizes the "should we apply open-org-invite chrome here?" predicate so
+   * the kind + flag guard isn't restated at every override site.
+   *
+   * Defense in depth: stale flag-on state may persist into a flag-off session.
+   */
+  private async getActiveOpenOrgInvite(): Promise<{ organizationName: string } | null> {
+    const invite = await this.organizationInviteService.getOpenOrgInvite();
+    if (invite == null) {
+      return null;
+    }
+    // TODO: clean up when FeatureFlag.GenerateInviteLink is removed — drop this
+    // guard clause.
+    if (!(await this.configService.getFeatureFlag(FeatureFlag.GenerateInviteLink))) {
+      return null;
+    }
+    return invite;
+  }
+
+  /**
+   * Pushes the "Join <organizationName>" title for the email-entry surface when an
+   * open org invite is in state. The override is the last write to the anon-layout
+   * wrapper data on this surface, so it survives until the next state transition
+   * (which is expected to re-apply it where needed — see `toggleLoginUiState`).
+   */
+  private async applyOpenOrgInviteTitleOverride(): Promise<void> {
+    const invite = await this.getActiveOpenOrgInvite();
+    if (invite == null) {
+      return;
+    }
+    this.anonLayoutWrapperDataService.setAnonLayoutWrapperData({
+      pageTitle: { key: "joinOrganizationName", placeholders: [invite.organizationName] },
+    });
+  }
+
+  /**
+   * Builds the MP-entry anon-layout override for the open-org-invite path: preserves
+   * "Join <org>" title, surfaces the entered email as subtitle (matching the default
+   * MP-entry treatment), and swaps the icon to LockIcon. Returns undefined when no
+   * open org invite is in state or the feature is disabled, so the caller can fall
+   * through to the default override path.
+   */
+  private async buildOpenOrgInviteMpEntryOverride(): Promise<
+    Partial<AnonLayoutWrapperData> | undefined
+  > {
+    const invite = await this.getActiveOpenOrgInvite();
+    if (invite == null) {
+      return undefined;
+    }
+    return {
+      pageTitle: { key: "joinOrganizationName", placeholders: [invite.organizationName] },
+      pageSubtitle: this.emailFormControl.value,
+      pageIcon: this.Icons.LockIcon,
+    };
+  }
+
+  /**
+   * Handle the Login with Passkey button click.
+   * We need a handler here in order to persist the remember email selection to state before routing.
+   * @param event - The event object.
+   */
+  async handleLoginWithPasskeyClick() {
+    await this.router.navigate(["/login-with-passkey"]);
+  }
+
+  /**
+   * Handle the SSO button click.
+   * @param event - The event object.
+   */
+  async handleSsoClick() {
+    // Make sure the email is valid
+    const isEmailValid = this.validateEmail();
+    if (!isEmailValid) {
+      return;
+    }
+
+    // Make sure the email is not empty, for type safety
+    const email = this.formGroup.value.email;
+    if (!email) {
+      this.logService.error("Email is required for SSO");
+      return;
+    }
+
+    // Send the user to SSO, either through routing or through redirecting to the web app
+    await this.loginComponentService.redirectToSsoLogin(email);
+  }
+
+  /**
+   * Call to check if the device is known.
+   * Known means that the user has logged in with this device before.
+   * @param email - The user's email
+   */
+  private async getKnownDevice(email: string): Promise<void> {
+    if (!email) {
+      this.isKnownDevice = false;
+      return;
+    }
+
+    try {
+      const deviceIdentifier = await this.appIdService.getAppId();
+      this.isKnownDevice = await this.devicesApiService.getKnownDevice(email, deviceIdentifier);
+      // FIXME: Remove when updating file. Eslint update
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    } catch (e) {
+      this.isKnownDevice = false;
+    }
+  }
+
+  /**
+   * Check to see if the user has remembered an email on the current device.
+   * If so, set the email in the form field and set rememberEmail to true. If not, set rememberEmail to false.
+   */
+  private async loadRememberedEmail(): Promise<void> {
+    const storedEmail = await firstValueFrom(this.loginEmailService.rememberedEmail$);
+    if (storedEmail) {
+      this.formGroup.controls.email.setValue(storedEmail);
+      this.formGroup.controls.rememberEmail.setValue(true);
+      // If we load an email into the form, we need to initialize it for the login process as well
+      // so that other login components can use it.
+      // We do this here as it's possible that a user doesn't edit the email field before submitting.
+      await this.loginEmailService.setLoginEmail(storedEmail);
+    } else {
+      this.formGroup.controls.rememberEmail.setValue(false);
+    }
+  }
+
+  private focusInput() {
+    document
+      .getElementById(
+        this.emailFormControl.value == null || this.emailFormControl.value === ""
+          ? "email"
+          : "masterPassword",
+      )
+      ?.focus();
+  }
+
+  private onWindowHidden() {
+    this.deferFocus = true;
+  }
+
+  /**
+   * Helper function to determine if the back button should be shown.
+   * @returns true if the back button should be shown.
+   */
+  protected shouldShowBackButton(): boolean {
+    return (
+      this.loginUiState === LoginUiState.MASTER_PASSWORD_ENTRY &&
+      this.clientType !== ClientType.Browser
+    );
+  }
+
+  /**
+   * Handle the back button click to transition back to the email entry state.
+   */
+  protected async backButtonClicked() {
+    history.back();
+  }
+
+  /**
+   * Prefetches the password prelogin data for the entered email
+   * so that it is available by the time the user submits the password.
+   * If it is not available by the time the user submits, the login strategy will still work
+   * as it will wait for the prelogin data to be available before proceeding.
+   */
+  private prefetchPasswordPreloginData() {
+    const email = this.formGroup.value.email;
+    if (email) {
+      // Don't await this call as we don't want to delay the UI transition to the master password entry
+      // Errors are deferred to the subscriber in submit().
+      void this.passwordPreloginService.getPreloginData$(email);
+    }
+  }
+
+  /**
+   * Handle the popstate event to transition back to the email entry state when the back button is clicked.
+   * Also handles the case where the user clicks the forward button.
+   * @param event - The popstate event.
+   */
+  private handlePopState = async (event: PopStateEvent) => {
+    if (this.loginUiState === LoginUiState.MASTER_PASSWORD_ENTRY) {
+      // Prevent default navigation when the browser's back button is clicked
+      event.preventDefault();
+      // Transition back to email entry state
+      void this.toggleLoginUiState(LoginUiState.EMAIL_ENTRY);
+    } else if (this.loginUiState === LoginUiState.EMAIL_ENTRY) {
+      // Prevent default navigation when the browser's forward button is clicked
+      event.preventDefault();
+      // Continue to the master password entry state
+      await this.continue();
+    }
+  };
+
+  /**
+   * Validates the email and displays any validation errors.
+   * @returns true if the email is valid, false otherwise.
+   */
+  protected validateEmail(): boolean {
+    this.formGroup.controls.email.markAsTouched();
+    this.formGroup.controls.email.updateValueAndValidity({ onlySelf: true, emitEvent: true });
+    return this.formGroup.controls.email.valid;
+  }
+
+  /**
+   * Persist the entered email address and the user's choice to remember it to state.
+   */
+  private async persistEmailIfValid(): Promise<void> {
+    if (this.formGroup.controls.email.valid) {
+      const email = this.formGroup.value.email;
+      const rememberEmail = this.formGroup.value.rememberEmail ?? false;
+      if (!email) {
+        return;
+      }
+      await this.loginEmailService.setLoginEmail(email);
+      await this.loginEmailService.setRememberedEmailChoice(email, rememberEmail);
+    } else {
+      await this.loginEmailService.clearLoginEmail();
+      await this.loginEmailService.clearRememberedEmail();
+    }
+  }
+
+  /**
+   * Set the email value from the input field and persists to state if valid.
+   * We only update the form controls onSubmit instead of onBlur because we don't want to show validation errors until
+   * the user submits. This is because currently our validation errors are shown below the input fields, and
+   * displaying them causes the screen to "jump".
+   * @param event The event object from the input field.
+   */
+  async onEmailInput(event: Event) {
+    const emailInput = event.target as HTMLInputElement;
+    this.formGroup.controls.email.setValue(emailInput.value);
+    await this.persistEmailIfValid();
+  }
+
+  /**
+   * Set the Remember Email value from the input field and persists to state if valid.
+   * We only update the form controls onSubmit instead of onBlur because we don't want to show validation errors until
+   * the user submits. This is because currently our validation errors are shown below the input fields, and
+   * displaying them causes the screen to "jump".
+   * @param event The event object from the input field.
+   */
+  async onRememberEmailInput(event: Event) {
+    const rememberEmailInput = event.target as HTMLInputElement;
+    this.formGroup.controls.rememberEmail.setValue(rememberEmailInput.checked);
+    await this.persistEmailIfValid();
+  }
+}

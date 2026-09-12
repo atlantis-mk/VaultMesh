@@ -1,0 +1,24 @@
+schema: "2"
+id: "CHG-2026-045-bitwarden-browser-local-dependencies"
+title: "Bitwarden 浏览器实验副本依赖本地化"
+type: "dependency"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "将浏览器共享源码与独立构建依赖收纳到实验目录，保留许可边界且不接入生产工作区或桌面授权"
+requirements:
+  - "REQ-BROWSER-004"
+tests:
+  - "CT-BROWSER-PACKAGE-001"
+adrs: []
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-BROWSER-004"
+  - "docs/07-test-release-plan.md#GATE-4 Browser"
+  - "apps/bitwarden-browser/VAULTMESH-FORK.md"
+related_changes: []
+boundaries:
+  - "实验目录独立 npm 依赖和 GPL 共享源码；不更改生产依赖、桌面授权或发布身份"
+risks:
+  - "上游 SDK 安装可用性与构建兼容性待验证；保留上游集成的产物禁止安装和发布"
+next:
+  - "收纳共享库并调整路径，验证独立 Chrome/Firefox 编译及依赖隔离"

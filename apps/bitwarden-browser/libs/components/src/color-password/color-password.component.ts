@@ -1,0 +1,141 @@
+import {
+  Component,
+  computed,
+  ElementRef,
+  HostBinding,
+  HostListener,
+  inject,
+  input,
+} from "@angular/core";
+
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
+import { Utils } from "@bitwarden/common/platform/misc/utils";
+
+type CharacterType = "letter" | "emoji" | "special" | "number";
+
+/**
+ * The color password is used primarily in the Generator pages and in the Login type form. It includes
+ * the logic for displaying letters as `text-main`, numbers as `primary`, and special symbols as
+ * `danger`.
+ */
+// FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
+// eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
+@Component({
+  selector: "bit-color-password",
+  template: `@for (character of passwordCharArray(); track $index; let i = $index) {
+      <span
+        [class]="getCharacterClass(character)"
+        class="tw-font-mono"
+        data-password-character
+        [attr.aria-hidden]="showCount() ? null : 'true'"
+      >
+        <span>{{ character }}</span>
+        @if (showCount()) {
+          <span class="tw-whitespace-nowrap tw-text-xs tw-leading-5 tw-text-main">{{ i + 1 }}</span>
+        }
+      </span>
+    }
+    @if (!showCount()) {
+      <span class="tw-sr-only" data-password-accessible>
+        @for (char of accessiblePassword(); track $index) {
+          <code>{{ char }}</code>
+        }
+      </span>
+    }`,
+})
+export class ColorPasswordComponent {
+  readonly password = input<string>("");
+  readonly showCount = input<boolean>(false);
+
+  // Convert to an array to handle cases that strings have special characters, i.e.: emoji.
+  readonly passwordCharArray = computed(() => {
+    return Array.from(this.password() ?? "");
+  });
+
+  // Comma-separate the characters so screen readers announce each one individually
+  // instead of grouping adjacent letters into words. Literal spaces are swapped for
+  // a localized "space" token because screen readers collapse bare whitespace and
+  // would otherwise drop the character entirely from the announcement.
+  readonly accessiblePassword = computed(() =>
+    this.passwordCharArray().map((char) =>
+      char === " " ? this.i18nService.t("passwordAnnounceSpace") : char,
+    ),
+  );
+
+  private platformUtilsService = inject(PlatformUtilsService);
+  private elementRef = inject(ElementRef);
+  private i18nService = inject(I18nService);
+
+  characterStyles: Record<CharacterType, string[]> = {
+    emoji: [],
+    letter: ["tw-text-main"],
+    special: ["tw-text-danger"],
+    number: ["tw-text-primary-600"],
+  };
+
+  @HostBinding("class")
+  get classList() {
+    return ["tw-min-w-0", "tw-whitespace-pre-wrap", "tw-break-words"];
+  }
+
+  getCharacterClass(character: string) {
+    const charType = this.getCharacterType(character);
+    const charClass = this.characterStyles[charType];
+
+    if (this.showCount()) {
+      return charClass.concat([
+        "tw-inline-flex",
+        "tw-flex-col",
+        "tw-items-center",
+        "tw-w-7",
+        "tw-py-1",
+        "odd:tw-bg-secondary-100",
+        "even:tw-bg-background",
+      ]);
+    }
+
+    return charClass;
+  }
+
+  private getCharacterType(character: string): CharacterType {
+    if (character.match(Utils.regexpEmojiPresentation)) {
+      return "emoji";
+    }
+
+    if (character.match(/\d/)) {
+      return "number";
+    }
+
+    const specials = ["&", "<", ">", " "];
+    if (specials.includes(character) || character.match(/[^\w ]/)) {
+      return "special";
+    }
+
+    return "letter";
+  }
+
+  @HostListener("copy", ["$event"])
+  onCopy(event: ClipboardEvent) {
+    event.preventDefault();
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return;
+    }
+
+    const spanElements = this.elementRef.nativeElement.querySelectorAll(
+      "span[data-password-character]",
+    );
+    let copiedText = "";
+
+    spanElements.forEach((span: HTMLElement, index: number) => {
+      if (selection.containsNode(span, true)) {
+        copiedText += this.passwordCharArray()[index];
+      }
+    });
+
+    if (copiedText) {
+      this.platformUtilsService.copyToClipboard(copiedText);
+    }
+  }
+}

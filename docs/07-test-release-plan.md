@@ -9,6 +9,7 @@
 5. Native host：frame、pairing key 和 RPC forwarding。
 6. 平台验收：macOS/Windows packaged app、browser registration、lock/clipboard/biometric、upgrade/rollback。
 7. Agent broker：MCP/IPC schema、pairing/session/policy、secret canary、adapter、lifecycle、Codex/OpenCode 与 packaged platform E2E。
+8. Android：host Rust runtime 单元测试、Android target JNI 编译、JVM/仪器化 lifecycle 与 Manifest contract、arm64 真机 create/unlock/lock/重启验收。
 
 ## 常用命令
 
@@ -51,9 +52,9 @@ pnpm typecheck
 | `CT-API-REQUEST-001` | Core canonical request/immutable live plan、none/Bearer/Basic/API-key/fixed protected Header 注入、single-use prepare/execute/cancel、profile/credential drift、GET/POST JSON/text、stable result 与 mutation `execution-unknown` tests |
 | `CT-API-REQUEST-SEC-001` | Tauri Rust WebPKI、public/private/loopback/metadata/link-local/mixed DNS 分类与固定、native-confirmation predicate、redirect/proxy/compression/header smuggling denial、timeout/quota/JSON depth、secret canary、lock/window/exit cleanup tests；无生产凭据本地 fixture |
 | `CT-SEC-*`、`CT-IMPORT-*`、`CT-SSH-SCAN-*` | Tauri Rust runtime/command tests；`CT-SEC-003` 解析全部产品窗口配置并拒绝 renderer 关闭内容保护 |
-| `CT-BROWSER-*` | Tauri shared policy/capability、Rust broker + extension non-secret preference tests |
-| `CT-BROWSER-PACKAGE-001` | WXT Chrome MV3/Firefox MV2 manifest 与 ZIP contract、固定双 identity、macOS/Windows browser-specific Native Messaging manifest/注册/卸载、Rust Host Chrome origin 与 Firefox manifest-path/Gecko-ID 启动参数拒绝测试、Review workflow 六资产同 source gate，以及两个 ZIP 的不可变 R2 路径与公网逐字节校验 |
-| `CT-AUTOFILL-*` | Tauri Rust broker tests + `apps/browser-extension/src/lib/*.test.ts` |
+| `CT-BROWSER-*` | Tauri shared policy/capability、Rust broker + extension non-secret preference tests；Bitwarden 实验副本的 `src/vaultmesh/*.spec.ts`、`src/background/vaultmesh-rpc.background.spec.ts` 和 `src/platform/services/vaultmesh-browser-rpc.service.spec.ts` 覆盖 callback transport、popup 来源、解锁/锁定 gesture、实际登录摘要投影、清理和迟到响应拒绝；`CT-ITEM-001` 同时覆盖 Login 编辑字段保留、特权详情短期草稿、确认删除、防重复写入和结果不确定时不重试 |
+| `CT-BROWSER-PACKAGE-001` | WXT Chrome MV3/Firefox MV2 manifest 与 ZIP contract、固定双 identity、macOS/Windows browser-specific Native Messaging manifest/注册/卸载、Rust Host Chrome origin 与 Firefox manifest-path/Gecko-ID 启动参数拒绝测试、Review workflow 六资产同 source gate，以及两个 ZIP 的不可变 R2 路径与公网逐字节校验；实验副本的 `apps/bitwarden-browser/scripts/local-dependencies.test.mjs` 与 `vaultmesh-branding.test.mjs` 单独验证依赖路径隔离和品牌，不替代发布验收 |
+| `CT-AUTOFILL-*` | Tauri Rust broker tests + `apps/browser-extension/src/lib/*.test.ts`；实验副本的 `apps/bitwarden-browser/src/vaultmesh/native-fill.spec.ts` 复用真实 Bitwarden collector/generator/executor 验证空值投影、受控 input、逐写入校验、重复与迟到响应；`apps/bitwarden-browser/scripts/vaultmesh-contract-parity.test.mjs` 验证隔离副本契约与共享 owner 一致；Rust native Login plan parser/authenticated broker tests 验证来源、handle、gesture、锁定和单次 assignment |
 | `CT-AUTHENTICATOR-*` | extension QR target/UI/protocol/background tests + Tauri Login update/autofill broker regression |
 | `CT-RECOVERY-CODES-*` | core Login payload/reauth/redaction + Tauri typed operation/clipboard/file parse（逐行与 Google 编号双栏）-confirm-delete/foreground-parenting + desktop/extension editor 逐次查看/复制复验和瞬时状态 contract tests |
 | `CT-PASSKEY-*` | Tauri Rust passkey service/presentation tests |
@@ -77,6 +78,10 @@ pnpm typecheck
 | `CT-BROWSER-001`（development startup） | `scripts/tauri-browser-dev.test.mjs` 的 key→ID→Host origin、专用 profile、debug Host→Tauri dev→WXT 顺序与双进程清理 contract |
 | `CT-FEEDBACK-*` | Tauri renderer 与 extension popup 的 Toaster 位置、toast 触发和 Alert 静态合约测试 |
 | `CT-TAURI-SOURCE-*` | Tauri owner path、workspace/lockfile、禁止 Electron/Native build reference 扫描；`CT-TAURI-SOURCE-002` 额外拒绝已退休的 C ABI header、artifact、export 与专属测试 |
+| `CT-ANDROID-RUNTIME-001` | `vault-android-runtime` 的 create 不覆盖、format 4、unlock/wrong-password、status、幂等 lock、原子写入失败不发布会话、drop 清理与进程重建保持锁定测试 |
+| `CT-ANDROID-JNI-001` | Android target JNI 固定符号与稳定非秘密结果、无 raw pointer/通用 router、Manifest 禁止 backup/cleartext/network 且 Activity 启用 `FLAG_SECURE`、Compose 后台锁定与密码状态清理 contract 测试；真机 instrumentation 在独立 cache 目录验证 create/wrong-password/unlock/lock、窗口保护 flag 与 `onStop` lock，不读取或清除用户 Vault |
+| `CT-ANDROID-JNI-002` | Android Login 固定 JNI operation、脱敏 summary、编辑保留未替换密码、删除确认、原子提交失败回滚的 Rust/contract/instrumentation 测试；只使用独立 cache Vault 和合成凭据 |
+| `CT-ANDROID-JNI-003` | Compose 对脱敏摘要本地搜索，Login 回收站固定 JNI operation、安全摘要、恢复、单项永久删除、清空确认，以及写盘失败回滚的 Rust/contract/instrumentation 测试 |
 | `CT-NATIVE-*` | 历史 Native Preview 证据只保留在 Rejected Change；当前源码不再执行 |
 | `AT-*` | packaged/manual user-visible acceptance；证据写入对应 Change/Release |
 | `AT-SERVICE-001`、`AT-SERVICE-AUTO-001` | macOS/Windows packaged Tauri 的网站/服务 CRUD、原 item 导航、锁定清理，以及约 1000 条记录的预览、批量应用、待确认、merge/split/move/ignore、重跑和 rollback |
@@ -95,6 +100,9 @@ pnpm typecheck
 | `AT-AGENT-MACOS-001`、`AT-AGENT-WINDOWS-001` | 签名 packaged app 的 socket/pipe ACL、shim identity、OS pairing proof、Codex/OpenCode、sleep/system lock、upgrade/uninstall 与 child cleanup |
 | `AT-NATIVE-MACOS-*` | 历史 Native Preview AT；不再作为当前产品验收入口 |
 | `AT-LAN-PAIRING-001` | packaged macOS↔macOS、Windows↔Windows、macOS↔Windows 同一 LAN 的显式发现、本机展示码→对端输入码→自动完成、错误码/尝试上限、重连、撤销、超时、系统锁定/睡眠与 firewall rejection 验收 |
+| `AT-ANDROID-001` | arm64 真机的 fresh create、正确/错误密码 unlock、显式和后台 lock、任务划除/进程终止/冷启动保持锁定、`FLAG_SECURE` 截屏与最近任务保护、应用数据 backup exclusion；交叉编译和模拟器不得替代真机验收 |
+| `AT-ANDROID-002` | arm64 真机使用合成数据完成 Login 新增、脱敏列表、空密码编辑保留、删除确认、锁定后拒绝和冷启动持久化；不得读取、覆盖或清除产品 application ID 的用户 Vault |
+| `AT-ANDROID-003` | arm64 真机使用合成数据验证 Login/回收站搜索、恢复、永久删除和清空确认；后台锁定后查询与回收站摘要必须清除，重新解锁从加密 Vault 刷新 |
 
 ## LAN 同步验收
 
@@ -127,7 +135,27 @@ pnpm typecheck
   在 packaged Windows 验证运行中主题切换和失败回退。
 - Tauri packaged app 在目标 OS 冒烟。
 
+### GATE-3A Android runtime
+
+- `cargo test -p vaultmesh-android-runtime` 和 `CT-ANDROID-JNI-001`、`CT-ANDROID-JNI-002`、`CT-ANDROID-JNI-003` contract test 通过。
+- Android arm64/x86_64 target 必须编译固定 JNI exports；首切片 Manifest 不得声明网络、外部存储、biometric、Autofill、Credential Manager 或后台服务权限。
+- Debug APK 可以在模拟器验证布局与基本 lifecycle，但 `FLAG_SECURE`、后台/系统锁定、任务划除、进程终止、backup exclusion 和 release JNI 必须由 `AT-ANDROID-001` 在 arm64 真机验收。
+- 未完成 `AT-ANDROID-001`、签名、依赖审查与独立发布记录前，Android 保持 Partial 且不得描述为已发布。
+
 ### GATE-4 Browser
+
+- `CT-AUTOFILL-001/002` 与 `CT-ITEM-002/004` 覆盖原生 card/identity 计划、字段限定格式化/select、主密码、捕获部分更新、歧义拒绝和取消/重放；`CT-BROWSER-003` 覆盖生成器插入及桌面受控复制的目标/授权/期限和清理。
+- `CT-BROWSER-001` 必须验证实验副本的可调用会话/工具入口不包含 Vault 备份/恢复、批量文件导入或 SSH 扫描导入。按 Scope Matrix 留在桌面的工作流不再作为该副本迁移完成的验收缺口；既有恢复码编辑辅助与桌面/原插件兼容测试保留。
+- 实验副本新增类型与工具必须覆盖 `CT-ITEM-002/003/004/005` 的完整编辑元数据、未读秘密保留、类型限定复制、trash/history 与永久删除区别；`CT-SEC-002` 和 `CT-BROWSER-003` 覆盖独立安全偏好、PIN/生物识别与四模式生成参数。`CT-PASSKEY-001` 覆盖原生事件入口、并存冲突、取消/锁定及 Login 归属删除；Firefox 仍无 proxy。
+- `CT-AUTHENTICATOR-001` 覆盖 QR 可见性、受支持 profile、frame 单次校验、候选选择/覆盖确认、迟到清理与不自动保存；`CT-EMAIL-002/003` 覆盖真实原生 planner/executor 的 4–8 位与分格 OTP、非空字段、candidate 过期/导航、无 code audit 和 90 秒有界监听。`CT-VAULT-001/002` 覆盖创建防覆盖、轮换确认、密码输入清理及不重放未知结果。
+- 实验性 Bitwarden 副本必须单独运行 native fill/capture/page/password-generation、独立 popup
+  rendering、RPC 生命周期、Login clipboard/trash/history/恢复码和上游 generator/collector/executor 回归；`CT-BROWSER-001` 验证
+  两个 Broker 的 HMAC 与 unlock owner 隔离，`CT-BROWSER-PACKAGE-001` 验证独立开发 ID、
+  Host 注册计划和无云服务启动入口。macOS 上执行 Rust 两个 Native Host binary 的 launch tests；
+  Windows 计划测试不能替代目标 OS 的 Host 启动与安装验收。
+- `CT-RECOVERY-CODES-001` 覆盖独立窗口精确绑定/重载撤销、45 秒及原草稿期限、普通失焦清理、
+  导入取消/迟到结果、原样保存与清理许可绑定、响应丢失不删除，以及桌面清理句柄的期限/单次/文件变化/撤销。
+  原生文件框期间窗口焦点与隐藏事件仍须由 `AT-RECOVERY-CODES-001` 在目标浏览器和 OS 验收。
 
 - Extension typecheck/test/build、Rust native-host test 和 browser parity 通过。
 - Chrome/Chromium MV3 与 Firefox MV2 ZIP 必须由同一 source/version 构建；ZIP CRC、内部 manifest、固定

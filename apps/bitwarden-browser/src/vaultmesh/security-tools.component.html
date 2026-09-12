@@ -1,0 +1,61 @@
+<section aria-label="插件安全与工具">
+  <h2>{{ locked ? '快速解锁' : '插件安全与工具' }}</h2>
+  <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="load()">刷新设置</button>
+  @if (notice()) { <p role="status">{{ notice() }}</p> }
+  @if (busy()) { <p role="status">正在处理…</p><button bitButton buttonType="secondary" type="button" (click)="clear()">取消等待</button> }
+  @if (pinStatus(); as status) {
+    <p>插件 PIN：{{ status.enabled ? status.locked ? '已达到失败上限，请使用主密码' : '已启用' : '未启用' }}；剩余尝试 {{ status.remainingAttempts }} 次。</p>
+    @if (!locked || status.enabled && !status.locked) {
+      <form (ngSubmit)="locked ? unlockPin() : savePin()" autocomplete="off">
+        <bit-form-field><bit-label>{{ locked ? '输入插件 PIN' : '设置六位 PIN' }}</bit-label><input bitInput type="password" name="pluginPin" inputmode="numeric" [(ngModel)]="pin" minlength="6" maxlength="6" pattern="[0-9]{6}" required autocomplete="off" /></bit-form-field>
+        @if (!locked) {
+          <bit-form-field><bit-label>确认 PIN</bit-label><input bitInput type="password" name="pluginPinConfirmation" [(ngModel)]="pinConfirmation" minlength="6" maxlength="6" required autocomplete="off" /></bit-form-field>
+          <bit-form-field><bit-label>失败次数上限（3–10）</bit-label><input bitInput type="number" name="pinFailureLimit" [(ngModel)]="failureLimit" min="3" max="10" required /></bit-form-field>
+        }
+        <button bitButton buttonType="primary" type="submit" [disabled]="busy() || pin.length !== 6 || (!locked && pin !== pinConfirmation)">{{ locked ? 'PIN 解锁' : '保存 PIN' }}</button>
+        @if (!locked && status.enabled) { <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="run('pin.disable')">禁用 PIN</button> }
+      </form>
+    }
+  }
+  @if (biometric(); as status) {
+    <p>生物识别：{{ status.available ? status.enabled ? '已启用' : '未启用' : '当前平台不可用' }}。此副本的授权与原插件独立。</p>
+    @if (status.available) {
+      @if (locked && status.enabled) { <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="run('biometric.unlock')">生物识别解锁</button> }
+      @if (!locked) { <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="run(status.enabled ? 'biometric.disable' : 'biometric.enable')">{{ status.enabled ? '禁用' : '启用' }}生物识别</button> }
+    }
+  }
+  @if (!locked) {
+    @if (settings(); as current) {
+      <form (ngSubmit)="saveSettings()" aria-label="安全策略">
+        <h3>插件策略（独立保存）</h3>
+        <label class="tw-block"><input type="checkbox" name="restartLock" [(ngModel)]="pluginPolicy.lockOnBrowserRestart" /> 浏览器重启锁定</label>
+        <label class="tw-block"><input type="checkbox" name="systemLock" [(ngModel)]="pluginPolicy.lockOnSystemLock" /> 浏览器检测到系统锁屏时主动锁定</label>
+        <p>关闭浏览器侧锁屏检测不会绕过桌面端强制的系统锁定。</p>
+        <label>空闲分钟 <select name="pluginIdle" [(ngModel)]="pluginPolicy.idleTimeoutMinutes">@for (minutes of [0, 1, 5, 10, 15, 30]; track minutes) { <option [ngValue]="minutes">{{ minutes === 0 ? '关闭' : minutes }}</option> }</select></label>
+        <h3>桌面特权安全设置</h3>
+        <p>以下设置由桌面拥有，不会在插件建立第二份持久化副本。</p>
+        <label class="tw-block"><input type="checkbox" name="lockOnBlur" [(ngModel)]="current.lockOnBlur" /> 失焦锁定</label>
+        <label class="tw-block"><input type="checkbox" name="lockOnSleep" [(ngModel)]="current.lockOnSleep" /> 睡眠锁定</label>
+        <label class="tw-block"><input type="checkbox" name="copySshPassword" [(ngModel)]="current.copySshPasswordOnLaunch" /> 启动 SSH 时复制密码</label>
+        <bit-form-field><bit-label>空闲锁定（毫秒，60000–1800000）</bit-label><input bitInput name="desktopIdle" type="number" [(ngModel)]="current.idleTimeoutMs" min="60000" max="1800000" /></bit-form-field>
+        <bit-form-field><bit-label>剪贴板清理（毫秒，10000–120000）</bit-label><input bitInput name="clipboardExpiry" type="number" [(ngModel)]="current.clipboardClearTimeoutMs" min="10000" max="120000" /></bit-form-field>
+        <button bitButton buttonType="primary" type="submit" [disabled]="busy()">保存安全设置</button>
+      </form>
+    }
+    <div class="tw-flex tw-flex-wrap tw-gap-2 tw-my-4">
+      <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="run('password.health')">密码健康</button>
+      <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="run('browser.fill.history')">填充记录</button>
+      <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="run('vault.unlock-history')">解锁记录</button>
+    </div>
+  }
+  @if (health(); as report) { <p>健康评分 {{ report.score }}；弱密码 {{ report.weakItemIds.length }}，重复 {{ report.reusedItemIds.length }}，过旧 {{ report.oldItemIds.length }}。</p> }
+  @for (event of fillHistory(); track event.eventId) { <p>{{ timestamp(event.occurredAt) }} · {{ event.itemTitle }} · {{ event.origin }} · {{ event.fieldCount }} 个字段</p> }
+  @for (event of unlockHistory(); track event.eventId) { <p>{{ timestamp(event.occurredAt) }} · {{ event.source }}</p> }
+  @if (paired() && !confirmingRevoke()) { <button bitButton buttonType="danger" type="button" [disabled]="busy()" (click)="requestRevoke()">撤销此开发副本配对</button> }
+  @if (confirmingRevoke()) {
+    <section role="alertdialog" aria-label="确认撤销开发副本配对"><p>撤销后需重新配对，不会撤销原插件的独立身份。</p>
+      <button bitButton buttonType="danger" type="button" [disabled]="busy()" (click)="run('browser.pairing.revoke')">确认撤销</button>
+      <button bitButton buttonType="secondary" type="button" (click)="clear()">取消</button>
+    </section>
+  }
+</section>

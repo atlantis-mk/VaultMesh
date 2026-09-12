@@ -1,0 +1,767 @@
+// FIXME: Update this file to be type safe and remove this and next line
+// @ts-strict-ignore
+import { CommonModule } from "@angular/common";
+import {
+  AfterViewInit,
+  Component,
+  EventEmitter,
+  inject,
+  Input,
+  OnDestroy,
+  OnInit,
+  Output,
+  output,
+  ViewChild,
+} from "@angular/core";
+import { toObservable } from "@angular/core/rxjs-interop";
+import { FormBuilder, ReactiveFormsModule, Validators } from "@angular/forms";
+import {
+  combineLatest,
+  firstValueFrom,
+  map,
+  Observable,
+  shareReplay,
+  startWith,
+  Subject,
+  switchMap,
+  takeUntil,
+  tap,
+} from "rxjs";
+
+// This import has been flagged as unallowed for this class. It may be involved in a circular dependency loop.
+// eslint-disable-next-line no-restricted-imports
+import { CollectionService } from "@bitwarden/admin-console/common";
+import { JslibModule } from "@bitwarden/angular/jslib.module";
+import {
+  getOrganizationById,
+  OrganizationService,
+} from "@bitwarden/common/admin-console/abstractions/organization/organization.service.abstraction";
+import { OrganizationUserStatusType } from "@bitwarden/common/admin-console/enums";
+import {
+  CollectionView,
+  CollectionTypes,
+} from "@bitwarden/common/admin-console/models/collections";
+import { Organization } from "@bitwarden/common/admin-console/models/domain/organization";
+import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { getUserId } from "@bitwarden/common/auth/services/account.service";
+import { ProductTierType } from "@bitwarden/common/billing/enums";
+import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
+import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { CipherId, CollectionId, OrganizationId, UserId } from "@bitwarden/common/types/guid";
+import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
+import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
+import { UnionOfValues } from "@bitwarden/common/vault/types/union-of-values";
+import {
+  AsyncActionsModule,
+  BitSubmitDirective,
+  BitwardenIcon,
+  ButtonComponent,
+  ButtonModule,
+  DialogModule,
+  FormFieldModule,
+  IconTileOptions,
+  MultiSelectModule,
+  SelectItemView,
+  SelectModule,
+  ToastService,
+} from "@bitwarden/components";
+
+import { orgIconTile } from "../models/vault-icon-tile";
+import { Vfo1I18nPipe } from "../pipes/vfo1-i18n.pipe";
+import { Vfo1TerminologyService } from "../services/vfo1-terminology.service";
+
+export interface CollectionAssignmentParams {
+  organizationId: OrganizationId;
+
+  /**
+   * The ciphers to be assigned to the collections selected in the dialog.
+   */
+  ciphers: CipherView[];
+
+  /**
+   * The collections available to assign the ciphers to.
+   */
+  availableCollections: CollectionView[];
+
+  /**
+   * The currently filtered collection. Selected by default. If the user deselects it in the dialog then it will be
+   * removed from the ciphers upon submission.
+   */
+  activeCollection?: CollectionView;
+
+  /**
+   * Flag indicating if the user is performing the action as an admin on a SINGLE cipher. When true,
+   * the `/admin` endpoint will be used to update the cipher's collections. Required when updating
+   * ciphers an Admin does not normally have access to or for Unassigned ciphers.
+   *
+   * The bulk method already handles admin actions internally.
+   */
+  isSingleCipherAdmin?: boolean;
+}
+
+export const CollectionAssignmentResult = {
+  Saved: "saved",
+  Canceled: "canceled",
+} as const;
+
+export type CollectionAssignmentResult = UnionOfValues<typeof CollectionAssignmentResult>;
+
+const MY_VAULT_ID = "MyVault";
+
+// Sentinel substituted for the organization name so a fully translated sentence can be split
+// around it, letting the org name be italicized in the template without embedding markup in (or
+// splitting up) the translated string.
+const ORG_NAME_TOKEN = "\uFFFC";
+
+// FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
+// eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
+@Component({
+  selector: "assign-collections",
+  templateUrl: "assign-collections.component.html",
+  imports: [
+    CommonModule,
+    JslibModule,
+    FormFieldModule,
+    AsyncActionsModule,
+    MultiSelectModule,
+    SelectModule,
+    ReactiveFormsModule,
+    ButtonModule,
+    DialogModule,
+    Vfo1I18nPipe,
+  ],
+})
+export class AssignCollectionsComponent implements OnInit, OnDestroy, AfterViewInit {
+  protected vfo1TerminologyService = inject(Vfo1TerminologyService);
+
+  /**
+   * The terminology flag resolves asynchronously, so track it as a stream rather than reading it
+   * once. The submit button label is re-emitted whenever it changes (see `ngOnInit`), keeping the
+   * host's button in step with the reactively-rendered dialog body.
+   */
+  private vfo1Enabled$ = toObservable(this.vfo1TerminologyService.enabled);
+
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @ViewChild(BitSubmitDirective)
+  private bitSubmit: BitSubmitDirective;
+
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() params: CollectionAssignmentParams;
+
+  /**
+   * Submit button instance that will be disabled or marked as loading when the form is submitting.
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() submitBtn?: ButtonComponent;
+
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
+  @Output()
+  editableItemCountChange = new EventEmitter<number>();
+
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
+  @Output() onCollectionAssign = new EventEmitter<CollectionAssignmentResult>();
+
+  /**
+   * Emits the text that the host's submit button should display. The button lives in the host
+   * template (as projected content), so the resolved label is pushed out from here where the
+   * relevant state (`showOrgSelector`, terminology flag) is known.
+   */
+  readonly submitButtonTextChange = output<string>();
+
+  formGroup = this.formBuilder.group({
+    selectedOrg: [null],
+    collections: [<SelectItemView[]>[], [Validators.required]],
+  });
+
+  /**
+   * Collections that are already assigned to the cipher and are read-only. These cannot be removed.
+   * @protected
+   */
+  protected readOnlyCollectionNames: string[] = [];
+
+  protected totalItemCount: number;
+  protected editableItemCount: number;
+  protected readonlyItemCount: number;
+  protected personalItemsCount: number;
+  protected availableCollections: SelectItemView[] = [];
+  protected orgName: string;
+  protected showOrgSelector: boolean = false;
+
+  /**
+   * Icon tiles per organization id, colored to match the vault's tile in the side nav, item table,
+   * and item form. Rebuilt whenever the org list emits so each template binding gets a stable
+   * object — `bit-select` maps its options in an `afterRenderEffect` that re-runs on a changed
+   * reference, so a fresh tile per change detection would loop.
+   */
+  protected orgIconTiles = new Map<string, IconTileOptions>();
+
+  protected organizations$: Observable<Organization[]> = this.accountService.activeAccount$.pipe(
+    switchMap((account) =>
+      this.organizationService.organizations$(account?.id).pipe(
+        map((orgs) =>
+          orgs
+            .filter((o) => o.enabled && o.status === OrganizationUserStatusType.Confirmed)
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        ),
+        tap((orgs) => {
+          this.orgIconTiles = new Map(
+            orgs.map((org) => [org.id, orgIconTile(org.productTierType)]),
+          );
+
+          if (orgs.length > 0 && this.showOrgSelector) {
+            // Using setTimeout to defer the patchValue call until the next event loop cycle
+            setTimeout(() => {
+              this.formGroup.patchValue({ selectedOrg: orgs[0].id });
+              this.setFormValidators();
+
+              // Disable the org selector if there is only one organization
+              if (orgs.length === 1) {
+                this.formGroup.controls.selectedOrg.disable();
+              }
+            });
+          }
+        }),
+      ),
+    ),
+  );
+
+  protected getOrgIcon = (org: Organization): BitwardenIcon => {
+    switch (org.productTierType) {
+      case ProductTierType.Free:
+      case ProductTierType.Families:
+        return "bwi-family";
+      case ProductTierType.Teams:
+      case ProductTierType.Enterprise:
+      case ProductTierType.TeamsStarter:
+      default:
+        return "bwi-business";
+    }
+  };
+
+  protected transferWarningText = (orgName: string, itemsCount: number) => {
+    const haveOrgName = !!orgName;
+
+    if (itemsCount > 1 && haveOrgName) {
+      return this.i18nService.t("personalItemsWithOrgTransferWarningPlural", itemsCount, orgName);
+    }
+    if (itemsCount > 1 && !haveOrgName) {
+      return this.vfo1TerminologyService.enabled()
+        ? this.i18nService.t("personalItemsVaultTransferWarningPlural", itemsCount)
+        : this.i18nService.t("personalItemsTransferWarningPlural", itemsCount);
+    }
+    if (itemsCount === 1 && haveOrgName) {
+      return this.i18nService.t("personalItemWithOrgTransferWarningSingular", orgName);
+    }
+    return this.vfo1TerminologyService.enabled()
+      ? this.i18nService.t("personalItemVaultTransferWarningSingular")
+      : this.i18nService.t("personalItemTransferWarningSingular");
+  };
+
+  /**
+   * Breaks the transfer-warning sentence into display segments so the organization name can be
+   * italicized. A sentinel is substituted for the org name and the fully translated sentence is
+   * split around it, so word order stays correct in every language and the org name is always
+   * rendered as plain text rather than markup.
+   */
+  protected transferWarningSegments = (orgName: string, itemsCount: number) => {
+    if (!orgName) {
+      return { italicize: false as const, text: this.transferWarningText(orgName, itemsCount) };
+    }
+
+    const sentence =
+      itemsCount > 1
+        ? this.i18nService.t(
+            "personalItemsWithOrgTransferWarningPlural",
+            itemsCount,
+            ORG_NAME_TOKEN,
+          )
+        : this.i18nService.t("personalItemWithOrgTransferWarningSingular", ORG_NAME_TOKEN);
+
+    const [before, after = ""] = sentence.split(ORG_NAME_TOKEN);
+    return { italicize: true as const, before, orgName, after };
+  };
+
+  private editableItems: CipherView[] = [];
+  // Get the selected organization ID. If the user has not selected an organization from the form,
+  // fallback to use the organization ID from the params.
+  private get selectedOrgId(): OrganizationId {
+    return this.formGroup.getRawValue().selectedOrg || this.params.organizationId;
+  }
+  private destroy$ = new Subject<void>();
+
+  constructor(
+    private cipherService: CipherService,
+    private i18nService: I18nService,
+    private organizationService: OrganizationService,
+    private collectionService: CollectionService,
+    private formBuilder: FormBuilder,
+    private toastService: ToastService,
+    private accountService: AccountService,
+    private configService: ConfigService,
+  ) {}
+
+  async ngOnInit() {
+    const onlyPersonalItems = this.params.ciphers.every((c) => c.organizationId == null);
+
+    if (this.selectedOrgId === MY_VAULT_ID || onlyPersonalItems) {
+      this.showOrgSelector = true;
+    }
+
+    await this.initializeItems(this.selectedOrgId);
+
+    // Re-emit the label whenever the terminology flag resolves so it can't be snapshotted stale.
+    this.vfo1Enabled$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(() => this.submitButtonTextChange.emit(this.submitButtonText));
+
+    if (this.selectedOrgId && this.selectedOrgId !== MY_VAULT_ID) {
+      await this.handleOrganizationCiphers(this.selectedOrgId);
+    }
+
+    this.setupFormSubscriptions();
+  }
+
+  ngAfterViewInit(): void {
+    this.bitSubmit.loading$.pipe(takeUntil(this.destroy$)).subscribe((loading) => {
+      if (!this.submitBtn) {
+        return;
+      }
+
+      this.submitBtn.loading.set(loading);
+    });
+
+    // Disable the submit button while the form is submitting or invalid.
+    combineLatest([
+      this.bitSubmit.disabled$,
+      this.formGroup.statusChanges.pipe(startWith(this.formGroup.status)),
+    ])
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(([disabled, status]) => {
+        if (!this.submitBtn) {
+          return;
+        }
+
+        this.submitBtn.disabled.set(disabled || status === "INVALID");
+      });
+  }
+
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
+  selectCollections(items: SelectItemView[]) {
+    const currentCollections = this.formGroup.controls.collections.value as SelectItemView[];
+    const updatedCollections = [...currentCollections, ...items].sort(this.sortItems);
+    this.formGroup.patchValue({ collections: updatedCollections });
+  }
+
+  /**
+   * The label shown on the host's submit button. When the feature flag is off, falls back to "assign" wording.
+   * When at least 1 personal item would be transferred, use transferAndAdd, otherwise use add.
+   */
+  private get submitButtonText(): string {
+    if (this.vfo1TerminologyService.enabled()) {
+      return this.i18nService.t(this.personalItemsCount > 0 ? "transferAndAdd" : "add");
+    }
+
+    return this.i18nService.t("assign");
+  }
+
+  submit = async () => {
+    this.formGroup.markAllAsTouched();
+
+    if (this.formGroup.invalid) {
+      return;
+    }
+
+    // Retrieve ciphers that belong to an organization
+    const cipherIds = this.editableItems
+      .filter((i) => i.organizationId)
+      .map((i) => i.id as CipherId);
+
+    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+
+    // Move personal items to the organization
+    if (this.personalItemsCount > 0) {
+      await this.moveToOrganization(
+        this.selectedOrgId,
+        this.params.ciphers.filter((c) => c.organizationId == null),
+        this.formGroup.controls.collections.value.map((i) => i.id as CollectionId),
+        activeUserId,
+      );
+    }
+
+    if (cipherIds.length > 0) {
+      const isSingleOrgCipher = cipherIds.length === 1 && this.personalItemsCount === 0;
+
+      // Update assigned collections for single org cipher or bulk update collections for multiple org ciphers
+      await (isSingleOrgCipher
+        ? this.updateAssignedCollections(this.editableItems[0], activeUserId)
+        : this.bulkUpdateCollections(cipherIds, activeUserId));
+
+      const batchBarEnabled = await this.configService.getFeatureFlag(
+        FeatureFlag.PM37785_VaultBatchBar,
+      );
+      const selectedCollectionsCount = this.formGroup.controls.collections.value.length;
+      const ciphersCount = this.params.ciphers.length;
+      let assignedMessageKey: string;
+
+      if (batchBarEnabled) {
+        assignedMessageKey = this.collectionAssignmentToastKey(
+          ciphersCount,
+          selectedCollectionsCount,
+        );
+      } else {
+        assignedMessageKey = this.vfo1TerminologyService.enabled()
+          ? "successfullyAddedSharedFolders"
+          : "successfullyAssignedCollections";
+      }
+      const assignedMessage = this.i18nService.t(assignedMessageKey);
+
+      this.toastService.showToast({
+        variant: "success",
+        title: null,
+        message: assignedMessage,
+      });
+    }
+
+    this.onCollectionAssign.emit(CollectionAssignmentResult.Saved);
+  };
+
+  private sortItems = (a: SelectItemView, b: SelectItemView) =>
+    this.i18nService.collator.compare(a.labelName, b.labelName);
+
+  private async handleOrganizationCiphers(organizationId: OrganizationId) {
+    // If no ciphers are editable, cancel the operation
+    if (this.editableItemCount == 0) {
+      this.toastService.showToast({
+        variant: "error",
+        title: this.i18nService.t("errorOccurred"),
+        message: this.i18nService.t("nothingSelected"),
+      });
+      this.onCollectionAssign.emit(CollectionAssignmentResult.Canceled);
+
+      return;
+    }
+
+    const userId = await firstValueFrom(getUserId(this.accountService.activeAccount$));
+    const org = await firstValueFrom(
+      this.organizationService.organizations$(userId).pipe(getOrganizationById(organizationId)),
+    );
+
+    await this.setReadOnlyCollectionNames();
+
+    const canAccessDefaultCollection = this.canAccessDefaultCollection(
+      this.params.availableCollections,
+    );
+
+    this.availableCollections = this.params.availableCollections
+      .filter((collection) => {
+        if (canAccessDefaultCollection) {
+          return collection.canEditItems(org);
+        }
+
+        return (
+          collection.canEditItems(org) && collection.type !== CollectionTypes.DefaultUserCollection
+        );
+      })
+      .map((c) => ({
+        icon: this.vfo1TerminologyService.iconClass(
+          c.type === CollectionTypes.DefaultUserCollection ? "bwi-user" : "bwi-collection-shared",
+        ),
+        id: c.id,
+        labelName: c.name,
+        listName: c.name,
+      }));
+
+    // Select assigned collections for a single cipher.
+    this.selectCollectionsAssignedToSingleCipher();
+
+    // If the active collection is set, select it by default
+    if (this.params.activeCollection) {
+      this.selectCollections([
+        {
+          icon: this.vfo1TerminologyService.iconClass("bwi-collection-shared"),
+          id: this.params.activeCollection.id,
+          labelName: this.params.activeCollection.name,
+          listName: this.params.activeCollection.name,
+        },
+      ]);
+    }
+  }
+
+  /**
+   * Selects the collections that are assigned to a single cipher,
+   * excluding the active collection.
+   */
+  private selectCollectionsAssignedToSingleCipher() {
+    if (this.params.ciphers.length !== 1) {
+      return;
+    }
+
+    const assignedCollectionIds = this.params.ciphers[0].collectionIds;
+
+    // Filter the available collections to select only those that are associated with the ciphers, excluding the active collection
+    const assignedCollections = this.availableCollections
+      .filter(
+        (collection) =>
+          assignedCollectionIds.includes(collection.id) &&
+          collection.id !== this.params.activeCollection?.id,
+      )
+      .map((collection) => ({
+        icon: collection.icon,
+        id: collection.id,
+        labelName: collection.labelName,
+        listName: collection.listName,
+      }));
+
+    if (assignedCollections.length > 0) {
+      this.selectCollections(assignedCollections);
+    }
+  }
+
+  private async initializeItems(organizationId: OrganizationId) {
+    this.totalItemCount = this.params.ciphers.length;
+
+    // If organizationId is not present or organizationId is MyVault, then all ciphers are considered personal items
+    if (!organizationId || organizationId === MY_VAULT_ID) {
+      this.editableItems = this.params.ciphers;
+      this.editableItemCount = this.params.ciphers.length;
+      this.personalItemsCount = this.params.ciphers.length;
+      // Using setTimeout to defer the call until the next event loop cycle
+      setTimeout(() => this.editableItemCountChange.emit(this.editableItemCount));
+      return;
+    }
+
+    const userId = await firstValueFrom(getUserId(this.accountService.activeAccount$));
+    const org = await firstValueFrom(
+      this.organizationService.organizations$(userId).pipe(getOrganizationById(organizationId)),
+    );
+    this.orgName = org.name;
+
+    this.editableItems = org.canEditAllCiphers
+      ? this.params.ciphers
+      : this.params.ciphers.filter((c) => c.edit);
+
+    this.editableItemCount = this.editableItems.length;
+    // TODO: https://bitwarden.atlassian.net/browse/PM-9307,
+    // clean up editableItemCountChange when the org vault is updated to filter editable ciphers
+    this.editableItemCountChange.emit(this.editableItemCount);
+    this.personalItemsCount = this.params.ciphers.filter((c) => c.organizationId == null).length;
+    this.readonlyItemCount = this.totalItemCount - this.editableItemCount;
+  }
+
+  private setFormValidators() {
+    const selectedOrgControl = this.formGroup.get("selectedOrg");
+    selectedOrgControl?.setValidators([Validators.required]);
+    selectedOrgControl?.updateValueAndValidity();
+  }
+
+  /**
+   * Sets up form subscriptions for selected organizations.
+   */
+  private setupFormSubscriptions() {
+    // Listen to changes in selected organization and update collections
+    this.formGroup.controls.selectedOrg.valueChanges
+      .pipe(
+        tap(() => {
+          this.formGroup.controls.collections.setValue([], { emitEvent: false });
+        }),
+        switchMap((orgId) => {
+          return this.getCollectionsForOrganization(orgId as OrganizationId);
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe((collections) => {
+        this.availableCollections = collections.map((c) => ({
+          icon: this.vfo1TerminologyService.iconClass(
+            c.type === CollectionTypes.DefaultUserCollection ? "bwi-user" : "bwi-collection-shared",
+          ),
+          id: c.id,
+          labelName: c.name,
+          listName: c.name,
+        }));
+      });
+  }
+
+  /**
+   * Retrieves the collections for the organization with the given ID.
+   * @param orgId
+   * @returns An observable of the collections for the organization.
+   */
+  private getCollectionsForOrganization(orgId: OrganizationId): Observable<CollectionView[]> {
+    return this.accountService.activeAccount$.pipe(
+      getUserId,
+      switchMap((userId) =>
+        combineLatest([
+          this.collectionService.decryptedCollections$(userId),
+          this.organizationService.organizations$(userId),
+        ]),
+      ),
+      map(([collections, organizations]) => {
+        const org = organizations.find((o) => o.id === orgId);
+        this.orgName = org.name;
+
+        const orgCollections = collections.filter((c) => c.organizationId === orgId);
+
+        const canAccessDefaultCollection = this.canAccessDefaultCollection(collections);
+
+        return orgCollections.filter((c) => {
+          if (canAccessDefaultCollection) {
+            return !c.readOnly;
+          }
+
+          return !c.readOnly && c.type !== CollectionTypes.DefaultUserCollection;
+        });
+      }),
+      shareReplay({ refCount: true, bufferSize: 1 }),
+    );
+  }
+
+  private collectionAssignmentToastKey(ciphersCount: number, collectionsCount: number): string {
+    if (ciphersCount === 1) {
+      return collectionsCount === 1
+        ? this.vfo1TerminologyService.enabled()
+          ? "itemAddedToSharedFolder"
+          : "itemMovedToCollection"
+        : this.vfo1TerminologyService.enabled()
+          ? "itemAddedToSharedFolders"
+          : "itemMovedToCollections";
+    }
+    return collectionsCount === 1
+      ? this.vfo1TerminologyService.enabled()
+        ? "itemsAddedToSharedFolder"
+        : "itemsMovedToCollection"
+      : this.vfo1TerminologyService.enabled()
+        ? "itemsAddedToSharedFolders"
+        : "itemsMovedToCollections";
+  }
+
+  private async moveToOrganization(
+    organizationId: OrganizationId,
+    shareableCiphers: CipherView[],
+    selectedCollectionIds: CollectionId[],
+    userId: UserId,
+  ) {
+    await this.cipherService.shareManyWithServer(
+      shareableCiphers,
+      organizationId,
+      selectedCollectionIds,
+      userId,
+    );
+
+    const batchBarEnabled = await this.configService.getFeatureFlag(
+      FeatureFlag.PM37785_VaultBatchBar,
+    );
+
+    if (batchBarEnabled) {
+      this.toastService.showToast({
+        variant: "success",
+        title: null,
+        message: this.i18nService.t(
+          this.collectionAssignmentToastKey(shareableCiphers.length, selectedCollectionIds.length),
+        ),
+      });
+    } else {
+      this.toastService.showToast({
+        variant: "success",
+        title: null,
+        message: this.i18nService.t(
+          shareableCiphers.length === 1 ? "itemMovedToOrg" : "itemsMovedToOrg",
+          this.orgName ??
+            (this.vfo1TerminologyService.enabled()
+              ? this.i18nService.t("vault")
+              : this.i18nService.t("organization")),
+        ),
+      });
+    }
+  }
+
+  private async bulkUpdateCollections(cipherIds: CipherId[], userId: UserId) {
+    if (this.formGroup.controls.collections.value.length > 0) {
+      await this.cipherService.bulkUpdateCollectionsWithServer(
+        this.selectedOrgId,
+        userId,
+        cipherIds,
+        this.formGroup.controls.collections.value.map((i) => i.id as CollectionId),
+        false,
+      );
+    }
+
+    if (
+      this.params.activeCollection != null &&
+      this.formGroup.controls.collections.value.find(
+        (c) => c.id === this.params.activeCollection.id,
+      ) == null
+    ) {
+      await this.cipherService.bulkUpdateCollectionsWithServer(
+        this.selectedOrgId,
+        userId,
+        cipherIds,
+        [this.params.activeCollection.id as CollectionId],
+        true,
+      );
+    }
+  }
+
+  private async updateAssignedCollections(cipherView: CipherView, userId: UserId) {
+    const { collections } = this.formGroup.getRawValue();
+    cipherView.collectionIds = collections.map((i) => i.id as CollectionId);
+    const { cipher } = await this.cipherService.encrypt(cipherView, userId);
+    if (this.params.isSingleCipherAdmin) {
+      await this.cipherService.saveCollectionsWithServerAdmin(cipher);
+    } else {
+      await this.cipherService.saveCollectionsWithServer(cipher, userId);
+    }
+  }
+
+  /**
+   * Only display collections that are read-only and are assigned to the ciphers.
+   */
+  private async setReadOnlyCollectionNames() {
+    const { availableCollections, ciphers } = this.params;
+
+    const organization = await firstValueFrom(
+      this.organizations$.pipe(map((orgs) => orgs.find((o) => o.id === this.selectedOrgId))),
+    );
+
+    this.readOnlyCollectionNames = availableCollections
+      .filter((c) => {
+        return (
+          c.readOnly &&
+          ciphers.some((cipher) => cipher.collectionIds.includes(c.id)) &&
+          !c.canEditItems(organization)
+        );
+      })
+      .map((c) => c.name);
+  }
+
+  /**
+   * Determines if the ciphers to be assigned can be assigned to the Default Collection.
+   * When false, the Default Collections should be excluded from the list of available collections.
+   */
+  private canAccessDefaultCollection(collections: CollectionView[]): boolean {
+    const collectionsObject = Object.fromEntries(collections.map((c) => [c.id, c]));
+
+    const allCiphersUnassignedOrInDefault = this.params.ciphers.every(
+      (cipher) =>
+        !cipher.collectionIds.length ||
+        cipher.collectionIds.some(
+          (cId) => collectionsObject[cId]?.type === CollectionTypes.DefaultUserCollection,
+        ),
+    );
+
+    // When all ciphers are either:
+    // - unassigned
+    // - already in a Default Collection
+    // then the Default Collection can be shown.
+    return allCiphersUnassignedOrInDefault;
+  }
+}

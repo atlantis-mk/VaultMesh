@@ -1,0 +1,64 @@
+@if (!loading) {
+  <vault-new-item-nudge [configType]="config.cipherType"> </vault-new-item-nudge>
+}
+<form [id]="formId" [formGroup]="cipherForm" [bitSubmit]="submit">
+  @if (!loading) {
+    <!-- TODO: Should we show a loading spinner here? Or emit a ready event for the container to handle loading state -->
+    <vault-item-details-section
+      [config]="config"
+      [originalCipherView]="originalCipherView"
+    ></vault-item-details-section>
+
+    @if (config.cipherType === CipherType.Login) {
+      <vault-login-details-section></vault-login-details-section>
+    }
+
+    @if (config.cipherType === CipherType.Identity) {
+      <vault-identity-section
+        [disabled]="config.mode === 'partial-edit'"
+        [originalCipherView]="originalCipherView"
+      ></vault-identity-section>
+    }
+
+    @if (config.cipherType === CipherType.Card) {
+      <vault-card-details-section
+        [originalCipherView]="originalCipherView"
+        [disabled]="config.mode === 'partial-edit'"
+      ></vault-card-details-section>
+    }
+
+    @if (config.cipherType === CipherType.SshKey) {
+      <vault-sshkey-section [originalCipherView]="originalCipherView"></vault-sshkey-section>
+    }
+
+    @if (config.cipherType === CipherType.BankAccount) {
+      <vault-bank-account-section
+        [disabled]="config.mode === 'partial-edit'"
+        [originalCipherView]="originalCipherView"
+      ></vault-bank-account-section>
+    }
+
+    @if (config.cipherType === CipherType.DriversLicense) {
+      <vault-drivers-license-section
+        [disabled]="config.mode === 'partial-edit'"
+        [originalCipherView]="originalCipherView"
+      ></vault-drivers-license-section>
+    }
+
+    @if (config.cipherType === CipherType.Passport) {
+      <vault-passport-section
+        [disabled]="config.mode === 'partial-edit'"
+        [originalCipherView]="originalCipherView"
+      ></vault-passport-section>
+    }
+
+    <vault-additional-options-section
+      [disableSectionMargin]="config.mode !== 'edit'"
+    ></vault-additional-options-section>
+
+    <!-- Attachments are only available for existing ciphers -->
+    @if (config.mode == "edit") {
+      <ng-content select="[slot=attachment-button]"></ng-content>
+    }
+  }
+</form>

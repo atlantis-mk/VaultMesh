@@ -1,0 +1,157 @@
+import { RouterTestingModule } from "@angular/router/testing";
+import { StoryObj, Meta, moduleMetadata, applicationConfig } from "@storybook/angular";
+
+import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { GlobalStateProvider } from "@bitwarden/state";
+import { enabledFlags } from "@bitwarden/storybook";
+
+import { IconButtonModule } from "../icon-button";
+import { LayoutComponent } from "../layout";
+import { positionFixedWrapperDecorator } from "../stories/storybook-decorators";
+import { I18nMockService } from "../utils/i18n-mock.service";
+import { StorybookGlobalStateProvider } from "../utils/state-mock";
+
+import { NavItemComponent } from "./nav-item.component";
+import { NavigationModule } from "./navigation.module";
+
+export default {
+  title: "Component Library/Nav/Nav Item",
+  component: NavItemComponent,
+  decorators: [
+    positionFixedWrapperDecorator(
+      (story) => `<bit-layout><bit-side-nav>${story}</bit-side-nav></bit-layout>`,
+    ),
+    moduleMetadata({
+      declarations: [],
+      imports: [RouterTestingModule, IconButtonModule, NavigationModule, LayoutComponent],
+      providers: [
+        {
+          provide: I18nService,
+          useFactory: () => {
+            return new I18nMockService({
+              submenu: "submenu",
+              toggleCollapse: "toggle collapse",
+              toggleSideNavigation: "Toggle side navigation",
+              skipToContent: "Skip to content",
+              loading: "Loading",
+              resizeSideNavigation: "Resize side navigation",
+              sideNavigation: "Side navigation",
+              skipLink: "Skip link",
+            });
+          },
+        },
+      ],
+    }),
+    applicationConfig({
+      providers: [
+        {
+          provide: GlobalStateProvider,
+          useClass: StorybookGlobalStateProvider,
+        },
+      ],
+    }),
+  ],
+  parameters: {
+    design: {
+      type: "figma",
+      url: "https://www.figma.com/design/Zt3YSeb6E6lebAffrNLa0h/Tailwind-Component-Library?node-id=16329-40145&t=b5tDKylm5sWm2yKo-4",
+    },
+    chromatic: { delay: 1000 },
+  },
+} as Meta;
+
+type Story = StoryObj<NavItemComponent>;
+
+export const Default: Story = {
+  render: (args) => ({
+    props: args,
+    template: /*html*/ `
+        <bit-nav-item [text]="text"  [route]="['']" [icon]="icon"></bit-nav-item>
+      `,
+  }),
+  args: {
+    text: "Hello World",
+    icon: "bwi-grid",
+  },
+};
+
+export const WithoutIcon: Story = {
+  ...Default,
+  args: {
+    text: "Hello World",
+  },
+};
+
+export const WithLongText: Story = {
+  ...Default,
+  args: {
+    text: "Hello World This Is a Cool Item",
+    icon: "bwi-grid",
+  },
+};
+
+export const WithoutRoute: Story = {
+  render: () => ({
+    template: /*html*/ `
+        <bit-nav-item text="Hello World" icon="bwi-collection-shared"></bit-nav-item>
+      `,
+  }),
+};
+
+export const WithChildButtons: Story = {
+  render: (args) => ({
+    props: args,
+    template: /*html*/ `
+      <bit-nav-item text="Hello World Very Cool World" [route]="['']" icon="bwi-collection-shared">
+        <button
+          type="button"
+          slot="end"
+          class="tw-ms-auto"
+          bitIconButton="bwi-pencil-square"
+          buttonType="side-nav"
+          size="xsmall"
+          label="Edit"
+        ></button>
+        <button
+          type="button"
+          slot="end"
+          class="tw-ms-auto"
+          bitIconButton="bwi-check"
+          buttonType="side-nav"
+          size="xsmall"
+          label="Confirm"
+        ></button>
+      </bit-nav-item>
+    `,
+  }),
+};
+
+export const MultipleItemsWithDivider: Story = {
+  render: (args) => ({
+    props: args,
+    template: /*html*/ `
+      <bit-nav-item text="Hello World"></bit-nav-item>
+      <bit-nav-item text="Hello World Long Text Long"></bit-nav-item>
+      <bit-nav-divider></bit-nav-divider>
+      <bit-nav-item text="Hello World" icon="bwi-collection-shared"></bit-nav-item>
+      <bit-nav-item text="Hello World" icon="bwi-collection-shared"></bit-nav-item>
+    `,
+  }),
+};
+
+export const ForceActiveStyles: Story = {
+  render: (args) => ({
+    props: args,
+    template: /*html*/ `
+      <bit-nav-item text="First Nav" icon="bwi-collection-shared"></bit-nav-item>
+      <bit-nav-item text="Active Nav" icon="bwi-collection-shared" [forceActiveStyles]="true"></bit-nav-item>
+      <bit-nav-item text="Third Nav" icon="bwi-collection-shared"></bit-nav-item>
+    `,
+  }),
+};
+
+export const ForceActiveStylesVfo1: Story = {
+  ...ForceActiveStyles,
+  globals: enabledFlags(FeatureFlag.VFO1Foundation),
+};

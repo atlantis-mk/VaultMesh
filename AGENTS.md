@@ -50,9 +50,10 @@ Direct change 是默认路径，覆盖能在同一任务完成的日常功能、
 
 ## 3. 产品范围
 
-- VaultMesh 是本地优先密码管理器；当前工作客户端是 Tauri 2 桌面端、Chromium MV3 扩展和 Firefox MV2 扩展。Firefox 不包含 Chromium-only Passkey proxy。
+- VaultMesh 是本地优先密码管理器；当前工作客户端是 Tauri 2 桌面端、Android Compose 客户端、Chromium MV3 扩展和 Firefox MV2 扩展。Android 由 Kotlin 平台服务通过窄 JNI runtime 复用 `vault-core`，不复用 Tauri desktop runtime；Firefox 不包含 Chromium-only Passkey proxy。
 - 当前范围支持已授权设备在同一局域网双向同步；完全锁定时只收发密文，解锁后验证合并；没有账号、服务器、跨网络同步、分享或恢复后门。
 - Tauri 2 是 macOS/Windows 的唯一产品 shell；Electron 与 SwiftUI/WinUI 产品源码已按 `CHG-2026-008` 移除。
+- Jetpack Compose 是 Android 的唯一产品 UI；Kotlin 拥有 Activity、系统生命周期与平台服务，JNI 不得直接暴露 `vault-core` 对象、Vault Key 或长期秘密 handle。
 - Optional、Future 和 Out of scope 不得被 AI 自主提升为当前 Required。
 - 未决范围使用 `OPEN-*`，AI 不得自行关闭会改变产品或安全边界的事项。
 

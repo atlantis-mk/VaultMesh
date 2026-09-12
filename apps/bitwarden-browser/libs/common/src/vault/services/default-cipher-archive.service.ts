@@ -1,0 +1,91 @@
+import { combineLatest, filter, firstValueFrom, map, Observable, shareReplay } from "rxjs";
+
+import { ApiService } from "../../abstractions/api.service";
+import { BillingAccountProfileStateService } from "../../billing/abstractions";
+import { ListResponse } from "../../models/response/list.response";
+import { CipherId, UserId } from "../../types/guid";
+import { CipherArchiveService } from "../abstractions/cipher-archive.service";
+import { CipherService } from "../abstractions/cipher.service";
+import { CipherData } from "../models/data/cipher.data";
+import {
+  CipherBulkArchiveRequest,
+  CipherBulkUnarchiveRequest,
+} from "../models/request/cipher-bulk-archive.request";
+import { CipherResponse } from "../models/response/cipher.response";
+import { CipherViewLike, CipherViewLikeUtils } from "../utils/cipher-view-like-utils";
+
+export class DefaultCipherArchiveService implements CipherArchiveService {
+  constructor(
+    private cipherService: CipherService,
+    private apiService: ApiService,
+    private billingAccountProfileStateService: BillingAccountProfileStateService,
+  ) {}
+
+  /**
+   * Observable that contains the list of ciphers that have been archived.
+   */
+  archivedCiphers$(userId: UserId): Observable<CipherViewLike[]> {
+    return this.cipherService.cipherListViews$(userId).pipe(
+      filter((cipher) => cipher != null),
+      map((ciphers) =>
+        ciphers.filter(
+          (cipher) =>
+            CipherViewLikeUtils.isArchived(cipher) && !CipherViewLikeUtils.isDeleted(cipher),
+        ),
+      ),
+    );
+  }
+
+  /**
+   * User can archive items if:
+   * User has premium from any source (personal or organization)
+   */
+  userCanArchive$(userId: UserId): Observable<boolean> {
+    return this.billingAccountProfileStateService
+      .hasPremiumFromAnySource$(userId)
+      .pipe(shareReplay({ refCount: true, bufferSize: 1 }));
+  }
+
+  /** Returns true when the user has premium from any means. */
+  userHasPremium$(userId: UserId): Observable<boolean> {
+    return this.billingAccountProfileStateService
+      .hasPremiumFromAnySource$(userId)
+      .pipe(shareReplay({ refCount: true, bufferSize: 1 }));
+  }
+
+  /** Returns true when the user has previously archived ciphers but lost their premium membership. */
+  showSubscriptionEndedMessaging$(userId: UserId): Observable<boolean> {
+    return combineLatest([this.archivedCiphers$(userId), this.userHasPremium$(userId)]).pipe(
+      map(([archivedCiphers, hasPremium]) => archivedCiphers.length > 0 && !hasPremium),
+      shareReplay({ refCount: true, bufferSize: 1 }),
+    );
+  }
+
+  async archiveWithServer(ids: CipherId | CipherId[], userId: UserId): Promise<CipherData> {
+    const request = new CipherBulkArchiveRequest(Array.isArray(ids) ? ids : [ids]);
+    const r = await this.apiService.send("PUT", "/ciphers/archive", request, true, true);
+    const response = new ListResponse(r, CipherResponse);
+
+    const currentCiphers = await firstValueFrom(this.cipherService.ciphers$(userId));
+    const responseDataArray = response.data.map(
+      (cipher) => new CipherData(cipher, currentCiphers[cipher.id as CipherId]?.collectionIds),
+    );
+
+    await this.cipherService.upsert(responseDataArray, userId);
+    return responseDataArray[0];
+  }
+
+  async unarchiveWithServer(ids: CipherId | CipherId[], userId: UserId): Promise<CipherData> {
+    const request = new CipherBulkUnarchiveRequest(Array.isArray(ids) ? ids : [ids]);
+    const r = await this.apiService.send("PUT", "/ciphers/unarchive", request, true, true);
+    const response = new ListResponse(r, CipherResponse);
+
+    const currentCiphers = await firstValueFrom(this.cipherService.ciphers$(userId));
+    const responseDataArray = response.data.map(
+      (cipher) => new CipherData(cipher, currentCiphers[cipher.id as CipherId]?.collectionIds),
+    );
+
+    await this.cipherService.upsert(responseDataArray, userId);
+    return responseDataArray[0];
+  }
+}

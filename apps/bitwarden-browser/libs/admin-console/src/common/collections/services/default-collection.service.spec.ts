@@ -1,0 +1,691 @@
+import { mock, MockProxy } from "jest-mock-extended";
+import { combineLatest, filter, first, firstValueFrom, of, ReplaySubject, takeWhile } from "rxjs";
+
+import {
+  CollectionView,
+  CollectionTypes,
+  CollectionData,
+} from "@bitwarden/common/admin-console/models/collections";
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { Utils } from "@bitwarden/common/platform/misc/utils";
+import { ContainerService } from "@bitwarden/common/platform/services/container.service";
+import { FakeStateProvider, makeEncString, mockAccountServiceWith } from "@bitwarden/common/spec";
+import { CollectionId, OrganizationId, UserId } from "@bitwarden/common/types/guid";
+import { OrgKey } from "@bitwarden/common/types/key";
+import { newGuid } from "@bitwarden/guid";
+import { KeyService } from "@bitwarden/key-management";
+// eslint-disable-next-line no-restricted-imports
+import {
+  EncryptService,
+  EncString,
+  LegacyCompatKeyService,
+  SymmetricCryptoKey,
+} from "@bitwarden/legacy-crypto";
+
+import { CollectionEncryptionService } from "../abstractions/collection-encryption.service";
+
+import { DECRYPTED_COLLECTION_DATA_KEY, ENCRYPTED_COLLECTION_DATA_KEY } from "./collection.state";
+import { DefaultCollectionService } from "./default-collection.service";
+
+describe("DefaultCollectionService", () => {
+  let keyService: MockProxy<KeyService>;
+  let legacyCompatKeyService: MockProxy<LegacyCompatKeyService>;
+  let encryptService: MockProxy<EncryptService>;
+  let i18nService: MockProxy<I18nService>;
+  let stateProvider: FakeStateProvider;
+  let collectionEncryptionService: MockProxy<CollectionEncryptionService>;
+
+  let userId: UserId;
+
+  let cryptoKeys: ReplaySubject<Record<OrganizationId, OrgKey> | null>;
+
+  let collectionService: DefaultCollectionService;
+
+  beforeEach(() => {
+    userId = Utils.newGuid() as UserId;
+
+    keyService = mock();
+    legacyCompatKeyService = mock();
+    encryptService = mock();
+    i18nService = mock();
+    stateProvider = new FakeStateProvider(mockAccountServiceWith(userId));
+    collectionEncryptionService = mock();
+
+    cryptoKeys = new ReplaySubject(1);
+    keyService.orgKeys$.mockReturnValue(cryptoKeys);
+
+    // Set up mock decryption
+    encryptService.decryptString
+      .calledWith(expect.any(EncString), expect.any(SymmetricCryptoKey))
+      .mockImplementation((encString, key) =>
+        Promise.resolve(encString.data.replace("ENC_", "DEC_")),
+      );
+
+    (window as any).bitwardenContainerService = new ContainerService(
+      keyService,
+      encryptService,
+      legacyCompatKeyService,
+    );
+
+    // Arrange i18nService so that sorting algorithm doesn't throw
+    i18nService.collator = null;
+
+    collectionService = new DefaultCollectionService(
+      keyService,
+      encryptService,
+      i18nService,
+      stateProvider,
+      collectionEncryptionService,
+    );
+  });
+
+  afterEach(() => {
+    delete (window as any).bitwardenContainerService;
+  });
+
+  describe("decryptedCollections$", () => {
+    it("emits decrypted collections from state", async () => {
+      // Arrange test data
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionViewDataFactory(org1);
+      collection1.id = Utils.newGuid() as CollectionId;
+
+      const org2 = Utils.newGuid() as OrganizationId;
+      const collection2 = collectionViewDataFactory(org2);
+      collection2.id = Utils.newGuid() as CollectionId;
+
+      const encryptedCollection1 = collectionDataFactory(org1);
+      encryptedCollection1.id = collection1.id;
+      const encryptedCollection2 = collectionDataFactory(org2);
+      encryptedCollection2.id = collection2.id;
+
+      // Arrange dependencies
+      await setEncryptedState([encryptedCollection1, encryptedCollection2]);
+      cryptoKeys.next({});
+      collectionEncryptionService.decryptMany.mockResolvedValue([collection1, collection2]);
+
+      const result = await firstValueFrom(collectionService.decryptedCollections$(userId));
+
+      // Assert emitted values
+      expect(result.length).toBe(2);
+      expect(result).toContainPartialObjects([
+        {
+          id: collection1.id,
+          name: collection1.name,
+        },
+        {
+          id: collection2.id,
+          name: collection2.name,
+        },
+      ]);
+
+      expect(collectionEncryptionService.decryptMany).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ id: encryptedCollection1.id }),
+          expect.objectContaining({ id: encryptedCollection2.id }),
+        ]),
+        userId,
+      );
+      expect(encryptService.decryptString).not.toHaveBeenCalled();
+    });
+
+    it("emits decrypted collections from in-memory state when available", async () => {
+      // Arrange test data
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionViewDataFactory(org1);
+
+      const org2 = Utils.newGuid() as OrganizationId;
+      const collection2 = collectionViewDataFactory(org2);
+
+      await setDecryptedState([collection1, collection2]);
+
+      const result = await firstValueFrom(collectionService.decryptedCollections$(userId));
+
+      // Assert emitted values
+      expect(result.length).toBe(2);
+      expect(result).toContainPartialObjects([
+        {
+          id: collection1.id,
+          name: "DEC_NAME_" + collection1.id,
+        },
+        {
+          id: collection2.id,
+          name: "DEC_NAME_" + collection2.id,
+        },
+      ]);
+
+      // Ensure that the returned data came from the in-memory state, rather than from decryption.
+      expect(encryptService.decryptString).not.toHaveBeenCalled();
+    });
+
+    it("handles null collection state", async () => {
+      // Arrange dependencies
+      await setEncryptedState(null);
+      cryptoKeys.next({});
+
+      const encryptedCollections = await firstValueFrom(
+        collectionService.encryptedCollections$(userId),
+      );
+
+      expect(encryptedCollections).toBe(null);
+    });
+
+    it("does not decrypt until orgKeys become available (handles undefined orgKeys)", (done) => {
+      // Arrange test data
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+
+      const org2 = Utils.newGuid() as OrganizationId;
+      const collection2 = collectionDataFactory(org2);
+
+      const decryptedView1 = collectionViewDataFactory(org1);
+      decryptedView1.id = collection1.id as CollectionId;
+      const decryptedView2 = collectionViewDataFactory(org2);
+      decryptedView2.id = collection2.id as CollectionId;
+
+      collectionEncryptionService.decryptMany.mockResolvedValue([decryptedView1, decryptedView2]);
+
+      // Emit a non-null value after the first undefined value has propagated
+      // This will cause the collections to emit, calling done()
+      cryptoKeys.pipe(first()).subscribe((val) => {
+        cryptoKeys.next({});
+      });
+
+      collectionService
+        .decryptedCollections$(userId)
+        .pipe(takeWhile((val) => val.length != 2))
+        .subscribe({ complete: () => done() });
+
+      // Arrange dependencies
+      void setEncryptedState([collection1, collection2]).then(() => {
+        // Act: emit undefined
+        cryptoKeys.next(null);
+      });
+    });
+
+    it("Decrypts one time for multiple simultaneous callers", async () => {
+      const decryptedMock: CollectionView[] = [{ id: "col1" }] as CollectionView[];
+      collectionEncryptionService.decryptMany.mockResolvedValue(decryptedMock);
+
+      jest
+        .spyOn(collectionService as any, "encryptedCollections$")
+        .mockReturnValue(of([{ id: "enc1" }]));
+      cryptoKeys.next({});
+
+      // Simulate multiple subscribers
+      const obs1 = collectionService.decryptedCollections$(userId);
+      const obs2 = collectionService.decryptedCollections$(userId);
+      const obs3 = collectionService.decryptedCollections$(userId);
+
+      await firstValueFrom(combineLatest([obs1, obs2, obs3]));
+
+      // Expect decryptMany to be called only once
+      expect(collectionEncryptionService.decryptMany).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("encryptedCollections$", () => {
+    it("emits encrypted collections from state", async () => {
+      // Arrange test data
+      const collection1 = collectionDataFactory();
+      const collection2 = collectionDataFactory();
+
+      // Arrange dependencies
+      await setEncryptedState([collection1, collection2]);
+
+      const result = await firstValueFrom(collectionService.encryptedCollections$(userId));
+
+      expect(result!.length).toBe(2);
+      expect(result).toContainPartialObjects([
+        {
+          id: collection1.id,
+          name: makeEncString("ENC_NAME_" + collection1.id),
+        },
+        {
+          id: collection2.id,
+          name: makeEncString("ENC_NAME_" + collection2.id),
+        },
+      ]);
+    });
+
+    it("handles null collection state", async () => {
+      await setEncryptedState(null);
+
+      const decryptedCollections = await firstValueFrom(
+        collectionService.encryptedCollections$(userId),
+      );
+      expect(decryptedCollections).toBe(null);
+    });
+  });
+
+  describe("decryptedCollections$ (SDK decryption)", () => {
+    beforeEach(() => {
+      // Emit non-null org keys so the gate passes by default
+      cryptoKeys.next({});
+    });
+
+    it("uses collectionEncryptionService.decryptMany to decrypt collections", async () => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+      const decryptedView = collectionViewDataFactory(org1);
+      decryptedView.id = collection1.id as CollectionId;
+
+      await setEncryptedState([collection1]);
+      collectionEncryptionService.decryptMany.mockResolvedValue([decryptedView]);
+
+      const result = await firstValueFrom(collectionService.decryptedCollections$(userId));
+
+      expect(collectionEncryptionService.decryptMany).toHaveBeenCalledWith(
+        expect.arrayContaining([expect.objectContaining({ id: collection1.id })]),
+        userId,
+      );
+      expect(encryptService.decryptString).not.toHaveBeenCalled();
+      expect(result).toContainPartialObjects([{ id: collection1.id }]);
+    });
+
+    it("handles empty collections via SDK path", async () => {
+      await setEncryptedState([]);
+      collectionEncryptionService.decryptMany.mockResolvedValue([]);
+
+      const result = await firstValueFrom(collectionService.decryptedCollections$(userId));
+
+      expect(result).toEqual([]);
+    });
+
+    it("sorts results returned from collectionEncryptionService", async () => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+      const collection2 = collectionDataFactory(org1);
+
+      const view1 = collectionViewDataFactory(org1);
+      view1.id = collection1.id as CollectionId;
+      view1.name = "Zebra";
+      const view2 = collectionViewDataFactory(org1);
+      view2.id = collection2.id as CollectionId;
+      view2.name = "Alpha";
+
+      await setEncryptedState([collection1, collection2]);
+      // Return in reverse alphabetical order to verify sorting
+      collectionEncryptionService.decryptMany.mockResolvedValue([view1, view2]);
+
+      const result = await firstValueFrom(collectionService.decryptedCollections$(userId));
+
+      expect(result[0].name).toBe("Alpha");
+      expect(result[1].name).toBe("Zebra");
+    });
+
+    it("does not call decryptMany when org keys are null (locked)", (done) => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+      const decryptedView = collectionViewDataFactory(org1);
+      decryptedView.id = collection1.id as CollectionId;
+
+      collectionEncryptionService.decryptMany.mockResolvedValue([decryptedView]);
+
+      void setEncryptedState([collection1]).then(() => {
+        // Emit null to simulate locked state (org keys unavailable)
+        cryptoKeys.next(null);
+
+        // decryptMany must not have been called yet
+        expect(collectionEncryptionService.decryptMany).not.toHaveBeenCalled();
+
+        // Then emit keys again to unblock decryption
+        cryptoKeys.next({});
+      });
+
+      collectionService
+        .decryptedCollections$(userId)
+        .pipe(takeWhile((views) => views.length === 0))
+        .subscribe({ complete: () => done() });
+    });
+
+    it("starts decrypting after org keys become available (locked → unlocked)", async () => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+      const decryptedView = collectionViewDataFactory(org1);
+      decryptedView.id = collection1.id as CollectionId;
+
+      await setEncryptedState([collection1]);
+      collectionEncryptionService.decryptMany.mockResolvedValue([decryptedView]);
+
+      // Emit null first (locked), then real keys (unlocked)
+      cryptoKeys.next(null);
+      cryptoKeys.next({});
+
+      const result = await firstValueFrom(collectionService.decryptedCollections$(userId));
+
+      expect(collectionEncryptionService.decryptMany).toHaveBeenCalledTimes(1);
+      expect(result).toContainPartialObjects([{ id: collection1.id }]);
+    });
+
+    it("falls back to an empty list and logs when decryptMany rejects (batch failure)", async () => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+
+      await setEncryptedState([collection1]);
+      collectionEncryptionService.decryptMany.mockRejectedValue(new Error("SDK not available"));
+
+      const result = await firstValueFrom(collectionService.decryptedCollections$(userId));
+
+      expect(result).toEqual([]);
+    });
+
+    it("retries a failed batch on a fresh subscription so a transient failure recovers", async () => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+      const decryptedView = collectionViewDataFactory(org1);
+      decryptedView.id = collection1.id as CollectionId;
+
+      await setEncryptedState([collection1]);
+      // Fail the first attempt (e.g. the SDK is not ready yet), then succeed.
+      collectionEncryptionService.decryptMany
+        .mockRejectedValueOnce(new Error("SDK not available"))
+        .mockResolvedValue([decryptedView]);
+
+      // First subscription hits the transient failure. The empty fallback is not cached.
+      const firstResult = await firstValueFrom(collectionService.decryptedCollections$(userId));
+      expect(firstResult).toEqual([]);
+
+      // A subsequent subscription re-attempts decryption (rather than serving a cached empty
+      // list) and recovers once the SDK is available.
+      const secondResult = await firstValueFrom(collectionService.decryptedCollections$(userId));
+      expect(secondResult).toContainPartialObjects([{ id: collection1.id }]);
+      expect(collectionEncryptionService.decryptMany).toHaveBeenCalledTimes(2);
+    });
+
+    it("emits the decrypted collections exactly once on success (no duplicate emission)", async () => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+      const decryptedView = collectionViewDataFactory(org1);
+      decryptedView.id = collection1.id as CollectionId;
+
+      await setEncryptedState([collection1]);
+      collectionEncryptionService.decryptMany.mockResolvedValue([decryptedView]);
+
+      const emissions: CollectionView[][] = [];
+      const sub = collectionService
+        .decryptedCollections$(userId)
+        .subscribe((v) => emissions.push(v));
+
+      // Deterministically wait until the decrypted result has been cached - that write is the
+      // mechanism that delivers the value to subscribers - then stop observing.
+      await firstValueFrom(
+        stateProvider
+          .getUser(userId, DECRYPTED_COLLECTION_DATA_KEY)
+          .state$.pipe(filter((state) => state != null)),
+      );
+      sub.unsubscribe();
+
+      // The decrypted result is delivered once via the cache re-emitting; the direct emission is
+      // dropped (ignoreElements) so subscribers never receive the same value twice.
+      expect(emissions).toHaveLength(1);
+      expect(emissions[0]).toContainPartialObjects([{ id: collection1.id }]);
+    });
+  });
+
+  describe("upsert", () => {
+    it("uses collectionEncryptionService.decryptMany to decrypt the upserted collection", async () => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+      const decryptedView = collectionViewDataFactory(org1);
+      decryptedView.id = collection1.id as CollectionId;
+
+      await setEncryptedState([collection1]);
+      collectionEncryptionService.decryptMany.mockResolvedValue([decryptedView]);
+
+      await collectionService.upsert(collection1, userId);
+
+      expect(collectionEncryptionService.decryptMany).toHaveBeenCalledWith(
+        expect.arrayContaining([expect.objectContaining({ id: collection1.id })]),
+        userId,
+      );
+      expect(encryptService.decryptString).not.toHaveBeenCalled();
+    });
+
+    it("upserts to existing collections", async () => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+
+      await setEncryptedState([collection1]);
+
+      const updatedCollection1 = Object.assign(new CollectionData({} as any), collection1, {
+        name: makeEncString("UPDATED_ENC_NAME_" + collection1.id).encryptedString,
+      });
+
+      const updatedView = collectionViewDataFactory(org1);
+      updatedView.id = collection1.id as CollectionId;
+      updatedView.name = "UPDATED_DEC_NAME_" + collection1.id;
+      collectionEncryptionService.decryptMany.mockResolvedValue([updatedView]);
+
+      await collectionService.upsert(updatedCollection1, userId);
+
+      const encryptedResult = await firstValueFrom(collectionService.encryptedCollections$(userId));
+      expect(encryptedResult!.length).toBe(1);
+      expect(encryptedResult).toContainPartialObjects([
+        { id: collection1.id, name: makeEncString("UPDATED_ENC_NAME_" + collection1.id) },
+      ]);
+
+      const decryptedResult = await firstValueFrom(collectionService.decryptedCollections$(userId));
+      expect(decryptedResult).toContainPartialObjects([
+        { id: collection1.id, name: "UPDATED_DEC_NAME_" + collection1.id },
+      ]);
+    });
+
+    it("upserts to a null state", async () => {
+      const org1 = Utils.newGuid() as OrganizationId;
+      const collection1 = collectionDataFactory(org1);
+      const decryptedView = collectionViewDataFactory(org1);
+      decryptedView.id = collection1.id as CollectionId;
+
+      await setEncryptedState(null);
+      collectionEncryptionService.decryptMany.mockResolvedValue([decryptedView]);
+
+      await collectionService.upsert(collection1, userId);
+
+      const encryptedResult = await firstValueFrom(collectionService.encryptedCollections$(userId));
+      expect(encryptedResult!.length).toBe(1);
+      expect(encryptedResult).toContainPartialObjects([
+        {
+          id: collection1.id,
+          name: makeEncString("ENC_NAME_" + collection1.id),
+        },
+      ]);
+
+      const decryptedResult = await firstValueFrom(collectionService.decryptedCollections$(userId));
+      expect(decryptedResult.length).toBe(1);
+      expect(decryptedResult).toContainPartialObjects([
+        {
+          id: collection1.id,
+          name: decryptedView.name,
+        },
+      ]);
+    });
+  });
+
+  describe("replace", () => {
+    it("replaces all collections", async () => {
+      await setEncryptedState([collectionDataFactory(), collectionDataFactory()]);
+
+      const newCollection3 = collectionDataFactory();
+      await collectionService.replace(
+        {
+          [newCollection3.id]: newCollection3,
+        },
+        userId,
+      );
+
+      const result = await firstValueFrom(collectionService.encryptedCollections$(userId));
+      expect(result!.length).toBe(1);
+      expect(result).toContainPartialObjects([
+        {
+          id: newCollection3.id,
+          name: makeEncString("ENC_NAME_" + newCollection3.id),
+        },
+      ]);
+    });
+  });
+
+  describe("delete", () => {
+    it("deletes a collection", async () => {
+      const collection1 = collectionDataFactory();
+      const collection2 = collectionDataFactory();
+      await setEncryptedState([collection1, collection2]);
+
+      await collectionService.delete([collection1.id], userId);
+
+      const result = await firstValueFrom(collectionService.encryptedCollections$(userId));
+      expect(result!.length).toEqual(1);
+      expect(result![0]).toMatchObject({ id: collection2.id });
+    });
+
+    it("deletes several collections", async () => {
+      const collection1 = collectionDataFactory();
+      const collection2 = collectionDataFactory();
+      const collection3 = collectionDataFactory();
+      await setEncryptedState([collection1, collection2, collection3]);
+
+      await collectionService.delete([collection1.id, collection3.id], userId);
+
+      const result = await firstValueFrom(collectionService.encryptedCollections$(userId));
+      expect(result!.length).toEqual(1);
+      expect(result![0]).toMatchObject({ id: collection2.id });
+    });
+
+    it("handles null collections", async () => {
+      const collection1 = collectionDataFactory();
+      await setEncryptedState(null);
+
+      await collectionService.delete([collection1.id], userId);
+
+      const result = await firstValueFrom(collectionService.encryptedCollections$(userId));
+      expect(result!.length).toEqual(0);
+    });
+  });
+
+  describe("groupByOrganization", () => {
+    it("groups collections by organization", () => {
+      const org1 = { organizationId: "org1" } as CollectionView;
+      org1.name = "Collection 1";
+
+      const org2 = { organizationId: "org1" } as CollectionView;
+      org2.name = "Collection 2";
+      const org3 = { organizationId: "org2" } as CollectionView;
+      org3.name = "Collection 3";
+      const collections = [org1, org2, org3];
+
+      const result = collectionService.groupByOrganization(collections);
+
+      expect(result.size).toBe(2);
+      expect(result.get(org1.organizationId)?.length).toBe(2);
+      expect(result.get(org1.organizationId)).toContainPartialObjects([org1, org2]);
+      expect(result.get(org3.organizationId)?.length).toBe(1);
+      expect(result.get(org3.organizationId)).toContainPartialObjects([org3]);
+    });
+  });
+
+  describe("defaultUserCollection$", () => {
+    it("returns the default collection when one exists matching the org", async () => {
+      const orgId = newGuid() as OrganizationId;
+      const defaultCollection = collectionViewDataFactory(orgId);
+      defaultCollection.type = CollectionTypes.DefaultUserCollection;
+
+      const regularCollection = collectionViewDataFactory(orgId);
+      regularCollection.type = CollectionTypes.SharedCollection;
+
+      await setDecryptedState([defaultCollection, regularCollection]);
+
+      const result = await firstValueFrom(collectionService.defaultUserCollection$(userId, orgId));
+
+      expect(result).toBeDefined();
+      expect(result?.id).toBe(defaultCollection.id);
+      expect(result?.isDefaultCollection).toBe(true);
+    });
+
+    it("returns undefined when no default collection exists", async () => {
+      const orgId = newGuid() as OrganizationId;
+      const collection1 = collectionViewDataFactory(orgId);
+      collection1.type = CollectionTypes.SharedCollection;
+
+      const collection2 = collectionViewDataFactory(orgId);
+      collection2.type = CollectionTypes.SharedCollection;
+
+      await setDecryptedState([collection1, collection2]);
+
+      const result = await firstValueFrom(collectionService.defaultUserCollection$(userId, orgId));
+
+      expect(result).toBeUndefined();
+    });
+
+    it("returns undefined when default collection exists but for different org", async () => {
+      const orgA = newGuid() as OrganizationId;
+      const orgB = newGuid() as OrganizationId;
+
+      const defaultCollectionForOrgA = collectionViewDataFactory(orgA);
+      defaultCollectionForOrgA.type = CollectionTypes.DefaultUserCollection;
+
+      await setDecryptedState([defaultCollectionForOrgA]);
+
+      const result = await firstValueFrom(collectionService.defaultUserCollection$(userId, orgB));
+
+      expect(result).toBeUndefined();
+    });
+
+    it("returns undefined when collections array is empty", async () => {
+      const orgId = newGuid() as OrganizationId;
+
+      await setDecryptedState([]);
+
+      const result = await firstValueFrom(collectionService.defaultUserCollection$(userId, orgId));
+
+      expect(result).toBeUndefined();
+    });
+
+    it("returns correct collection when multiple orgs have default collections", async () => {
+      const orgA = newGuid() as OrganizationId;
+      const orgB = newGuid() as OrganizationId;
+
+      const defaultCollectionForOrgA = collectionViewDataFactory(orgA);
+      defaultCollectionForOrgA.type = CollectionTypes.DefaultUserCollection;
+
+      const defaultCollectionForOrgB = collectionViewDataFactory(orgB);
+      defaultCollectionForOrgB.type = CollectionTypes.DefaultUserCollection;
+
+      await setDecryptedState([defaultCollectionForOrgA, defaultCollectionForOrgB]);
+
+      const result = await firstValueFrom(collectionService.defaultUserCollection$(userId, orgB));
+
+      expect(result).toBeDefined();
+      expect(result?.id).toBe(defaultCollectionForOrgB.id);
+      expect(result?.organizationId).toBe(orgB);
+    });
+  });
+
+  const setEncryptedState = (collectionData: CollectionData[] | null) =>
+    stateProvider.setUserState(
+      ENCRYPTED_COLLECTION_DATA_KEY,
+      collectionData == null ? null : Object.fromEntries(collectionData.map((c) => [c.id, c])),
+      userId,
+    );
+
+  const setDecryptedState = (collectionViews: CollectionView[] | null) =>
+    stateProvider.setUserState(DECRYPTED_COLLECTION_DATA_KEY, collectionViews, userId);
+});
+
+const collectionDataFactory = (orgId?: OrganizationId) => {
+  const collection = new CollectionData({} as any);
+  collection.id = Utils.newGuid() as CollectionId;
+  collection.organizationId = orgId ?? (Utils.newGuid() as OrganizationId);
+  collection.name = makeEncString("ENC_NAME_" + collection.id).encryptedString ?? "";
+
+  return collection;
+};
+
+function collectionViewDataFactory(orgId?: OrganizationId): CollectionView {
+  const id = Utils.newGuid() as CollectionId;
+  const collectionView = new CollectionView({
+    id,
+    organizationId: orgId ?? (Utils.newGuid() as OrganizationId),
+    name: "DEC_NAME_" + id,
+  });
+  return collectionView;
+}

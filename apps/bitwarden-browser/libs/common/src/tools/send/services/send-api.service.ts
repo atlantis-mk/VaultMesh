@@ -1,0 +1,226 @@
+// eslint-disable-next-line no-restricted-imports
+import { EncArrayBuffer } from "@bitwarden/legacy-crypto";
+
+import { ApiService } from "../../../abstractions/api.service";
+import { SendAccessToken } from "../../../auth/send-access";
+import { ErrorResponse } from "../../../models/response/error.response";
+import { ListResponse } from "../../../models/response/list.response";
+import {
+  FileUploadApiMethods,
+  FileUploadService,
+} from "../../../platform/abstractions/file-upload/file-upload.service";
+import { SendData } from "../models/data/send.data";
+import { Send } from "../models/domain/send";
+import { SendRequest } from "../models/request/send.request";
+import { SendAccessResponse } from "../models/response/send-access.response";
+import { SendFileDownloadDataResponse } from "../models/response/send-file-download-data.response";
+import { SendFileUploadDataResponse } from "../models/response/send-file-upload-data.response";
+import { SendResponse } from "../models/response/send.response";
+import { SendAccessView } from "../models/view/send-access.view";
+import { SendView } from "../models/view/send.view";
+import { SendType } from "../types/send-type";
+
+import { SendApiService as SendApiServiceAbstraction } from "./send-api.service.abstraction";
+import { InternalSendService } from "./send.service.abstraction";
+
+export class SendApiService implements SendApiServiceAbstraction {
+  constructor(
+    private apiService: ApiService,
+    private fileUploadService: FileUploadService,
+    private sendService: InternalSendService,
+  ) {}
+
+  async getSend(id: string): Promise<SendResponse> {
+    const r = await this.apiService.send("GET", "/sends/" + id, null, true, true);
+    return new SendResponse(r);
+  }
+
+  async postSendAccess(accessToken: SendAccessToken, apiUrl?: string): Promise<SendAccessResponse> {
+    const setAuthTokenHeader = (headers: Headers) => {
+      headers.set("Authorization", "Bearer " + accessToken.token);
+    };
+    const r = await this.apiService.send(
+      "POST",
+      "/sends/access",
+      null,
+      false,
+      true,
+      apiUrl,
+      setAuthTokenHeader,
+    );
+    return new SendAccessResponse(r);
+  }
+
+  async getSendFileDownloadData(
+    send: SendAccessView,
+    accessToken: SendAccessToken,
+    apiUrl?: string,
+  ): Promise<SendFileDownloadDataResponse> {
+    const setAuthTokenHeader = (headers: Headers) => {
+      headers.set("Authorization", "Bearer " + accessToken.token);
+    };
+    const r = await this.apiService.send(
+      "POST",
+      "/sends/access/file/" + send.file.id,
+      null,
+      false,
+      true,
+      apiUrl,
+      setAuthTokenHeader,
+    );
+    return new SendFileDownloadDataResponse(r);
+  }
+
+  async getSends(): Promise<ListResponse<SendResponse>> {
+    const r = await this.apiService.send("GET", "/sends", null, true, true);
+    return new ListResponse(r, SendResponse);
+  }
+
+  async putSendRemovePassword(id: string): Promise<SendResponse> {
+    const r = await this.apiService.send(
+      "PUT",
+      "/sends/" + id + "/remove-password",
+      null,
+      true,
+      true,
+    );
+    return new SendResponse(r);
+  }
+
+  deleteSend(id: string): Promise<any> {
+    return this.apiService.send("DELETE", "/sends/" + id, null, true, false);
+  }
+
+  // `plaintextPassword` is part of the shared `SendApiService` contract for the SDK path, which
+  // derives the send password over the key it generates. The legacy path derives it in
+  // `SendService.encrypt` before `save` and carries the result on `Send.password`, so it ignores
+  // the plaintext here — behavior is unchanged.
+  async save(sendData: [Send, EncArrayBuffer], _plaintextPassword?: string): Promise<Send> {
+    const response = await this.upload(sendData);
+
+    const data = new SendData(response);
+    await this.sendService.upsert(data);
+    return new Send(data);
+  }
+
+  // Encrypts client-side and then defers to `save`, which is exactly what callers used to do
+  // themselves. Behavior is unchanged; the encryption step simply moved inside the service so
+  // that callers no longer have to pre-encrypt for a path (the SDK's) that cannot use it.
+  async saveView(
+    view: SendView,
+    file: File | ArrayBuffer | null,
+    plaintextPassword?: string,
+  ): Promise<Send> {
+    const sendData = await this.sendService.encrypt(view, file, plaintextPassword);
+    return await this.save(sendData, plaintextPassword);
+  }
+
+  async delete(id: string): Promise<any> {
+    await this.deleteSend(id);
+    await this.sendService.delete(id);
+  }
+
+  async removePassword(id: string): Promise<any> {
+    const response = await this.putSendRemovePassword(id);
+    const data = new SendData(response);
+    await this.sendService.upsert(data);
+  }
+
+  // Send File Upload methods
+
+  private async postSend(request: SendRequest): Promise<SendResponse> {
+    const r = await this.apiService.send("POST", "/sends", request, true, true);
+    return new SendResponse(r);
+  }
+
+  private async postFileTypeSend(request: SendRequest): Promise<SendFileUploadDataResponse> {
+    const r = await this.apiService.send("POST", "/sends/file/v2", request, true, true);
+    return new SendFileUploadDataResponse(r);
+  }
+
+  private async renewSendFileUploadUrl(
+    sendId: string,
+    fileId: string,
+  ): Promise<SendFileUploadDataResponse> {
+    const r = await this.apiService.send(
+      "GET",
+      "/sends/" + sendId + "/file/" + fileId,
+      null,
+      true,
+      true,
+    );
+    return new SendFileUploadDataResponse(r);
+  }
+
+  private postSendFile(sendId: string, fileId: string, data: FormData): Promise<any> {
+    return this.apiService.send("POST", "/sends/" + sendId + "/file/" + fileId, data, true, false);
+  }
+
+  private async putSend(id: string, request: SendRequest): Promise<SendResponse> {
+    const r = await this.apiService.send("PUT", "/sends/" + id, request, true, true);
+    return new SendResponse(r);
+  }
+
+  private async upload(sendData: [Send, EncArrayBuffer]): Promise<SendResponse> {
+    const request = new SendRequest(sendData[0], sendData[1]?.buffer.byteLength);
+
+    let response: SendResponse;
+    if (sendData[0].id == null) {
+      if (sendData[0].type === SendType.Text) {
+        response = await this.postSend(request);
+      } else {
+        try {
+          const uploadDataResponse = await this.postFileTypeSend(request);
+          response = uploadDataResponse.sendResponse;
+          await this.fileUploadService.upload(
+            uploadDataResponse,
+            sendData[0].file.fileName,
+            sendData[1],
+            this.generateMethods(uploadDataResponse, response),
+          );
+        } catch (e) {
+          if (e instanceof ErrorResponse) {
+            throw new Error((e as ErrorResponse).getSingleMessage());
+          } else {
+            throw e;
+          }
+        }
+      }
+      sendData[0].id = response.id;
+      sendData[0].accessId = response.accessId;
+    } else {
+      response = await this.putSend(sendData[0].id, request);
+    }
+    return response;
+  }
+
+  private generateMethods(
+    uploadData: SendFileUploadDataResponse,
+    response: SendResponse,
+  ): FileUploadApiMethods {
+    return {
+      postDirect: this.generatePostDirectCallback(response),
+      renewFileUploadUrl: this.generateRenewFileUploadUrlCallback(response.id, response.file.id),
+      rollback: this.generateRollbackCallback(response.id),
+    };
+  }
+
+  private generatePostDirectCallback(sendResponse: SendResponse) {
+    return (data: FormData) => {
+      return this.postSendFile(sendResponse.id, sendResponse.file.id, data);
+    };
+  }
+
+  private generateRenewFileUploadUrlCallback(sendId: string, fileId: string) {
+    return async () => {
+      const renewResponse = await this.renewSendFileUploadUrl(sendId, fileId);
+      return renewResponse?.url;
+    };
+  }
+
+  private generateRollbackCallback(sendId: string) {
+    return () => {
+      return this.deleteSend(sendId);
+    };
+  }
+}

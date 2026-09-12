@@ -1,0 +1,242 @@
+@if (isCardTypeRestricted$ | async) {
+  <bit-callout [title]="'restrictCardTypeImport' | i18n" type="info">
+    {{ "restrictCardTypeImportDesc" | i18n }}
+  </bit-callout>
+}
+<form [formGroup]="formGroup" [bitSubmit]="submit" id="import_form_importForm">
+  <bit-section>
+    <bit-section-header>
+      <h2 class="tw-font-medium" bitTypography="h6">{{ "destination" | i18n }}</h2>
+    </bit-section-header>
+    <bit-card>
+      <bit-form-field [hidden]="isFromAC">
+        <bit-label>{{ "vault" | i18n }}</bit-label>
+        <bit-select formControlName="vaultSelector">
+          @if (!importBlockedByPolicy) {
+            <bit-option [label]="'myVault' | i18n" value="myVault" icon="bwi-user" />
+          }
+          @for (o of organizations$ | async; track o) {
+            <bit-option [value]="o.id" [label]="o.name" icon="bwi-business" />
+          }
+        </bit-select>
+      </bit-form-field>
+      <bit-form-field disableMargin>
+        <bit-label>{{ organizationId ? ("collection" | i18n) : ("folder" | i18n) }}</bit-label>
+        <bit-select formControlName="targetSelector">
+          @if (!organizationId) {
+            <bit-option [value]="null" label="-- {{ 'selectImportFolder' | i18n }} --" />
+            @for (f of folders$ | async; track f) {
+              <bit-option [value]="f" [label]="f.name" icon="bwi-folder" />
+            }
+          }
+          @if (organizationId) {
+            <bit-option [value]="null" label="-- {{ 'selectImportCollection' | i18n }} --" />
+            @for (c of collections$ | async; track c) {
+              <bit-option [value]="c" [label]="c.name" [icon]="collectionIcon(c.type)" />
+            }
+          }
+        </bit-select>
+        <bit-hint>{{
+          organizationId ? ("importTargetHintCollection" | i18n) : ("importTargetHintFolder" | i18n)
+        }}</bit-hint>
+      </bit-form-field>
+    </bit-card>
+  </bit-section>
+
+  <bit-section>
+    <bit-section-header>
+      <h2 class="tw-font-medium" bitTypography="h6">{{ "data" | i18n }}</h2>
+    </bit-section-header>
+    <bit-card>
+      <bit-form-field class="@2xl:tw-w-1/2">
+        <bit-label>{{ "fileFormat" | i18n }}</bit-label>
+        <bit-select formControlName="format">
+          <bit-option value="" label="-- {{ 'select' | i18n }} --" />
+          <bit-option
+            class="tw-font-medium tw-text-muted tw-text-xs"
+            value="-"
+            label="{{ 'commonImportFormats' | i18n }}"
+            disabled
+          />
+          @for (o of featuredImportOptions; track o) {
+            <bit-option [value]="o.id" [label]="o.name" />
+          }
+          @if (importOptions && importOptions.length) {
+            <bit-option value="-" label="--------------------------------------" disabled />
+            @for (o of importOptions; track o) {
+              <bit-option [value]="o.id" [label]="o.name" />
+            }
+          }
+        </bit-select>
+      </bit-form-field>
+      @if (format) {
+        <bit-callout type="info" title="{{ getFormatInstructionTitle() }}">
+          <!-- Generic, metadata-driven instructions: covers every importer except the
+          exceptions below, whose markup doesn't fit this flat key/link shape. -->
+          @if (selectedImportOption; as meta) {
+            @if (meta.instructionKey) {
+              {{ meta.instructionKey | i18n }}
+            }
+            @if (meta.instructionLink) {
+              {{ "importHelpCenterInstructions" | i18n: meta.sourceName }}
+              <a
+                bitLink
+                linkType="primary"
+                target="_blank"
+                rel="noreferrer"
+                [href]="meta.instructionLink"
+                endIcon="bwi-external-link"
+              >
+                {{ "importHelpCenterLinkText" | i18n }}</a
+              >.
+            }
+          }
+          <!-- LastPass: the text is handled by the generic block above; this only adds the
+            direct-import/CSV toggle. -->
+          @if (showLastPassToggle) {
+            <bit-radio-group formControlName="lastPassType">
+              <bit-radio-button
+                class="tw-block"
+                id="import_bit-radio-button_lp-direct"
+                value="direct"
+              >
+                <bit-label>{{ "importDirectlyFromLastPass" | i18n }}</bit-label>
+              </bit-radio-button>
+              <bit-radio-button class="tw-block" id="import_bit-radio-button_lp-csv" value="csv">
+                <bit-label>{{ "importFromCSV" | i18n }}</bit-label>
+              </bit-radio-button>
+            </bit-radio-group>
+          }
+          <!-- Zoho: text is interleaved with a <code> filename, which doesn't fit the generic shape. -->
+          @if (format === "zohovaultcsv") {
+            {{ "importZohoInstructions" | i18n }}
+            <code>zoho_export.csv</code>.
+          }
+          <!-- GNOME: text is interleaved with a help link and four <code> filenames/commands. -->
+          @if (format === "gnomejson") {
+            {{ "importGnomeInstructionsIntro" | i18n }}
+            <a
+              bitLink
+              linkType="primary"
+              target="_blank"
+              rel="noreferrer"
+              href="https://github.com/spookylukey/gnome-keyring-import-export"
+              >{{ "importGnomeInstructionsLinkText" | i18n }}</a
+            >
+            {{ "importGnomeInstructionsScriptLabel" | i18n }}
+            <code>pw_helper.py</code>{{ "importGnomeInstructionsRunTerminal" | i18n }}
+            <code>chmod +rx Desktop/pw_helper.py</code>
+            {{ "importGnomeInstructionsAndThen" | i18n }}
+            <code>python Desktop/pw_helper.py export Desktop/my_passwords.json</code
+            >{{ "importGnomeInstructionsUploadResult" | i18n }}
+            <code>my_passwords.json</code>
+            {{ "importGnomeInstructionsFileHere" | i18n }}
+          }
+          @if (browserImporterAvailable$ | async) {
+            <bit-radio-group formControlName="chromiumLoader">
+              <bit-radio-button
+                class="tw-block"
+                id="import_bit-radio-button_chrome-browser"
+                value="chromium"
+              >
+                <bit-label>{{ "importDirectlyFromBrowser" | i18n }}</bit-label>
+              </bit-radio-button>
+              <bit-radio-button
+                class="tw-block"
+                id="import_bit-radio-button_chrome-file"
+                value="file"
+              >
+                <bit-label>{{ "importFromCSV" | i18n }}</bit-label>
+              </bit-radio-button>
+            </bit-radio-group>
+          }
+        </bit-callout>
+      }
+      @if (showLastPassOptions) {
+        <import-lastpass
+          [formGroup]="formGroup"
+          (csvDataLoaded)="this.formGroup.controls.fileContents.setValue($event)"
+        ></import-lastpass>
+      } @else if (showChromiumOptions$ | async) {
+        <import-chrome
+          [formGroup]="formGroup"
+          [onImportFromBrowser]="this.onImportFromBrowser"
+          [onLoadProfilesFromBrowser]="this.onLoadProfilesFromBrowser"
+          [format]="this.format"
+          (csvDataLoaded)="this.formGroup.controls.fileContents.setValue($event)"
+          (error)="this.handleChromeImportError($event)"
+        ></import-chrome>
+      } @else if (format === "keepasskdbx") {
+        <bit-form-field>
+          <bit-label>{{ "keePassMasterPassword" | i18n }}</bit-label>
+          <input
+            bitInput
+            type="password"
+            id="import_input_kdbxPassword"
+            formControlName="kdbxPassword"
+            required
+            appInputVerbatim
+          />
+          <button type="button" bitSuffix bitIconButton bitPasswordInputToggle></button>
+        </bit-form-field>
+
+        @if (showKeyFile) {
+          <bit-file-upload formControlName="keyFile" id="import_input_keyFile">
+            <bit-label>{{ "keyFileUpload" | i18n }}</bit-label>
+          </bit-file-upload>
+        } @else {
+          <button
+            bitLink
+            linkType="primary"
+            type="button"
+            startIcon="bwi-plus"
+            id="import_button_addKeyFile"
+            class="tw-mb-6 tw-block"
+            (click)="addKeyFile()"
+          >
+            {{ "addKeyFile" | i18n }}
+          </button>
+        }
+
+        <bit-file-upload
+          formControlName="file"
+          id="import_input_file"
+          [accept]="fileInputAcceptHint ?? ''"
+        >
+          <bit-label>{{ "kdbxFileUpload" | i18n }}</bit-label>
+          <bit-hint>{{ "acceptedFormatsKdbx" | i18n }}</bit-hint>
+        </bit-file-upload>
+      } @else {
+        <!--
+              We want to reuse the file selector below, so all the Keeper stuff has to be in this block.
+              Show Keeper sub-format dropdown. The import-keeper component is smart enough to only show UI in the "direct" mode.
+              -->
+        @if (isKeeperFormat) {
+          <import-keeper
+            [formGroup]="formGroup"
+            (importCompleted)="performDirectImport($event)"
+          ></import-keeper>
+        }
+
+        <!-- Show file selector and textarea for non-Keeper formats or non-direct Keeper methods -->
+        @if (!isKeeperFormat || keeperMethod !== "direct") {
+          <bit-file-upload
+            formControlName="file"
+            id="import_input_file"
+            [accept]="fileInputAcceptHint ?? ''"
+          >
+            <bit-label>{{ "selectImportFile" | i18n }}</bit-label>
+          </bit-file-upload>
+          <bit-form-field disableMargin>
+            <bit-label>{{ "orCopyPasteFileContents" | i18n }}</bit-label>
+            <textarea
+              id="import_textarea_fileContents"
+              bitInput
+              formControlName="fileContents"
+            ></textarea>
+          </bit-form-field>
+        }
+      }
+    </bit-card>
+  </bit-section>
+</form>

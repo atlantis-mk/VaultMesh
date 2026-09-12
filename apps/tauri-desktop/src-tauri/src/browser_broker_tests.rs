@@ -4,6 +4,75 @@ use std::fs;
 const NOW: i64 = 1_800_000_000_000;
 const PASSWORD: &str = "browser lifecycle test password";
 
+#[test]
+fn parallel_browser_identities_have_independent_authentication_and_unlock_owners() {
+    let (root, path, mut existing, existing_secret) = setup("parallel-identities");
+    let dev_secret = [0x6b; 32];
+    let mut development = BrowserBrokerCore::new(path, Zeroizing::new(dev_secret)).unwrap();
+    let unlock = || json!({ "masterPassword": PASSWORD, "userGestureId": Uuid::new_v4() });
+    assert_eq!(call(&mut existing, &existing_secret, "vault.unlock", unlock(), Uuid::new_v4())["ok"], true);
+    assert_eq!(call(&mut development, &dev_secret, "items.list", json!({}), Uuid::new_v4())["error"]["code"], "unlock-required");
+    assert_eq!(call(&mut development, &existing_secret, "vault.unlock", unlock(), Uuid::new_v4())["status"], "unpaired");
+    assert_eq!(call(&mut existing, &dev_secret, "items.list", json!({}), Uuid::new_v4())["status"], "unpaired");
+    assert_eq!(call(&mut development, &dev_secret, "vault.unlock", unlock(), Uuid::new_v4())["ok"], true);
+    existing.lock_for_system();
+    assert_eq!(call(&mut development, &dev_secret, "items.list", json!({}), Uuid::new_v4())["ok"], true);
+    development.lock_for_system();
+    assert_eq!(call(&mut development, &dev_secret, "items.list", json!({}), Uuid::new_v4())["error"]["code"], "unlock-required");
+    drop(development); drop(existing);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn native_login_plan_uses_authenticated_execute_and_one_use_assignments() {
+    let (root, _path, mut broker, secret) = setup("native-login-plan");
+    assert_eq!(call(&mut broker, &secret, "vault.unlock", json!({ "masterPassword": PASSWORD, "userGestureId": Uuid::new_v4() }), Uuid::new_v4())["ok"], true);
+    let items = call(&mut broker, &secret, "items.list", json!({}), Uuid::new_v4());
+    let handle = Uuid::new_v4();
+    let input = json!({
+        "mode": "selection", "userGestureId": Uuid::new_v4(),
+        "nativeLoginPlan": [{ "handle": handle, "source": "password" }],
+        "discovery": {
+            "version": 1, "requestId": Uuid::new_v4(), "issuedAt": "2027-01-15T08:00:00.000Z", "expiresAt": "2027-01-15T08:00:30.000Z",
+            "tabId": 4, "topOrigin": "https://example.com", "targetOrigin": "https://example.com", "targetPageUrl": "https://example.com/login",
+            "selectedItem": { "kind": "login", "id": items["result"][0]["id"], "title": "Example" },
+            "frames": [{ "frameId": 0, "documentId": Uuid::new_v4(), "frameOrigin": "https://example.com", "fields": [{
+                "handle": handle, "control": "input", "inputType": "password", "isEmpty": true, "autocomplete": [],
+                "label": "", "name": "", "id": "", "placeholder": "", "context": "unknown"
+            }] }]
+        }
+    });
+    let result = call(&mut broker, &secret, "browser.autofill.execute", input.clone(), Uuid::new_v4());
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["result"]["frames"][0]["assignments"], json!([{ "handle": handle, "value": "secret", "overwrite": false }]));
+    assert_eq!(result["result"]["frames"][0]["documentId"], input["discovery"]["frames"][0]["documentId"]);
+    assert!(result["result"].get("password").is_none());
+    assert_eq!(call(&mut broker, &secret, "browser.autofill.execute", input.clone(), Uuid::new_v4())["ok"], false);
+    let updated = call(&mut broker, &secret, "items.update", json!({
+        "id": items["result"][0]["id"], "title": "Example", "username": "alice", "password": null,
+        "url": "https://example.com", "notes": null, "folder": null, "favorite": false,
+        "additionalUrls": [], "autofillOnPageLoad": false, "masterPasswordReprompt": true,
+        "customFields": [{ "label": "tenant", "value": "synthetic-custom" }], "totpSecret": null, "clearTotpSecret": false,
+        "recoveryCodes": null, "clearRecoveryCodes": false, "userGestureId": Uuid::new_v4(),
+    }), Uuid::new_v4());
+    assert_eq!(updated["ok"], true);
+    let profile = call(&mut broker, &secret, "browser.autofill.profile", json!({ "id": items["result"][0]["id"] }), Uuid::new_v4());
+    assert_eq!(profile["ok"], true);
+    assert_eq!(profile["result"], json!({ "id": items["result"][0]["id"], "customFields": [{ "index": 0, "name": "tenant" }] }));
+    assert!(!profile.to_string().contains("synthetic-custom"));
+    let mut reprompt = input.clone();
+    reprompt["discovery"]["requestId"] = json!(Uuid::new_v4());
+    assert_eq!(call(&mut broker, &secret, "browser.autofill.execute", reprompt.clone(), Uuid::new_v4())["error"]["code"], "re-prompt-required");
+    reprompt["discovery"]["requestId"] = json!(Uuid::new_v4());
+    reprompt["masterPassword"] = json!(PASSWORD);
+    assert_eq!(call(&mut broker, &secret, "browser.autofill.execute", reprompt, Uuid::new_v4())["ok"], true);
+    call(&mut broker, &secret, "vault.lock", json!({ "userGestureId": Uuid::new_v4() }), Uuid::new_v4());
+    assert_eq!(call(&mut broker, &secret, "browser.autofill.execute", input, Uuid::new_v4())["error"]["code"], "unlock-required");
+    assert_eq!(call(&mut broker, &secret, "browser.autofill.profile", json!({ "id": items["result"][0]["id"] }), Uuid::new_v4())["error"]["code"], "unlock-required");
+    drop(broker);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
 fn setup(name: &str) -> (PathBuf, PathBuf, BrowserBrokerCore, [u8; 32]) {
     let root =
         std::env::temp_dir().join(format!("vaultmesh-tauri-browser-{name}-{}", Uuid::new_v4()));
@@ -395,8 +464,8 @@ fn operation_policy_is_exhaustive_and_confirmation_tokens_are_single_use() {
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(TAURI_BROWSER_SLICE_OPERATIONS.len(), 111);
-    assert_eq!(operations.len(), 111);
+    assert_eq!(TAURI_BROWSER_SLICE_OPERATIONS.len(), 112);
+    assert_eq!(operations.len(), 112);
     for operation in TAURI_BROWSER_SLICE_OPERATIONS {
         let owners = [
             is_broker_operation(operation),

@@ -1,0 +1,52 @@
+// FIXME: Update this file to be type safe and remove this and next line
+// @ts-strict-ignore
+// eslint-disable-next-line no-restricted-imports
+import { EncString } from "@bitwarden/legacy-crypto";
+
+import {
+  CollectionView,
+  Collection as CollectionDomain,
+} from "../../admin-console/models/collections";
+import { CollectionId, emptyGuid, OrganizationId } from "../../types/guid";
+
+import { safeGetString } from "./utils";
+
+export class CollectionExport {
+  static template(): CollectionExport {
+    const req = new CollectionExport();
+    req.organizationId = emptyGuid as OrganizationId;
+    req.name = "Collection name";
+    req.externalId = null;
+    return req;
+  }
+
+  static toView(req: CollectionExport, id: CollectionId) {
+    const view = new CollectionView({
+      name: req.name,
+      organizationId: req.organizationId,
+      id,
+    });
+    view.externalId = req.externalId;
+    return view;
+  }
+
+  static toDomain(req: CollectionExport, domain: CollectionDomain) {
+    domain.name = req.name != null ? new EncString(req.name) : null;
+    domain.externalId = req.externalId;
+    if (domain.organizationId == null) {
+      domain.organizationId = req.organizationId;
+    }
+    return domain;
+  }
+
+  organizationId: OrganizationId;
+  name: string;
+  externalId: string;
+
+  // Use build method instead of ctor so that we can control order of JSON stringify for pretty print
+  build(o: CollectionView | CollectionDomain) {
+    this.organizationId = o.organizationId;
+    this.name = safeGetString(o.name);
+    this.externalId = o.externalId;
+  }
+}

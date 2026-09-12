@@ -1,0 +1,212 @@
+<main class="tw-p-4 tw-min-h-full">
+  <header class="tw-flex tw-items-center tw-justify-between tw-mb-4">
+    <h1 class="tw-text-lg tw-font-semibold">VaultMesh</h1>
+    <div class="tw-flex tw-gap-2">
+      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="session.refresh()">刷新</button>
+      @if (state().status === "ready") {
+        @if (!independentEditor()) { <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="openEditorWindow()">独立窗口</button> }
+        @if (!independentEditor()) { <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="openEmail()">邮箱验证码</button> }
+        @if (surface() === 'login') {
+          <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="newLogin()">新建</button>
+          <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="openRecovery()">回收站</button>
+        }
+        <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="lock()">锁定</button>
+      }
+    </div>
+  </header>
+  @if (state().status === 'ready') {
+    <nav aria-label="条目类型" class="tw-flex tw-flex-wrap tw-gap-2 tw-mb-3">
+      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" [attr.aria-current]="surface() === 'login' ? 'page' : null" (click)="showSurface('login')">登录</button>
+      @for (tab of managedTabs; track tab.kind) { <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" [attr.aria-current]="surface() === tab.kind ? 'page' : null" (click)="showSurface(tab.kind)">{{ tab.label }}</button> }
+      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="showSurface('tools')">设置与工具</button>
+      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="showSurface('generator')">生成器</button>
+      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="showSurface('vault')">保险库</button>
+    </nav>
+    @for (kind of managedSurface(); track kind) { <vaultmesh-managed-items [kind]="kind" [independent]="independentEditor()" /> }
+    @if (surface() === 'tools') { <vaultmesh-security-tools [independent]="independentEditor()" /> }
+    @if (surface() === 'generator') { <vaultmesh-generator [independent]="independentEditor()" /> }
+    @if (surface() === 'vault') { <vaultmesh-vault-lifecycle [independent]="independentEditor()" /> }
+  }
+  <div aria-live="polite" class="tw-mb-3 tw-text-muted">
+    @switch (state().status) {
+      @case ("loading") { 正在连接桌面端… }
+      @case ("unavailable") { 请启动 VaultMesh 桌面端，并允许插件连接桌面应用。 }
+      @case ("unpaired") { 请在桌面端完成此插件的配对。 }
+      @case ("locked") { 插件已锁定，需要单独解锁。 }
+      @case ("ready") { 插件已独立解锁 }
+    }
+  </div>
+  @if (state().error) { <p role="alert">{{ state().error }}</p> }
+  @if (notice()) { <p role="status" class="tw-mb-3">{{ notice() }}</p> }
+  @if (fileDialogActive()) {
+    <p role="status">请在桌面原生对话框完成操作，最多等待 45 秒；草稿不会写入插件存储。</p>
+    <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">取消并清除草稿</button>
+  }
+  @if (savedSource(); as source) {
+    <p>登录已保存，原文件“{{ source.fileName }}”仍保留。</p>
+    <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="finishSourceCleanup()">询问是否删除源文件</button>
+    <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">保留源文件</button>
+  }
+  @if (state().status === "unavailable" || state().status === "unpaired") {
+    <button bitButton buttonType="primary" type="button" [disabled]="state().busy" (click)="session.connect()">连接桌面端</button>
+  }
+  @if (state().status === "locked" && state().vault?.hasVault) {
+    @if (surface() === 'tools') { <vaultmesh-security-tools [locked]="true" [independent]="independentEditor()" /> }
+    @else { <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="showSurface('tools')">PIN / 生物识别解锁</button> }
+    <form (ngSubmit)="unlock()">
+      <bit-form-field>
+        <bit-label>主密码</bit-label>
+        <input bitInput type="password" name="masterPassword" autocomplete="off"
+          [(ngModel)]="password" minlength="8" maxlength="1024" required [disabled]="state().busy" />
+      </bit-form-field>
+      <button bitButton buttonType="primary" type="submit" [disabled]="state().busy || password.length < 8">
+        {{ state().busy ? "正在解锁…" : "解锁插件" }}
+      </button>
+    </form>
+  }
+  @if (state().status === "locked" && state().vault?.hasVault === false) {
+    <vaultmesh-vault-lifecycle [hasVault]="false" [independent]="independentEditor()" />
+  }
+  @if (state().status === "ready" && !state().busy && surface() === 'login') {
+    @if (email(); as currentEmail) {
+      <section aria-label="邮箱验证码"><h2>邮箱验证码</h2><p>全部未过期候选；选择后仅填当前页面的空验证码字段。</p>
+        @for (candidate of currentEmail.candidates; track candidate.id) { <button bitButton type="button" (click)="fillEmail(candidate.id)">{{ candidate.code }} · {{ candidate.sourceDomain }} · {{ displayTime(candidate.receivedAt * 1000) }}</button> } @empty { <p>暂无验证码，请先在桌面端配置邮箱。</p> }
+        <button bitButton type="button" (click)="openEmail()">刷新候选</button><button bitButton type="button" (click)="closeEditor()">关闭</button>
+      </section>
+    } @else if (passkeyDelete(); as target) {
+      <section role="alertdialog" aria-label="确认删除 Passkey"><h2>永久删除 {{ target.title }}？</h2><p>无法从回收站恢复，请先确认网站仍有其他可用登录方式。</p><button bitButton buttonType="danger" type="button" (click)="confirmPasskeyDelete()">确认永久删除</button><button bitButton type="button" (click)="closeEditor()">取消</button></section>
+    } @else if (passkeyRows(); as owner) {
+      <section aria-label="登录关联 Passkey"><h2>{{ owner.title }} · Passkey</h2>
+        @for (row of owner.rows; track row.id) { <article><p>{{ row.title }} · {{ row.website }} · {{ row.account }}</p><button bitButton buttonType="danger" type="button" (click)="requestPasskeyDelete(row.id)">删除 Passkey</button></article> } @empty { <p>此登录暂无关联 Passkey。</p> }
+        <button bitButton type="button" (click)="closeEditor()">返回</button>
+      </section>
+    } @else if (codesTarget(); as target) {
+      <form (ngSubmit)="confirmCodes()" aria-label="恢复码主密码确认">
+        <h2>{{ target.title }} · {{ target.index === undefined ? "查看恢复码" : "复制第 " + (target.index + 1) + " 个恢复码" }}</h2>
+        <p>每次查看或复制都必须重新验证主密码。查看结果将在 30 秒后或关闭弹窗时清除。</p>
+        <bit-form-field><bit-label>当前主密码</bit-label>
+          <input bitInput type="password" name="recoveryMasterPassword" autocomplete="off" [(ngModel)]="fillPassword" minlength="8" maxlength="1024" required />
+        </bit-form-field>
+        <button bitButton buttonType="primary" type="submit" [disabled]="fillPassword.length < 8">验证并继续</button>
+        <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">取消</button>
+      </form>
+    } @else if (codesView(); as current) {
+      <section aria-label="恢复码">
+        <h2>{{ current.title }} · 恢复码</h2>
+        <p>仅当前弹窗临时显示，30 秒后清除。复制需再次验证主密码。</p>
+        <ol>
+          @for (code of current.codes; track $index; let index = $index) {
+            <li class="tw-my-2"><code>{{ code }}</code> <button bitButton buttonType="secondary" type="button" [attr.aria-label]="'复制第 ' + (index + 1) + ' 个恢复码'" (click)="requestCodes(current.id, index)">复制</button></li>
+          }
+        </ol>
+        <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">关闭</button>
+      </section>
+    } @else if (recoveryTarget(); as target) {
+      <section role="alertdialog" aria-labelledby="recovery-title" aria-describedby="recovery-description">
+        <h2 id="recovery-title">{{ target.destructive ? "确认永久清理" : "确认恢复" }}</h2>
+        <p id="recovery-description">{{ target.title }}。{{ target.destructive ? "此操作不能撤销。" : "将恢复所选版本的完整内容，不仅是名称。" }}</p>
+        <button bitButton [buttonType]="target.destructive ? 'danger' : 'primary'" type="button" (click)="confirmRecovery()">确认</button>
+        <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">取消</button>
+      </section>
+    } @else if (recovery(); as current) {
+      <section aria-label="登录恢复">
+        <h2>{{ current.title }}</h2>
+        <p class="tw-text-muted">只显示版本摘要，不读取历史密码。</p>
+        <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">返回</button>
+        @if (current.itemId) {
+          @for (row of current.history; track row.revisionId) {
+            <article class="tw-my-3">
+              <p>{{ row.title }} · {{ row.username }} · {{ displayTime(row.savedAt) }}</p>
+              <button bitButton buttonType="secondary" type="button" (click)="requestRecovery({ operation: 'items.history.restore', itemId: row.itemId, revisionId: row.revisionId }, '恢复 ' + row.title + '（' + displayTime(row.savedAt) + '）')">恢复此版本</button>
+            </article>
+          } @empty { <p>暂无历史版本。</p> }
+          <button bitButton buttonType="danger" type="button" [disabled]="!current.history.length" (click)="requestRecovery({ operation: 'items.history.clear', id: current.itemId }, '清空此登录条目的全部历史版本')">清空历史</button>
+        } @else {
+          @for (row of current.trash; track row.trashId) {
+            <article class="tw-my-3">
+              <p>{{ row.title }} · {{ row.username }} · {{ displayTime(row.deletedAt) }}</p>
+              <button bitButton buttonType="secondary" type="button" (click)="requestRecovery({ operation: 'items.trash.restore', trashId: row.trashId, itemId: row.itemId }, '恢复 ' + row.title)">恢复</button>
+              <button bitButton buttonType="danger" type="button" (click)="requestRecovery({ operation: 'items.trash.purge', trashId: row.trashId }, '永久删除 ' + row.title)">永久删除</button>
+            </article>
+          } @empty { <p>回收站为空。</p> }
+          <button bitButton buttonType="danger" type="button" [disabled]="!current.trash.length" (click)="requestRecovery({ operation: 'items.trash.empty' }, '永久删除登录回收站中的全部条目')">清空回收站</button>
+        }
+      </section>
+    } @else if (copyTarget(); as target) {
+      <form (ngSubmit)="confirmCopy()" aria-label="确认复制">
+        <p>由桌面端将“{{ target.title }}”的{{ target.field === "username" ? "用户名" : target.field === "password" ? "密码" : "验证码" }}复制到系统剪贴板。秘密值不会返回插件。</p>
+        @if (target.reprompt) {
+          <bit-form-field><bit-label>主密码二次确认</bit-label>
+            <input bitInput type="password" name="copyMasterPassword" autocomplete="off" [(ngModel)]="fillPassword" minlength="8" maxlength="1024" required />
+          </bit-form-field>
+        }
+        <button bitButton buttonType="primary" type="submit" [disabled]="target.reprompt && fillPassword.length < 8">确认复制</button>
+        <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">取消</button>
+      </form>
+    } @else if (fillTarget(); as target) {
+      <form (ngSubmit)="confirmFill()" aria-label="确认填充">
+        <p>将“{{ target.title }}”填入当前页面的登录字段。会覆盖匹配字段中的已有内容，不会提交表单。</p>
+        <p class="tw-text-muted">OTP 只填空字段。跨源内嵌页面必须显式选择并确认下面显示的目标地址。</p>
+        <label for="fill-frame">填充目标</label>
+        <select id="fill-frame" name="fillFrame" [(ngModel)]="fillFrameIndex">
+          <option value="">当前顶层页面及同源内嵌页面（页内二次验证保留原表单目标）</option>
+          @for (frame of fillFrames(); track frame.frameId; let index = $index) {
+            <option [value]="index">仅 frame {{ frame.frameId }}：{{ frame.url }}</option>
+          }
+        </select>
+        @if (target.reprompt) {
+          <bit-form-field>
+            <bit-label>主密码二次确认</bit-label>
+            <input bitInput type="password" name="fillMasterPassword" autocomplete="off" [(ngModel)]="fillPassword" minlength="8" maxlength="1024" required />
+          </bit-form-field>
+        }
+        <button bitButton buttonType="primary" type="submit" [disabled]="target.reprompt && fillPassword.length < 8">确认填充当前页面</button>
+        <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">取消</button>
+      </form>
+    } @else if (draft(); as currentDraft) {
+      @if (qrScanning()) { <p role="status">正在扫描当前可见页面…</p><button bitButton type="button" (click)="clearQrCandidates()">取消扫描</button> }
+      @if (qrCandidates().length) {
+        <section aria-label="二维码候选">
+          <p>候选最多保留 30 秒，不显示完整密钥。</p>
+          @if (currentDraft.hasTotpSecret || currentDraft.cipher.login.totp) { <label><input type="checkbox" name="qrOverwrite" [(ngModel)]="qrOverwrite" /> 确认替换已有身份验证器密钥</label> }
+          @for (candidate of qrCandidates(); track $index; let index = $index) { <button bitButton type="button" [disabled]="!!(currentDraft.hasTotpSecret || currentDraft.cipher.login.totp) && !qrOverwrite" (click)="applyQr(index)">{{ candidate.issuer || '未标注来源' }} · {{ candidate.account || '未标注账号' }}</button> }
+          <button bitButton type="button" (click)="clearQrCandidates()">取消</button>
+        </section>
+      }
+      <vaultmesh-login-editor [draft]="currentDraft" [canScanQr]="!independentEditor() && !qrScanning()" (scanQr)="scanQr()" [canImportFile]="independentEditor()" (importFile)="importRecoveryFile()" (save)="saveLogin()" (cancel)="closeEditor()" (remove)="requestDelete()" />
+    } @else if (deleteTarget(); as target) {
+      <section role="alertdialog" aria-labelledby="delete-title" aria-describedby="delete-description">
+        <h2 id="delete-title">删除登录信息</h2>
+        <p id="delete-description">确认将“{{ target.title }}”移至回收站？</p>
+        <button bitButton buttonType="danger" type="button" (click)="confirmDelete()">确认删除</button>
+        <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">取消</button>
+      </section>
+    } @else {
+    <bit-form-field>
+      <bit-label>搜索登录信息</bit-label>
+      <input bitInput type="search" autocomplete="off" [ngModel]="query()" (ngModelChange)="query.set($event)" />
+    </bit-form-field>
+    <bit-item-group>
+      @for (cipher of rows(); track cipher.id) {
+        <bit-item>
+          <bit-item-content>
+            {{ cipher.name }}
+            <span slot="secondary">{{ cipher.login.username || cipher.login.uri }}</span>
+            <div slot="end" class="tw-flex tw-flex-wrap tw-gap-2">
+              @if (!independentEditor()) { <button bitButton buttonType="secondary" type="button" [attr.aria-label]="'填充 ' + cipher.name" (click)="requestFill(cipher.id)">填充</button> }
+              <button bitButton buttonType="secondary" type="button" [attr.aria-label]="'编辑 ' + cipher.name" (click)="editLogin(cipher.id)">编辑</button>
+              <button bitButton buttonType="secondary" type="button" [attr.aria-label]="'历史版本 ' + cipher.name" (click)="openRecovery(cipher.id)">历史</button>
+              <button bitButton buttonType="secondary" type="button" [attr.aria-label]="'Passkey ' + cipher.name" (click)="openPasskeys(cipher.id)">Passkey</button>
+              <button bitButton buttonType="secondary" type="button" [disabled]="!canCopy(cipher.id, 'username')" [attr.aria-label]="'复制用户名 ' + cipher.name" (click)="requestCopy(cipher.id, 'username')">用户名</button>
+              <button bitButton buttonType="secondary" type="button" [disabled]="!canCopy(cipher.id, 'password')" [attr.aria-label]="'复制密码 ' + cipher.name" (click)="requestCopy(cipher.id, 'password')">密码</button>
+              <button bitButton buttonType="secondary" type="button" [disabled]="!canCopy(cipher.id, 'totp')" [attr.aria-label]="'复制验证码 ' + cipher.name" (click)="requestCopy(cipher.id, 'totp')">验证码</button>
+              <button bitButton buttonType="secondary" type="button" [disabled]="!hasRecoveryCodes(cipher.id)" [attr.aria-label]="'查看恢复码 ' + cipher.name" (click)="requestCodes(cipher.id)">恢复码</button>
+            </div>
+          </bit-item-content>
+        </bit-item>
+      } @empty { <p>{{ state().logins.length ? "没有匹配的登录信息。" : "保险库暂无登录信息。" }}</p> }
+    </bit-item-group>
+    }
+  }
+  @if (state().status === "ready" && state().busy) { <p role="status">正在处理，请稍候…</p> }
+</main>

@@ -1,0 +1,71 @@
+<form #editorForm="ngForm" (ngSubmit)="editorForm.valid && save.emit()" autocomplete="off">
+  <h2 class="tw-text-lg tw-font-semibold tw-mb-3">{{ draft.cipher.id ? "编辑登录信息" : "新建登录信息" }}</h2>
+  <bit-form-field>
+    <bit-label>名称</bit-label>
+    <input bitInput name="title" [(ngModel)]="draft.cipher.name" required maxlength="256" />
+  </bit-form-field>
+  <bit-form-field>
+    <bit-label>用户名</bit-label>
+    <input bitInput name="username" [(ngModel)]="draft.cipher.login.username" maxlength="2048" />
+  </bit-form-field>
+  <bit-form-field>
+    <bit-label>{{ draft.cipher.id ? "新密码（留空保留原密码）" : "密码" }}</bit-label>
+    <input bitInput type="password" name="password" autocomplete="new-password"
+      [(ngModel)]="draft.cipher.login.password" [required]="!draft.cipher.id" maxlength="10000" />
+  </bit-form-field>
+  @for (uri of draft.cipher.login.uris; track uri; let index = $index) {
+    <bit-form-field>
+      <bit-label>{{ index === 0 ? "网站地址" : "附加地址 " + index }}</bit-label>
+      <input bitInput [name]="'uri-' + index" [(ngModel)]="uri.uri" maxlength="10000" />
+    </bit-form-field>
+    @if (index > 0) {
+      <button bitButton buttonType="secondary" type="button" (click)="draft.cipher.login.uris.splice(index, 1)">移除附加地址 {{ index }}</button>
+    }
+  }
+  <button bitButton buttonType="secondary" type="button" [disabled]="draft.cipher.login.uris.length >= 21" (click)="draft.addUri()">添加网站地址</button>
+  <bit-form-field>
+    <bit-label>文件夹</bit-label>
+    <input bitInput name="folder" [(ngModel)]="draft.folder" maxlength="256" />
+  </bit-form-field>
+  <bit-form-field>
+    <bit-label>备注</bit-label>
+    <textarea bitInput name="notes" [(ngModel)]="draft.cipher.notes" maxlength="10000"></textarea>
+  </bit-form-field>
+  <bit-form-control><input bitCheckbox type="checkbox" name="favorite" [(ngModel)]="draft.cipher.favorite" /><bit-label>收藏</bit-label></bit-form-control>
+  <bit-form-control><input bitCheckbox type="checkbox" name="autofill" [(ngModel)]="draft.cipher.login.autofillOnPageLoad" /><bit-label>允许页面加载时自动填充</bit-label></bit-form-control>
+  <bit-form-control><input bitCheckbox type="checkbox" name="reprompt" [(ngModel)]="draft.reprompt" /><bit-label>使用前再次验证主密码</bit-label></bit-form-control>
+
+  <h3 class="tw-font-semibold tw-mt-4">身份验证器与恢复码</h3>
+  @if (draft.hasTotpSecret) { <p>已保存身份验证器密钥；留空保留，输入新密钥将替换。</p> }
+  <bit-form-field>
+    <bit-label>身份验证器密钥</bit-label>
+    <input bitInput type="password" name="totp" [(ngModel)]="draft.cipher.login.totp" maxlength="10000" [disabled]="draft.clearTotpSecret" />
+  </bit-form-field>
+  @if (canScanQr) { <button bitButton buttonType="secondary" type="button" (click)="scanQr.emit()">扫描当前页面二维码</button> }
+  @if (draft.hasTotpSecret) {
+    <bit-form-control><input bitCheckbox type="checkbox" name="clearTotp" [(ngModel)]="draft.clearTotpSecret" (ngModelChange)="draft.cipher.login.totp = ''" /><bit-label>移除已保存的身份验证器密钥</bit-label></bit-form-control>
+  }
+  @if (draft.hasRecoveryCodes) { <p>已保存恢复码；留空保留，输入新恢复码将替换。</p> }
+  <button bitButton buttonType="secondary" type="button" [disabled]="!canImportFile" (click)="importFile.emit()">从文件导入并替换草稿恢复码</button>
+  @if (!canImportFile) { <p>文件导入仅在独立编辑窗口可用，未保存草稿不会跨窗口迁移。</p> }
+  <bit-form-field>
+    <bit-label>新恢复码（每行一个）</bit-label>
+    <textarea bitInput name="recoveryCodes" [(ngModel)]="draft.recoveryCodes" maxlength="25700" [disabled]="draft.clearRecoveryCodes"></textarea>
+  </bit-form-field>
+  @if (draft.hasRecoveryCodes) {
+    <bit-form-control><input bitCheckbox type="checkbox" name="clearCodes" [(ngModel)]="draft.clearRecoveryCodes" (ngModelChange)="draft.recoveryCodes = ''" /><bit-label>移除已保存的恢复码</bit-label></bit-form-control>
+  }
+
+  <h3 class="tw-font-semibold tw-mt-4">自定义字段</h3>
+  @for (field of draft.cipher.fields; track field; let index = $index) {
+    <bit-form-field><bit-label>字段名称 {{ index + 1 }}</bit-label><input bitInput [name]="'field-name-' + index" [(ngModel)]="field.name" required maxlength="256" /></bit-form-field>
+    <bit-form-field><bit-label>字段值 {{ index + 1 }}</bit-label><input bitInput type="password" [name]="'field-value-' + index" [(ngModel)]="field.value" maxlength="10000" /></bit-form-field>
+    <button bitButton buttonType="secondary" type="button" (click)="draft.removeField(index)">移除字段 {{ index + 1 }}</button>
+  }
+  <button bitButton buttonType="secondary" type="button" [disabled]="draft.cipher.fields.length >= 50" (click)="draft.addField()">添加自定义字段</button>
+  <div class="tw-flex tw-flex-wrap tw-gap-2 tw-mt-4">
+    <button bitButton buttonType="primary" type="submit" [disabled]="!editorForm.valid">保存</button>
+    <button bitButton buttonType="secondary" type="button" (click)="cancel.emit()">取消</button>
+    @if (draft.cipher.id) { <button bitButton buttonType="danger" type="button" (click)="remove.emit()">删除登录信息</button> }
+  </div>
+</form>

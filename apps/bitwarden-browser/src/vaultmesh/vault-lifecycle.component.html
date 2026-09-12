@@ -1,0 +1,12 @@
+<section aria-label="保险库生命周期"><h2>{{ hasVault ? '更换主密码' : '创建保险库' }}</h2>
+  <p>{{ hasVault ? '桌面端验证旧密码后重新包装密钥。已有 PIN / 生物识别配置会失效，失败不会替换原文件。' : '将在桌面端创建加密保险库；已有保险库不会被覆盖。请妥善保管主密码，没有恢复后门。' }}</p>
+  <form (ngSubmit)="save()" autocomplete="off">
+    @if (hasVault) { <bit-form-field><bit-label>当前主密码</bit-label><input bitInput type="password" name="currentPassword" [(ngModel)]="currentPassword" (ngModelChange)="changed()" minlength="8" maxlength="1024" required [disabled]="busy()" /></bit-form-field> }
+    <bit-form-field><bit-label>新主密码</bit-label><input bitInput type="password" name="newMasterPassword" [(ngModel)]="password" (ngModelChange)="changed()" minlength="8" maxlength="1024" required [disabled]="busy()" /></bit-form-field>
+    <bit-form-field><bit-label>再次输入新主密码</bit-label><input bitInput type="password" name="repeatMasterPassword" [(ngModel)]="repeat" (ngModelChange)="changed()" minlength="8" maxlength="1024" required [disabled]="busy()" /></bit-form-field>
+    <label><input type="checkbox" name="vaultConfirmed" [(ngModel)]="confirmed" [disabled]="busy()" /> 我已确认上述操作</label>
+    <button bitButton buttonType="primary" type="submit" [disabled]="busy() || !confirmed || password.length < 8 || password !== repeat">{{ hasVault ? '更换主密码' : '创建保险库' }}</button>
+    <button bitButton buttonType="secondary" type="button" (click)="clear()">取消并清除</button>
+  </form>
+  @if (notice()) { <p role="status">{{ notice() }}</p> }
+</section>

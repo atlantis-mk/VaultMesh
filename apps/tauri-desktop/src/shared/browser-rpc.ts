@@ -32,6 +32,7 @@ export const BrowserRpcOperationSchema = z.enum([
   'browser.pairing.status',
   'browser.pairing.revoke',
   'browser.autofill.candidates',
+  'browser.autofill.profile',
   'browser.autofill.execute',
   'browser.card.capture-status',
   'browser.login.password-changed',
@@ -55,7 +56,7 @@ export const BrowserRpcOperationSchema = z.enum([
   'items.copy-totp',
   'items.recovery-codes',
   'items.copy-recovery-code',
-  'items.recovery-codes.import-file',
+  'items.recovery-codes.import-file', // phase input/results: browser-recovery-file.ts
   'items.trash.list',
   'items.trash.restore',
   'items.trash.purge',

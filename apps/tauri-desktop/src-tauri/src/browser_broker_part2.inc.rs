@@ -238,6 +238,7 @@ fn is_broker_operation(operation: &str) -> bool {
             | "browser.pairing.status"
             | "confirmation.request"
             | "browser.autofill.candidates"
+            | "browser.autofill.profile"
             | "browser.autofill.execute"
             | "browser.fill.request"
     )

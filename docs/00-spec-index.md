@@ -7,8 +7,8 @@
 - Vault 格式：`4`（唯一写入格式；format 3 仅允许 desktop 主密码验证、备份后升级；不提供降级）
 - Browser RPC：`2`
 - Native ABI：`1`
-- 状态：Tauri 2、Chromium MV3 与 Firefox MV2 扩展为当前实现；Firefox 不包含 Chromium-only Passkey proxy；Electron/Native Preview 源码已移除；`0.0.1-review` 为独立 Review 安装基线，当前 Review 更新版本为 `0.0.9-review`，正式发布门禁未完成
-- 最后更新：`2026-09-09`
+- 状态：Tauri 2 desktop、Android Compose、Chromium MV3 与 Firefox MV2 扩展为当前实现；Android 首个 create/unlock/status/lock 切片实施中，Firefox 不包含 Chromium-only Passkey proxy；Electron/Native Preview 源码已移除；`0.0.1-review` 为独立 Review 安装基线，当前 Review 更新版本为 `0.0.9-review`，正式发布门禁未完成
+- 最后更新：`2026-09-12`
 
 ## 路由顺序
 
@@ -38,6 +38,7 @@
 - `../specs/email-otp.md`：邮件 Provider、OAuth/IMAP 和候选生命周期
 - `../specs/native-desktop-migration.md`：已停止的 SwiftUI/WinUI 迁移历史证据
 - `../specs/tauri-desktop-migration.md`：Tauri 2 统一桌面运行时与发布 Gate
+- `../specs/android-client.md`：Android Compose、Kotlin/JNI 边界、私有存储与锁定生命周期
 - `../specs/lan-peer-pairing.md`：显式局域网客户端发现、双向短码验证与设备信任
 
 - `../specs/lan-vault-sync.md`：已授权桌面设备的局域网自动双向同步
@@ -92,6 +93,8 @@
 | Tauri packaging/capabilities | `../apps/tauri-desktop/src-tauri/tauri.conf.json`、`capabilities/` |
 | Tauri shared Rust runtime | `../crates/vault-ffi/src/runtime.rs`、`runtime_part*.inc.rs` |
 | Tauri shell/runtime | `../apps/tauri-desktop/` |
+| Android JNI runtime | `../crates/vault-android-runtime/` |
+| Android Compose/platform shell | `../apps/android/` |
 
 ## 未决事项
 

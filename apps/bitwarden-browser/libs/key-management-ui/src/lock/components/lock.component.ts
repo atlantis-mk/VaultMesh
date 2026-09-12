@@ -1,0 +1,804 @@
+import { CommonModule } from "@angular/common";
+import { Component, NgZone, OnDestroy, OnInit } from "@angular/core";
+import { FormBuilder, FormGroup, ReactiveFormsModule, Validators } from "@angular/forms";
+import { Router, ActivatedRoute } from "@angular/router";
+import {
+  BehaviorSubject,
+  filter,
+  firstValueFrom,
+  timer,
+  mergeMap,
+  Subject,
+  switchMap,
+  take,
+  takeUntil,
+  tap,
+} from "rxjs";
+
+import { JslibModule } from "@bitwarden/angular/jslib.module";
+import { LogoutService } from "@bitwarden/auth/common";
+import { InternalPolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
+import { MasterPasswordPolicyOptions } from "@bitwarden/common/admin-console/models/domain/master-password-policy-options";
+import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { ForceSetPasswordReason } from "@bitwarden/common/auth/models/domain/force-set-password-reason";
+import { getUserId } from "@bitwarden/common/auth/services/account.service";
+import { ClientType, DeviceType } from "@bitwarden/common/enums";
+import { DeviceTrustServiceAbstraction } from "@bitwarden/common/key-management/device-trust/abstractions/device-trust.service.abstraction";
+import { EncryptedMigrator } from "@bitwarden/common/key-management/encrypted-migrator/encrypted-migrator.abstraction";
+import { InternalMasterPasswordServiceAbstraction } from "@bitwarden/common/key-management/master-password/abstractions/master-password.service.abstraction";
+import { BroadcasterService } from "@bitwarden/common/platform/abstractions/broadcaster.service";
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
+import { MessagingService } from "@bitwarden/common/platform/abstractions/messaging.service";
+import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
+import { SyncService } from "@bitwarden/common/platform/sync";
+import { PasswordStrengthServiceAbstraction } from "@bitwarden/common/tools/password-strength";
+import { UserId } from "@bitwarden/common/types/guid";
+import { UserKey } from "@bitwarden/common/types/key";
+import {
+  TooltipDirective,
+  AsyncActionsModule,
+  AnonLayoutWrapperDataService,
+  ButtonModule,
+  DialogService,
+  FormFieldModule,
+  IconButtonModule,
+  ToastService,
+} from "@bitwarden/components";
+import {
+  KeyService,
+  BiometricStateService,
+  BiometricsService,
+  BiometricsStatus,
+  UserAsymmetricKeysRegenerationService,
+} from "@bitwarden/key-management";
+import { UnlockMethod, UnlockService } from "@bitwarden/unlock";
+
+import {
+  UnlockOption,
+  LockComponentService,
+  UnlockOptions,
+  UnlockOptionValue,
+} from "../services/lock-component.service";
+
+import { MasterPasswordLockComponent } from "./master-password-lock/master-password-lock.component";
+import { UnlockViaPrfComponent } from "./unlock-via-prf.component";
+
+const BroadcasterSubscriptionId = "LockComponent";
+
+const clientTypeToSuccessRouteRecord: Partial<Record<ClientType, string>> = {
+  [ClientType.Web]: "vault",
+  [ClientType.Desktop]: "vault",
+  [ClientType.Browser]: "/tabs/current",
+};
+
+type AfterUnlockActions = {
+  passwordEvaluation?: {
+    masterPassword: string;
+  };
+};
+
+/// The minimum amount of time to wait after a process reload for a biometrics auto prompt to be possible
+/// Fixes safari autoprompt behavior
+const AUTOPROMPT_BIOMETRICS_PROCESS_RELOAD_DELAY = 5000;
+
+const BIOMETRIC_UNLOCK_TEMPORARY_UNAVAILABLE_STATUSES = [
+  BiometricsStatus.HardwareUnavailable,
+  BiometricsStatus.DesktopDisconnected,
+  BiometricsStatus.NotEnabledInConnectedDesktopApp,
+];
+
+// FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
+// eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
+@Component({
+  selector: "bit-lock",
+  templateUrl: "lock.component.html",
+  imports: [
+    CommonModule,
+    JslibModule,
+    ReactiveFormsModule,
+    ButtonModule,
+    FormFieldModule,
+    AsyncActionsModule,
+    IconButtonModule,
+    UnlockViaPrfComponent,
+    MasterPasswordLockComponent,
+    TooltipDirective,
+  ],
+})
+export class LockComponent implements OnInit, OnDestroy {
+  private destroy$ = new Subject<void>();
+  private activeAccountChange$ = new Subject<void>();
+  protected loading = true;
+
+  activeAccount: Account | null = null;
+
+  clientType?: ClientType;
+
+  unlockOptions: UnlockOptions | null = null;
+
+  UnlockOption = UnlockOption;
+
+  private _activeUnlockOptionBSubject: BehaviorSubject<UnlockOptionValue | null> =
+    new BehaviorSubject<UnlockOptionValue | null>(null);
+
+  activeUnlockOption$ = this._activeUnlockOptionBSubject.asObservable();
+
+  set activeUnlockOption(value: UnlockOptionValue | null) {
+    this._activeUnlockOptionBSubject.next(value);
+  }
+
+  get activeUnlockOption(): UnlockOptionValue | null {
+    return this._activeUnlockOptionBSubject.value;
+  }
+
+  private invalidPinAttempts = 0;
+
+  biometricUnlockBtnText?: string;
+
+  showPassword = false;
+  private enforcedMasterPasswordOptions?: MasterPasswordPolicyOptions = undefined;
+
+  formGroup: FormGroup | null = null;
+
+  // Browser extension properties:
+  shouldClosePopout = false;
+
+  // Desktop properties:
+  private deferFocus: boolean | null = null;
+  private biometricAsked = false;
+
+  defaultUnlockOptionSetForUser = false;
+
+  unlockingViaBiometrics = false;
+
+  constructor(
+    private accountService: AccountService,
+    private keyService: KeyService,
+    private platformUtilsService: PlatformUtilsService,
+    private router: Router,
+    private activatedRoute: ActivatedRoute,
+    private dialogService: DialogService,
+    private messagingService: MessagingService,
+    private biometricStateService: BiometricStateService,
+    private ngZone: NgZone,
+    private i18nService: I18nService,
+    private masterPasswordService: InternalMasterPasswordServiceAbstraction,
+    private logService: LogService,
+    private deviceTrustService: DeviceTrustServiceAbstraction,
+    private syncService: SyncService,
+    private policyService: InternalPolicyService,
+    private passwordStrengthService: PasswordStrengthServiceAbstraction,
+    private formBuilder: FormBuilder,
+    private toastService: ToastService,
+    private userAsymmetricKeysRegenerationService: UserAsymmetricKeysRegenerationService,
+    private biometricService: BiometricsService,
+    private logoutService: LogoutService,
+    private lockComponentService: LockComponentService,
+    private anonLayoutWrapperDataService: AnonLayoutWrapperDataService,
+    private encryptedMigrator: EncryptedMigrator,
+
+    // desktop deps
+    private broadcasterService: BroadcasterService,
+    private unlockService: UnlockService,
+  ) {}
+
+  async ngOnInit() {
+    this.listenForActiveUnlockOptionChanges();
+
+    // Listen for active account changes
+    this.listenForActiveAccountChanges();
+
+    this.listenForUnlockOptionsChanges();
+
+    // Identify client
+    this.clientType = this.platformUtilsService.getClientType();
+
+    if (this.clientType === ClientType.Desktop) {
+      await this.desktopOnInit();
+    } else if (this.clientType === ClientType.Browser) {
+      this.biometricUnlockBtnText = this.lockComponentService.getBiometricsUnlockBtnText();
+    }
+  }
+
+  private listenForUnlockOptionsChanges() {
+    timer(0, 1000)
+      .pipe(
+        mergeMap(async () => {
+          // Only perform polling after the component has loaded. This prevents multiple sources setting the default active unlock option on initialization.
+          if (this.loading === false && this.activeAccount?.id != null) {
+            const prevBiometricsEnabled = this.unlockOptions?.biometrics.enabled;
+
+            this.unlockOptions = await firstValueFrom(
+              this.lockComponentService.getAvailableUnlockOptions$(this.activeAccount.id),
+            );
+
+            if (this.activeUnlockOption == null) {
+              await this.setDefaultActiveUnlockOption(this.unlockOptions);
+            } else if (!prevBiometricsEnabled && this.unlockOptions?.biometrics.enabled) {
+              await this.setDefaultActiveUnlockOption(this.unlockOptions);
+              if (this.activeUnlockOption === UnlockOption.Biometrics) {
+                await this.handleBiometricsUnlockEnabled(this.activeAccount.id);
+              }
+            }
+          }
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe();
+  }
+
+  // Base component methods
+  private listenForActiveUnlockOptionChanges() {
+    this.activeUnlockOption$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((activeUnlockOption: UnlockOptionValue | null) => {
+        if (activeUnlockOption === UnlockOption.Pin) {
+          this.buildPinForm();
+        }
+      });
+  }
+
+  private buildPinForm() {
+    this.formGroup = this.formBuilder.group(
+      {
+        pin: ["", [Validators.required]],
+      },
+      { updateOn: "submit" },
+    );
+  }
+
+  private listenForActiveAccountChanges() {
+    this.accountService.activeAccount$
+      .pipe(
+        tap((account) => {
+          this.loading = true;
+          this.activeAccount = account;
+          this.resetDataOnActiveAccountChange();
+        }),
+        filter((account): account is Account => account != null),
+        switchMap(async (account) => {
+          await this.handleActiveAccountChange(account);
+          this.loading = false;
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe();
+  }
+
+  private async handleActiveAccountChange(activeAccount: Account) {
+    // this account may be unlocked, prevent any prompts so we can redirect to vault
+    if (await this.keyService.hasUserKey(activeAccount.id)) {
+      return;
+    }
+
+    this.setEmailAsPageSubtitle(activeAccount.email);
+
+    this.unlockOptions = await firstValueFrom(
+      this.lockComponentService.getAvailableUnlockOptions$(activeAccount.id),
+    );
+
+    // The canUseBiometrics query is an expensive operation. Only call if both PIN and master password unlock are unavailable.
+    if (!this.unlockOptions?.masterPassword.enabled && !this.unlockOptions?.pin.enabled) {
+      const canUseBiometrics = [
+        BiometricsStatus.Available,
+        ...BIOMETRIC_UNLOCK_TEMPORARY_UNAVAILABLE_STATUSES,
+      ].includes(await this.biometricService.getBiometricsStatusForUser(activeAccount.id));
+      if (!canUseBiometrics) {
+        // User has no available unlock options, force logout. This happens for TDE users without a masterpassword, that don't have a persistent unlock method set.
+        this.logService.warning("[LockComponent] User cannot unlock again. Logging out!");
+        await this.logoutService.logout(activeAccount.id);
+        return;
+      }
+    }
+
+    await this.setDefaultActiveUnlockOption(this.unlockOptions);
+
+    // Every unlock of this user continues from here, except
+    // for master password, as a policy evaluation has to be run
+    this.unlockService.unlocked$
+      .pipe(
+        filter(
+          (unlock) =>
+            unlock.userId === activeAccount.id && unlock.method !== UnlockMethod.MasterPassword,
+        ),
+        take(1),
+        takeUntil(this.activeAccountChange$),
+        takeUntil(this.destroy$),
+      )
+      .subscribe(() => {
+        this.ngZone.run((): void => {
+          void this.continueAfterSettingUserKey();
+        });
+      });
+
+    if (this.unlockOptions?.biometrics.enabled) {
+      await this.handleBiometricsUnlockEnabled(activeAccount.id);
+    }
+  }
+
+  private resetDataOnActiveAccountChange() {
+    this.activeAccountChange$.next();
+    this.defaultUnlockOptionSetForUser = false;
+    this.unlockOptions = null;
+    this.activeUnlockOption = null;
+    this.formGroup = null; // new form group will be created based on new active unlock option
+
+    // Desktop properties:
+    this.biometricAsked = false;
+  }
+
+  private setEmailAsPageSubtitle(email: string) {
+    this.anonLayoutWrapperDataService.setAnonLayoutWrapperData({
+      pageSubtitle: email,
+    });
+  }
+
+  private async setDefaultActiveUnlockOption(unlockOptions: UnlockOptions | null) {
+    // Priorities should be Biometrics > Pin > Master Password for speed
+    if (unlockOptions?.biometrics.enabled) {
+      this.activeUnlockOption = UnlockOption.Biometrics;
+    } else if (unlockOptions?.pin.enabled) {
+      this.activeUnlockOption = UnlockOption.Pin;
+    } else if (unlockOptions?.masterPassword.enabled) {
+      this.activeUnlockOption = UnlockOption.MasterPassword;
+    } else if (
+      unlockOptions != null &&
+      BIOMETRIC_UNLOCK_TEMPORARY_UNAVAILABLE_STATUSES.includes(
+        unlockOptions.biometrics.biometricsStatus,
+      )
+    ) {
+      // If biometrics is temporarily unavailable for masterpassword-less users, but they have biometrics configured,
+      // then show the biometrics screen so the user knows why they can't unlock, and to give them the option to log out.
+      this.activeUnlockOption = UnlockOption.Biometrics;
+    }
+  }
+
+  private async handleBiometricsUnlockEnabled(userId: UserId) {
+    this.biometricUnlockBtnText = this.lockComponentService.getBiometricsUnlockBtnText();
+
+    const autoPromptBiometrics = await firstValueFrom(
+      this.biometricStateService.promptAutomatically$(userId),
+    );
+
+    // TODO: PM-12546 - we need to make our biometric autoprompt experience consistent between the
+    // desktop and extension.
+    if (this.clientType === "desktop") {
+      if (autoPromptBiometrics) {
+        this.loading = false;
+        await this.desktopAutoPromptBiometrics(userId);
+      }
+    }
+
+    if (this.clientType === "browser") {
+      if (
+        this.unlockOptions?.biometrics.enabled &&
+        autoPromptBiometrics &&
+        (await this.biometricService.getShouldAutopromptNow())
+      ) {
+        await this.biometricService.setShouldAutopromptNow(false);
+
+        const lastProcessReload = await this.biometricStateService.getLastProcessReload();
+        if (
+          lastProcessReload == null ||
+          isNaN(lastProcessReload.getTime()) ||
+          Date.now() - lastProcessReload.getTime() > AUTOPROMPT_BIOMETRICS_PROCESS_RELOAD_DELAY
+        ) {
+          // Firefox extension closes the popup when unfocused during biometric unlock, pop out the window to prevent infinite loop.
+          if (this.platformUtilsService.getDevice() === DeviceType.FirefoxExtension) {
+            await this.lockComponentService.popOutBrowserExtension();
+            this.shouldClosePopout = true;
+          }
+          this.loading = false;
+          await this.unlockViaBiometrics();
+        }
+      }
+    }
+  }
+
+  // Note: this submit method is only used for unlock methods that require a form and user input.
+  // For biometrics unlock, the method is called directly.
+  submit = async (): Promise<void> => {
+    if (this.activeUnlockOption === UnlockOption.Pin) {
+      return await this.unlockViaPin();
+    }
+  };
+
+  async swapUnlockOption(unlockOption: UnlockOptionValue): Promise<void> {
+    this.activeUnlockOption = unlockOption;
+
+    if (unlockOption === UnlockOption.Biometrics) {
+      await this.unlockViaBiometrics();
+    }
+  }
+
+  async logOut() {
+    const confirmed = await this.dialogService.openSimpleDialog({
+      title: { key: "logOut" },
+      content: { key: "logOutConfirmation" },
+      acceptButtonText: { key: "logOut" },
+      type: "warning",
+    });
+
+    if (confirmed && this.activeAccount != null) {
+      await this.logoutService.logout(this.activeAccount.id);
+      // navigate to root so redirect guard can properly route next active user or null user to correct page
+      await this.router.navigate(["/"]);
+    }
+  }
+
+  async unlockViaBiometrics(): Promise<void> {
+    if (this.unlockingViaBiometrics) {
+      return;
+    }
+
+    this.unlockingViaBiometrics = true;
+
+    try {
+      if (
+        this.unlockOptions == null ||
+        !this.unlockOptions.biometrics.enabled ||
+        this.activeAccount == null
+      ) {
+        return;
+      }
+
+      await this.biometricStateService.setUserPromptCancelled(this.activeAccount.id);
+
+      // Throws if the user cancels the biometric prompt.
+      await this.unlockService.unlockWithBiometrics(this.activeAccount.id);
+    } catch (e) {
+      // Biometrics may fail if the user does not accept or if the desktop app is disconnected.
+      this.logService.info("[LockComponent] Failed to unlock via biometrics.", e);
+    } finally {
+      this.unlockingViaBiometrics = false;
+    }
+  }
+
+  async onPrfUnlockSuccess(userKey: UserKey): Promise<void> {
+    if (this.activeAccount == null) {
+      throw new Error("No active user.");
+    }
+
+    await this.unlockService.unlockWithDecryptedUserKey(
+      this.activeAccount.id,
+      userKey,
+      UnlockMethod.Prf,
+    );
+  }
+
+  togglePassword() {
+    this.showPassword = !this.showPassword;
+  }
+
+  private validatePin(): boolean {
+    if (this.formGroup?.invalid) {
+      this.toastService.showToast({
+        variant: "error",
+        title: this.i18nService.t("errorOccurred"),
+        message: this.i18nService.t("pinRequired"),
+      });
+      return false;
+    }
+
+    return true;
+  }
+
+  private async unlockViaPin() {
+    if (!this.validatePin() || this.formGroup == null || this.activeAccount == null) {
+      return;
+    }
+
+    const pin = this.formGroup.controls.pin.value;
+
+    const MAX_INVALID_PIN_ENTRY_ATTEMPTS = 5;
+
+    try {
+      await this.unlockService.unlockWithPin(this.activeAccount.id, pin);
+    } catch {
+      // Failure state: invalid PIN or failed decryption
+      this.invalidPinAttempts++;
+
+      // Log user out if they have entered an invalid PIN too many times
+      if (this.invalidPinAttempts >= MAX_INVALID_PIN_ENTRY_ATTEMPTS) {
+        this.toastService.showToast({
+          variant: "error",
+          message: this.i18nService.t("tooManyInvalidPinEntryAttemptsLoggingOut"),
+        });
+        this.messagingService.send("logout");
+        return;
+      }
+
+      this.toastService.showToast({
+        variant: "error",
+        title: this.i18nService.t("errorOccurred"),
+        message: this.i18nService.t("invalidPin"),
+      });
+    }
+  }
+
+  async successfulMasterPasswordUnlock(event: {
+    userKey: UserKey;
+    masterPassword: string;
+  }): Promise<void> {
+    if (event.userKey == null || !event.masterPassword) {
+      this.logService.error(
+        "[LockComponent] successfulMasterPasswordUnlock called with invalid data.",
+      );
+      return;
+    }
+
+    await this.continueAfterSettingUserKey({
+      passwordEvaluation: {
+        masterPassword: event.masterPassword,
+      },
+    });
+  }
+
+  /**
+   * Shared tail of every unlock, run once the user key is set. Reached through
+   * {@link UnlockService.unlocked$} rather than called by each unlock method, so that an unlock
+   * performed elsewhere continues the same way as one performed here.
+   */
+  protected async continueAfterSettingUserKey(
+    afterUnlockActions: AfterUnlockActions = {},
+  ): Promise<void> {
+    if (this.activeAccount == null) {
+      throw new Error("No active user.");
+    }
+
+    // Add a mark to indicate that the user has unlocked their vault. A good starting point for measuring unlock performance.
+    this.logService.mark("Vault unlocked");
+
+    // Now that we have a decrypted user key in memory, we can check if we
+    // need to establish trust on the current device
+    await this.deviceTrustService.trustDeviceIfRequired(this.activeAccount.id);
+
+    await this.doContinue(afterUnlockActions);
+  }
+
+  private async doContinue(afterUnlockActions: AfterUnlockActions) {
+    if (this.activeAccount == null) {
+      throw new Error("No active user.");
+    }
+
+    await this.biometricStateService.resetUserPromptCancelled(this.activeAccount.id);
+
+    try {
+      await this.encryptedMigrator.runMigrations(
+        this.activeAccount.id,
+        afterUnlockActions.passwordEvaluation?.masterPassword ?? null,
+      );
+    } catch {
+      // Don't block login success on migration failure
+    }
+
+    this.messagingService.send("unlocked");
+
+    if (afterUnlockActions.passwordEvaluation) {
+      const userId = (await firstValueFrom(this.accountService.activeAccount$))?.id;
+      if (userId == null) {
+        throw new Error("No active user.");
+      }
+
+      try {
+        // If we do not have any saved policies, attempt to load them from the service
+        if (this.enforcedMasterPasswordOptions == undefined) {
+          this.enforcedMasterPasswordOptions = await firstValueFrom(
+            this.accountService.activeAccount$.pipe(
+              getUserId,
+              switchMap((userId) => this.policyService.masterPasswordPolicyOptions$(userId)),
+            ),
+          );
+        }
+
+        if (this.requirePasswordChange(afterUnlockActions.passwordEvaluation.masterPassword)) {
+          await this.masterPasswordService.setForceSetPasswordReason(
+            ForceSetPasswordReason.WeakMasterPassword,
+            userId,
+          );
+        }
+      } catch (e) {
+        // Do not prevent unlock if there is an error evaluating policies
+        this.logService.error(e);
+      }
+    }
+
+    if (this.platformUtilsService.getClientType() == ClientType.Web) {
+      const startSync = performance.now();
+
+      // Web does not cache vault data and would be in a unusable state when unlocked.
+      await this.syncService.fullSync(true);
+
+      this.logService.measure(startSync, "KeyManagement", "LockComponent", "sync complete");
+    } else {
+      // On non-web clients, we start a sync in the background, but to not block by it
+      void this.syncService.fullSync(false);
+    }
+
+    const startRegeneration = new Date().getTime();
+    // TODO: This should probably not be blocking
+    await this.userAsymmetricKeysRegenerationService.regenerateIfNeeded(this.activeAccount.id);
+    this.logService.info(
+      `[LockComponent] Private key regeneration took ${new Date().getTime() - startRegeneration}ms`,
+    );
+
+    if (this.clientType === "browser") {
+      const previousUrl = this.lockComponentService.getPreviousUrl();
+      /**
+       * In a passkey flow, the `previousUrl` will still be `/fido2?<queryParams>` at this point
+       * because the `/lock` route doesn't save the URL in the `BrowserRouterService`. This is
+       * handled by the `doNotSaveUrl` property on the `/lock` route in `app-routing.module.ts`.
+       */
+      if (previousUrl) {
+        await this.router.navigateByUrl(previousUrl);
+        return;
+      }
+    }
+
+    // determine success route based on client type
+    // The disable-redirect parameter allows callers to prevent automatic navigation after unlock,
+    // useful when the lock component is used in contexts where custom post-unlock behavior is needed
+    // such as passkey modals.
+    if (
+      this.clientType != null &&
+      this.activatedRoute.snapshot.paramMap.get("disable-redirect") === null
+    ) {
+      const successRoute = clientTypeToSuccessRouteRecord[this.clientType];
+      await this.router.navigate([successRoute]);
+    }
+
+    if (
+      this.shouldClosePopout &&
+      this.platformUtilsService.getDevice() === DeviceType.FirefoxExtension
+    ) {
+      this.lockComponentService.closeBrowserExtensionPopout();
+    }
+  }
+
+  /**
+   * Checks if the master password meets the enforced policy requirements
+   * If not, returns false
+   */
+  private requirePasswordChange(masterPassword: string): boolean {
+    if (
+      this.enforcedMasterPasswordOptions == undefined ||
+      !this.enforcedMasterPasswordOptions.enforceOnLogin ||
+      this.activeAccount == null
+    ) {
+      return false;
+    }
+
+    const passwordStrength = this.passwordStrengthService.getPasswordStrength(
+      masterPassword,
+      this.activeAccount.email,
+    )?.score;
+
+    return !this.policyService.evaluateMasterPassword(
+      passwordStrength,
+      masterPassword,
+      this.enforcedMasterPasswordOptions,
+    );
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Desktop methods:
+  // -----------------------------------------------------------------------------------------------
+
+  async desktopOnInit() {
+    this.biometricUnlockBtnText = this.lockComponentService.getBiometricsUnlockBtnText();
+
+    // TODO: move this into a WindowService and subscribe to messages via MessageListener service.
+    this.broadcasterService.subscribe(BroadcasterSubscriptionId, async (message: any) => {
+      this.ngZone.run(() => {
+        switch (message.command) {
+          case "windowHidden":
+            this.onWindowHidden();
+            break;
+          case "windowIsFocused":
+            if (this.deferFocus === null) {
+              this.deferFocus = !message.windowIsFocused;
+              if (!this.deferFocus) {
+                this.focusInput();
+              }
+            } else if (this.deferFocus && message.windowIsFocused) {
+              this.focusInput();
+              this.deferFocus = false;
+            }
+            break;
+          default:
+        }
+      });
+    });
+    this.messagingService.send("getWindowIsFocused");
+  }
+
+  private async desktopAutoPromptBiometrics(userId: UserId) {
+    if (!this.unlockOptions?.biometrics?.enabled || this.biometricAsked) {
+      return;
+    }
+
+    if (!(await this.biometricService.getShouldAutopromptNow())) {
+      return;
+    }
+
+    // prevent the biometric prompt from showing if the user has already cancelled it
+    if (await firstValueFrom(this.biometricStateService.promptCancelled$(userId))) {
+      return;
+    }
+
+    const windowVisible = await this.lockComponentService.isWindowVisible();
+
+    if (windowVisible) {
+      this.biometricAsked = true;
+      await this.unlockViaBiometrics();
+    }
+  }
+
+  onWindowHidden() {
+    this.showPassword = false;
+  }
+
+  private focusInput() {
+    if (this.unlockOptions) {
+      document.getElementById(this.unlockOptions.pin.enabled ? "pin" : "masterPassword")?.focus();
+    }
+  }
+
+  // -----------------------------------------------------------------------------------------------
+
+  ngOnDestroy() {
+    this.destroy$.next();
+    this.destroy$.complete();
+
+    if (this.clientType === "desktop") {
+      this.broadcasterService.unsubscribe(BroadcasterSubscriptionId);
+    }
+  }
+
+  get biometricsAvailable(): boolean {
+    return this.unlockOptions?.biometrics.enabled ?? false;
+  }
+
+  get showBiometrics(): boolean {
+    if (this.unlockOptions == null) {
+      return false;
+    }
+    return (
+      this.unlockOptions.biometrics.biometricsStatus !== BiometricsStatus.PlatformUnsupported &&
+      this.unlockOptions.biometrics.biometricsStatus !== BiometricsStatus.NotEnabledLocally
+    );
+  }
+
+  get biometricUnavailabilityReason(): string {
+    switch (this.unlockOptions?.biometrics.biometricsStatus) {
+      case BiometricsStatus.Available:
+        return "";
+      case BiometricsStatus.UnlockNeeded:
+        return this.i18nService.t("biometricsStatusHelptextUnlockNeeded");
+      case BiometricsStatus.HardwareUnavailable:
+        return this.i18nService.t("biometricsStatusHelptextHardwareUnavailable");
+      case BiometricsStatus.AutoSetupNeeded:
+        return this.i18nService.t("biometricsStatusHelptextAutoSetupNeeded");
+      case BiometricsStatus.ManualSetupNeeded:
+        return this.i18nService.t("biometricsStatusHelptextManualSetupNeeded");
+      case BiometricsStatus.NotEnabledInConnectedDesktopApp:
+        return this.i18nService.t(
+          "biometricsStatusHelptextNotEnabledInDesktop",
+          this.activeAccount?.email,
+        );
+      case BiometricsStatus.NotEnabledLocally:
+        return this.i18nService.t(
+          "biometricsStatusHelptextNotEnabledInDesktop",
+          this.activeAccount?.email,
+        );
+      case BiometricsStatus.DesktopDisconnected:
+        return this.i18nService.t("biometricsStatusHelptextDesktopDisconnected");
+      default:
+        return (
+          this.i18nService.t("biometricsStatusHelptextUnavailableReasonUnknown") +
+          this.unlockOptions?.biometrics.biometricsStatus
+        );
+    }
+  }
+}

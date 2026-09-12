@@ -1,0 +1,157 @@
+import { firstValueFrom, map, switchMap } from "rxjs";
+
+import { ApiService } from "../../../abstractions/api.service";
+import { AccountService } from "../../../auth/abstractions/account.service";
+import { getUserId } from "../../../auth/services/account.service";
+import { HttpStatusCode } from "../../../enums";
+import { ErrorResponse } from "../../../models/response/error.response";
+import { ListResponse } from "../../../models/response/list.response";
+import { Utils } from "../../../platform/misc/utils";
+import { InternalNewPolicyService } from "../../abstractions/policy/new-policy.service";
+import { PolicyApiServiceAbstraction } from "../../abstractions/policy/policy-api.service.abstraction";
+import { InternalPolicyService } from "../../abstractions/policy/policy.service.abstraction";
+import { PolicyType } from "../../enums";
+import { PolicyData } from "../../models/data/policy.data";
+import { MasterPasswordPolicyOptions } from "../../models/domain/master-password-policy-options";
+import { Policy } from "../../models/domain/policy";
+import { SavePolicyRequest } from "../../models/request/save-policy.request";
+import { PolicyStatusResponse } from "../../models/response/policy-status.response";
+import { PolicyResponse } from "../../models/response/policy.response";
+
+export class PolicyApiService implements PolicyApiServiceAbstraction {
+  constructor(
+    private policyService: InternalPolicyService,
+    private newPolicyService: InternalNewPolicyService,
+    private apiService: ApiService,
+    private accountService: AccountService,
+  ) {}
+
+  async getPolicy(organizationId: string, type: PolicyType): Promise<PolicyStatusResponse> {
+    const r = await this.apiService.send(
+      "GET",
+      "/organizations/" + organizationId + "/policies/" + type,
+      null,
+      true,
+      true,
+    );
+    return new PolicyResponse(r);
+  }
+
+  async getPolicies(organizationId: string): Promise<ListResponse<PolicyResponse>> {
+    const r = await this.apiService.send(
+      "GET",
+      "/organizations/" + organizationId + "/policies",
+      null,
+      true,
+      true,
+    );
+    return new ListResponse(r, PolicyResponse);
+  }
+
+  async getPoliciesByToken(
+    organizationId: string,
+    token: string,
+    email: string,
+    organizationUserId: string,
+  ): Promise<Policy[] | undefined> {
+    const r = await this.apiService.send(
+      "GET",
+      "/organizations/" +
+        organizationId +
+        "/policies/token?" +
+        "token=" +
+        encodeURIComponent(token) +
+        "&email=" +
+        Utils.encodeRFC3986URIComponent(email) +
+        "&organizationUserId=" +
+        organizationUserId,
+      null,
+      false,
+      true,
+    );
+    return Policy.fromListResponse(new ListResponse(r, PolicyResponse));
+  }
+
+  async getPoliciesByInviteLinkCode(
+    organizationId: string,
+    code: string,
+  ): Promise<Policy[] | undefined> {
+    const r = await this.apiService.send(
+      "POST",
+      "/organizations/invite-link/policies",
+      { organizationId, code },
+      false,
+      true,
+    );
+    return Policy.fromListResponse(new ListResponse(r, PolicyResponse));
+  }
+
+  private async getMasterPasswordPolicyResponseForOrgUser(
+    organizationId: string,
+  ): Promise<PolicyResponse> {
+    const response = await this.apiService.send(
+      "GET",
+      "/organizations/" + organizationId + "/policies/master-password",
+      null,
+      true,
+      true,
+    );
+
+    return new PolicyResponse(response);
+  }
+
+  async getMasterPasswordPolicyOptsForOrgUser(
+    orgId: string,
+  ): Promise<MasterPasswordPolicyOptions | null> {
+    try {
+      const masterPasswordPolicyResponse =
+        await this.getMasterPasswordPolicyResponseForOrgUser(orgId);
+
+      const masterPasswordPolicy = Policy.fromResponse(masterPasswordPolicyResponse);
+
+      if (!masterPasswordPolicy) {
+        return null;
+      }
+
+      return firstValueFrom(
+        this.accountService.activeAccount$.pipe(
+          getUserId,
+          switchMap((userId) =>
+            this.policyService.masterPasswordPolicyOptions$(userId, [masterPasswordPolicy]),
+          ),
+          map((policy) => policy ?? null),
+        ),
+      );
+    } catch (error) {
+      // If policy not found, return null
+      if (error instanceof ErrorResponse && error.statusCode === HttpStatusCode.NotFound) {
+        return null;
+      }
+      // otherwise rethrow error
+      throw error;
+    }
+  }
+
+  async putPolicy(
+    organizationId: string,
+    type: PolicyType,
+    request: SavePolicyRequest,
+  ): Promise<any> {
+    const response = await this.apiService.send(
+      "PUT",
+      `/organizations/${organizationId}/policies/${type}`,
+      request,
+      true,
+      true,
+    );
+    await this.handleResponse(response);
+  }
+
+  private async handleResponse(response: any): Promise<void> {
+    const userId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    const policyResponse = new PolicyResponse(response);
+    const data = new PolicyData(policyResponse);
+    await this.policyService.upsert(data, userId);
+    await this.newPolicyService.upsert(data, userId);
+  }
+}

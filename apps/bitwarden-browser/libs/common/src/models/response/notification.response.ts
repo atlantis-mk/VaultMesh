@@ -1,0 +1,230 @@
+import { NotificationType, PushNotificationLogOutReasonType } from "../../enums";
+import { NotificationViewResponse as EndUserNotificationResponse } from "../../vault/notifications/models";
+
+import { BaseResponse } from "./base.response";
+
+export class NotificationResponse extends BaseResponse {
+  contextId: string;
+  type: NotificationType;
+  payload: any;
+
+  constructor(response: any) {
+    super(response);
+    this.contextId = this.getResponseProperty("ContextId");
+    this.type = this.getResponseProperty("Type");
+
+    let payload = this.getResponseProperty("Payload");
+
+    if (typeof payload === "string") {
+      try {
+        payload = JSON.parse(payload);
+      } catch {
+        // guess it was a string
+      }
+    }
+
+    switch (this.type) {
+      case NotificationType.SyncCipherCreate:
+      case NotificationType.SyncCipherDelete:
+      case NotificationType.SyncCipherUpdate:
+      case NotificationType.SyncLoginDelete:
+        this.payload = new SyncCipherNotification(payload);
+        break;
+      case NotificationType.SyncFolderCreate:
+      case NotificationType.SyncFolderDelete:
+      case NotificationType.SyncFolderUpdate:
+        this.payload = new SyncFolderNotification(payload);
+        break;
+      case NotificationType.SyncVault:
+      case NotificationType.SyncCiphers:
+      case NotificationType.SyncOrganizations:
+      case NotificationType.SyncOrgKeys:
+      case NotificationType.SyncSettings:
+        this.payload = new UserNotification(payload);
+        break;
+      case NotificationType.LogOut:
+        this.payload = new LogOutNotification(payload);
+        break;
+      case NotificationType.SyncSendCreate:
+      case NotificationType.SyncSendUpdate:
+      case NotificationType.SyncSendDelete:
+        this.payload = new SyncSendNotification(payload);
+        break;
+      case NotificationType.AuthRequest:
+      case NotificationType.AuthRequestResponse:
+        this.payload = new AuthRequestPushNotification(payload);
+        break;
+      case NotificationType.SyncOrganizationStatusChanged:
+        this.payload = new OrganizationStatusPushNotification(payload);
+        break;
+      case NotificationType.SyncOrganizationCollectionSettingChanged:
+        this.payload = new OrganizationCollectionSettingChangedPushNotification(payload);
+        break;
+      case NotificationType.Notification:
+      case NotificationType.NotificationStatus:
+        this.payload = new EndUserNotificationResponse(payload);
+        break;
+      case NotificationType.OrganizationBankAccountVerified:
+        this.payload = new OrganizationBankAccountVerifiedPushNotification(payload);
+        break;
+      case NotificationType.ProviderBankAccountVerified:
+        this.payload = new ProviderBankAccountVerifiedPushNotification(payload);
+        break;
+      case NotificationType.AutoConfirmMember:
+        this.payload = new AutoConfirmMemberNotification(payload);
+        break;
+      case NotificationType.PremiumStatusChanged:
+        this.payload = new PremiumStatusChangedNotification(payload);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+export class SyncCipherNotification extends BaseResponse {
+  id: string;
+  userId: string;
+  organizationId: string;
+  collectionIds: string[];
+  revisionDate: Date;
+
+  constructor(response: any) {
+    super(response);
+    this.id = this.getResponseProperty("Id");
+    this.userId = this.getResponseProperty("UserId");
+    this.organizationId = this.getResponseProperty("OrganizationId");
+    this.collectionIds = this.getResponseProperty("CollectionIds");
+    this.revisionDate = new Date(this.getResponseProperty("RevisionDate"));
+  }
+}
+
+export class SyncFolderNotification extends BaseResponse {
+  id: string;
+  userId: string;
+  revisionDate: Date;
+
+  constructor(response: any) {
+    super(response);
+    this.id = this.getResponseProperty("Id");
+    this.userId = this.getResponseProperty("UserId");
+    this.revisionDate = new Date(this.getResponseProperty("RevisionDate"));
+  }
+}
+
+export class UserNotification extends BaseResponse {
+  userId: string;
+  date: Date;
+
+  constructor(response: any) {
+    super(response);
+    this.userId = this.getResponseProperty("UserId");
+    this.date = new Date(this.getResponseProperty("Date"));
+  }
+}
+
+export class SyncSendNotification extends BaseResponse {
+  id: string;
+  userId: string;
+  revisionDate: Date;
+
+  constructor(response: any) {
+    super(response);
+    this.id = this.getResponseProperty("Id");
+    this.userId = this.getResponseProperty("UserId");
+    this.revisionDate = new Date(this.getResponseProperty("RevisionDate"));
+  }
+}
+
+export class AuthRequestPushNotification extends BaseResponse {
+  id: string;
+  userId: string;
+
+  constructor(response: any) {
+    super(response);
+    this.id = this.getResponseProperty("Id");
+    this.userId = this.getResponseProperty("UserId");
+  }
+}
+
+export class OrganizationStatusPushNotification extends BaseResponse {
+  organizationId: string;
+  enabled: boolean;
+
+  constructor(response: any) {
+    super(response);
+    this.organizationId = this.getResponseProperty("OrganizationId");
+    this.enabled = this.getResponseProperty("Enabled");
+  }
+}
+
+export class OrganizationCollectionSettingChangedPushNotification extends BaseResponse {
+  organizationId: string;
+  limitCollectionCreation: boolean;
+  limitCollectionDeletion: boolean;
+
+  constructor(response: any) {
+    super(response);
+
+    this.organizationId = this.getResponseProperty("OrganizationId");
+    this.limitCollectionCreation = this.getResponseProperty("LimitCollectionCreation");
+    this.limitCollectionDeletion = this.getResponseProperty("LimitCollectionDeletion");
+  }
+}
+
+export class OrganizationBankAccountVerifiedPushNotification extends BaseResponse {
+  organizationId: string;
+
+  constructor(response: any) {
+    super(response);
+    this.organizationId = this.getResponseProperty("OrganizationId");
+  }
+}
+
+export class ProviderBankAccountVerifiedPushNotification extends BaseResponse {
+  providerId: string;
+  adminId: string;
+
+  constructor(response: any) {
+    super(response);
+    this.providerId = this.getResponseProperty("ProviderId");
+    this.adminId = this.getResponseProperty("AdminId");
+  }
+}
+
+export class LogOutNotification extends BaseResponse {
+  userId: string;
+  reason?: PushNotificationLogOutReasonType;
+
+  constructor(response: any) {
+    super(response);
+    this.userId = this.getResponseProperty("UserId");
+    this.reason = this.getResponseProperty("Reason");
+  }
+}
+
+export class AutoConfirmMemberNotification extends BaseResponse {
+  userId: string;
+  targetUserId: string;
+  organizationId: string;
+  targetOrganizationUserId: string;
+
+  constructor(response: any) {
+    super(response);
+    this.targetOrganizationUserId = this.getResponseProperty("TargetOrganizationUserId");
+    this.targetUserId = this.getResponseProperty("TargetUserId");
+    this.userId = this.getResponseProperty("UserId");
+    this.organizationId = this.getResponseProperty("OrganizationId");
+  }
+}
+
+export class PremiumStatusChangedNotification extends BaseResponse {
+  userId: string;
+  premium: boolean;
+
+  constructor(response: any) {
+    super(response);
+    this.userId = this.getResponseProperty("UserId");
+    this.premium = this.getResponseProperty("Premium");
+  }
+}

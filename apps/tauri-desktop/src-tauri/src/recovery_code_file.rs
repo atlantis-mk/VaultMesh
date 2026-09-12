@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -27,6 +29,69 @@ pub struct PreparedRecoveryCodeFile {
     digest: [u8; 32],
     codes: Vec<String>,
     file_name: String,
+}
+
+/// Contains no codes. Only the privileged desktop owns this bounded cleanup target.
+pub struct RecoveryFileCleanup {
+    path: PathBuf,
+    digest: [u8; 32],
+    pub file_name: String,
+    pub expires_at: i64,
+}
+
+impl RecoveryFileCleanup {
+    pub fn finish(self, confirmed: bool, now: i64) -> SourceFileStatus {
+        if confirmed && now < self.expires_at {
+            delete_unchanged_file(&self.path, self.digest)
+        } else {
+            SourceFileStatus::Kept
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct RecoveryFileCleanupSessions(HashMap<Uuid, RecoveryFileCleanup>);
+
+impl RecoveryFileCleanupSessions {
+    pub fn stage(
+        &mut self,
+        prepared: PreparedRecoveryCodeFile,
+        now: i64,
+    ) -> Result<(RecoveryCodeFileResult, Uuid, i64), String> {
+        self.0.retain(|_, entry| entry.expires_at > now);
+        if self.0.len() >= 4 {
+            return Err("待完成的恢复码导入过多，请稍后重试。".into());
+        }
+        let id = Uuid::new_v4();
+        let expires_at = now.saturating_add(5 * 60_000);
+        self.0.insert(
+            id,
+            RecoveryFileCleanup {
+                path: prepared.path,
+                digest: prepared.digest,
+                file_name: prepared.file_name.clone(),
+                expires_at,
+            },
+        );
+        Ok((
+            RecoveryCodeFileResult {
+                codes: prepared.codes,
+                file_name: prepared.file_name,
+                source_file_status: SourceFileStatus::Kept,
+            },
+            id,
+            expires_at,
+        ))
+    }
+    pub fn take(&mut self, id: Uuid, now: i64) -> Result<RecoveryFileCleanup, String> {
+        self.0.retain(|_, entry| entry.expires_at > now);
+        self.0
+            .remove(&id)
+            .ok_or_else(|| "导入文件清理已过期或已处理，原文件保持不变。".into())
+    }
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 impl PreparedRecoveryCodeFile {
@@ -326,5 +391,77 @@ mod tests {
         std::fs::remove_file(link).expect("cleanup link");
         std::fs::remove_file(target).expect("cleanup target");
         std::fs::remove_dir(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn staged_cleanup_is_bounded_one_use_and_never_deletes_on_cancel_expiry_or_revoke() {
+        let root =
+            std::env::temp_dir().join(format!("vaultmesh-staged-recovery-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("synthetic.txt");
+        std::fs::write(&path, b"synthetic-alpha\n synthetic-beta \n").unwrap();
+        let mut sessions = RecoveryFileCleanupSessions::default();
+        let (result, id, expiry) = sessions
+            .stage(PreparedRecoveryCodeFile::load(path.clone()).unwrap(), 1000)
+            .unwrap();
+        assert!(path.exists());
+        assert_eq!(result.source_file_status, SourceFileStatus::Kept);
+        assert_eq!(result.codes, vec!["synthetic-alpha", " synthetic-beta "]);
+        let ticket = sessions.take(id, 1001).unwrap();
+        assert!(sessions.take(id, 1001).is_err());
+        assert_eq!(ticket.finish(true, expiry), SourceFileStatus::Kept);
+        assert!(path.exists());
+        let (_, id, _) = sessions
+            .stage(PreparedRecoveryCodeFile::load(path.clone()).unwrap(), 1000)
+            .unwrap();
+        assert_eq!(
+            sessions.take(id, 1001).unwrap().finish(false, 1002),
+            SourceFileStatus::Kept
+        );
+        let (_, id, _) = sessions
+            .stage(PreparedRecoveryCodeFile::load(path.clone()).unwrap(), 1000)
+            .unwrap();
+        sessions.clear();
+        assert!(sessions.take(id, 1001).is_err());
+        for _ in 0..4 {
+            sessions
+                .stage(PreparedRecoveryCodeFile::load(path.clone()).unwrap(), 1000)
+                .unwrap();
+        }
+        assert!(
+            sessions
+                .stage(PreparedRecoveryCodeFile::load(path.clone()).unwrap(), 1000)
+                .is_err()
+        );
+        let (_, id, _) = sessions
+            .stage(
+                PreparedRecoveryCodeFile::load(path.clone()).unwrap(),
+                expiry,
+            )
+            .unwrap();
+        std::fs::write(&path, b"changed-content\n").unwrap();
+        assert_eq!(
+            sessions
+                .take(id, expiry + 1)
+                .unwrap()
+                .finish(true, expiry + 2),
+            SourceFileStatus::Failed
+        );
+        assert!(path.exists());
+        let (_, id, _) = sessions
+            .stage(
+                PreparedRecoveryCodeFile::load(path.clone()).unwrap(),
+                expiry + 3,
+            )
+            .unwrap();
+        assert_eq!(
+            sessions
+                .take(id, expiry + 4)
+                .unwrap()
+                .finish(true, expiry + 5),
+            SourceFileStatus::Deleted
+        );
+        assert!(!path.exists());
+        std::fs::remove_dir(root).unwrap();
     }
 }

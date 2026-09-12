@@ -1,0 +1,84 @@
+import { applicationConfig, Meta, StoryObj } from "@storybook/angular";
+
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
+import { formatArgsForCodeSnippet } from "@bitwarden/storybook";
+
+import { I18nMockService } from "../utils";
+
+import { ColorPasswordComponent } from "./color-password.component";
+
+const examplePassword = "Wq$Jk😀7jlI  DX#rS5Sdi!z0O ";
+
+export default {
+  title: "Component Library/Color Password",
+  component: ColorPasswordComponent,
+  decorators: [
+    applicationConfig({
+      providers: [
+        {
+          provide: PlatformUtilsService,
+          useValue: {
+            // eslint-disable-next-line
+            copyToClipboard: (text: string) => console.log(`${text} copied to clipboard`),
+          },
+        },
+        {
+          provide: I18nService,
+          useFactory: () =>
+            new I18nMockService({
+              passwordAnnounceSpace: "space",
+            }),
+        },
+      ],
+    }),
+  ],
+  args: {
+    password: examplePassword,
+    showCount: false,
+  },
+  parameters: {
+    design: {
+      type: "figma",
+      url: "https://www.figma.com/design/Zt3YSeb6E6lebAffrNLa0h/Tailwind-Component-Library?node-id=21540-46261&t=b5tDKylm5sWm2yKo-4",
+    },
+  },
+} as Meta;
+
+type Story = StoryObj<ColorPasswordComponent>;
+
+export const ColorPassword: Story = {
+  render: (args) => ({
+    props: args,
+    template: `
+      <bit-color-password ${formatArgsForCodeSnippet<ColorPasswordComponent>(args)}></bit-color-password>
+    `,
+  }),
+};
+
+export const WrappedColorPassword: Story = {
+  render: (args) => ({
+    props: args,
+    template: `
+      <div class="tw-max-w-32">
+        <bit-color-password ${formatArgsForCodeSnippet<ColorPasswordComponent>(args)}></bit-color-password>
+      </div>
+    `,
+  }),
+};
+
+export const ColorPasswordCount: Story = {
+  ...ColorPassword,
+  args: {
+    password: examplePassword,
+    showCount: true,
+  },
+};
+
+export const WrappedColorPasswordCount: Story = {
+  ...WrappedColorPassword,
+  args: {
+    password: examplePassword,
+    showCount: true,
+  },
+};

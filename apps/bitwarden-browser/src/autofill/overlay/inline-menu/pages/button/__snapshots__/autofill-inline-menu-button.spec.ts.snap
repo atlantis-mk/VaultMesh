@@ -1,0 +1,697 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`AutofillInlineMenuButton initAutofillInlineMenuButton creates the button element with the locked icon when the user's auth status is not Unlocked 1`] = `
+<button
+  aria-label="toggleBitwardenVaultOverlay"
+  class="inline-menu-button"
+  tabindex="-1"
+  type="button"
+>
+  <svg
+    aria-hidden="true"
+    aria-labelledby="title desc"
+    class="inline-menu-button-svg-icon logo-locked-icon"
+    role="img"
+    viewBox="64 64 896 896"
+    xmlns="http://www.w3.org/2000/svg"
+  >
+    
+  
+    <title
+      id="title"
+    >
+      VaultMesh browser extension icon
+    </title>
+    
+  
+    <desc
+      id="desc"
+    >
+      A secure vault dial connected to six mesh nodes on an indigo rounded-square field.
+    </desc>
+    
+  
+    <defs>
+      
+    
+      <lineargradient
+        gradientUnits="userSpaceOnUse"
+        id="background"
+        x1="188"
+        x2="846"
+        y1="132"
+        y2="900"
+      >
+        <stop
+          offset="0"
+          stop-color="#312E81"
+        />
+        <stop
+          offset="0.5"
+          stop-color="#5B4FCE"
+        />
+        <stop
+          offset="1"
+          stop-color="#2563EB"
+        />
+      </lineargradient>
+      
+    
+      <radialgradient
+        cx="0"
+        cy="0"
+        gradientTransform="translate(328 260) rotate(47) scale(714)"
+        gradientUnits="userSpaceOnUse"
+        id="glow"
+        r="1"
+      >
+        <stop
+          stop-color="#A5B4FC"
+          stop-opacity="0.48"
+        />
+        <stop
+          offset="0.56"
+          stop-color="#818CF8"
+          stop-opacity="0.08"
+        />
+        <stop
+          offset="1"
+          stop-color="#1E1B4B"
+          stop-opacity="0"
+        />
+      </radialgradient>
+      
+    
+      <lineargradient
+        gradientUnits="userSpaceOnUse"
+        id="vaultFace"
+        x1="384"
+        x2="656"
+        y1="356"
+        y2="680"
+      >
+        <stop
+          stop-color="#262268"
+        />
+        <stop
+          offset="1"
+          stop-color="#171441"
+        />
+      </lineargradient>
+      
+    
+      <lineargradient
+        gradientUnits="userSpaceOnUse"
+        id="metal"
+        x1="380"
+        x2="670"
+        y1="340"
+        y2="704"
+      >
+        <stop
+          stop-color="#FFFFFF"
+        />
+        <stop
+          offset="0.55"
+          stop-color="#E0E7FF"
+        />
+        <stop
+          offset="1"
+          stop-color="#A5B4FC"
+        />
+      </lineargradient>
+      
+    
+      <lineargradient
+        gradientUnits="userSpaceOnUse"
+        id="key"
+        x1="480"
+        x2="551"
+        y1="438"
+        y2="604"
+      >
+        <stop
+          stop-color="#67E8F9"
+        />
+        <stop
+          offset="1"
+          stop-color="#38BDF8"
+        />
+      </lineargradient>
+      
+    
+      <clippath
+        id="appShape"
+      >
+        <rect
+          height="840"
+          rx="188"
+          width="840"
+          x="92"
+          y="92"
+        />
+      </clippath>
+      
+  
+    </defs>
+    
+  
+    <g
+      clip-path="url(#appShape)"
+    >
+      
+    
+      <rect
+        fill="url(#background)"
+        height="840"
+        rx="188"
+        width="840"
+        x="92"
+        y="92"
+      />
+      <rect
+        fill="url(#glow)"
+        height="840"
+        rx="188"
+        width="840"
+        x="92"
+        y="92"
+      />
+      <path
+        d="M92 716C250 640 304 750 456 718C624 683 714 541 932 562V932H92V716Z"
+        fill="#11133F"
+        opacity="0.13"
+      />
+      
+    
+      <g
+        fill="none"
+        opacity="0.34"
+        stroke="#C7D2FE"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="20"
+      >
+        <path
+          d="M512 246L742 379V645L512 778L282 645V379L512 246Z"
+        />
+        <path
+          d="M512 246V512M742 379L512 512M742 645L512 512M512 778V512M282 645L512 512M282 379L512 512"
+        />
+        <path
+          d="M282 379L742 645M742 379L282 645"
+          opacity="0.48"
+        />
+      </g>
+      
+    
+      <g
+        fill="#E0E7FF"
+      >
+        <circle
+          cx="512"
+          cy="246"
+          r="23"
+        />
+        <circle
+          cx="742"
+          cy="379"
+          r="23"
+        />
+        <circle
+          cx="742"
+          cy="645"
+          r="23"
+        />
+        <circle
+          cx="512"
+          cy="778"
+          r="23"
+        />
+        <circle
+          cx="282"
+          cy="645"
+          r="23"
+        />
+        <circle
+          cx="282"
+          cy="379"
+          r="23"
+        />
+      </g>
+      
+    
+      <circle
+        cx="512"
+        cy="512"
+        fill="#131039"
+        opacity="0.22"
+        r="210"
+      />
+      <circle
+        cx="512"
+        cy="512"
+        fill="url(#vaultFace)"
+        r="184"
+        stroke="url(#metal)"
+        stroke-width="24"
+      />
+      <circle
+        cx="512"
+        cy="512"
+        fill="none"
+        opacity="0.42"
+        r="145"
+        stroke="#818CF8"
+        stroke-width="8"
+      />
+      
+    
+      <g
+        fill="#C7D2FE"
+      >
+        <circle
+          cx="512"
+          cy="376"
+          r="15"
+        />
+        <circle
+          cx="630"
+          cy="580"
+          r="15"
+        />
+        <circle
+          cx="394"
+          cy="580"
+          r="15"
+        />
+      </g>
+      
+    
+      <path
+        d="M512 433C470 433 436 467 436 509C436 539 454 565 480 577L464 646H560L544 577C570 565 588 539 588 509C588 467 554 433 512 433Z"
+        fill="url(#key)"
+      />
+      <circle
+        cx="512"
+        cy="507"
+        fill="#171441"
+        r="31"
+      />
+      <path
+        d="M512 532L494 609H530L512 532Z"
+        fill="#171441"
+      />
+      
+    
+      <path
+        d="M255 249C344 155 508 129 640 181"
+        fill="none"
+        opacity="0.13"
+        stroke="#FFFFFF"
+        stroke-linecap="round"
+        stroke-width="18"
+      />
+      
+  
+    </g>
+    
+  
+    <rect
+      fill="none"
+      height="820"
+      opacity="0.15"
+      rx="179"
+      stroke="#FFFFFF"
+      stroke-width="5"
+      width="820"
+      x="102"
+      y="102"
+    />
+    
+
+    <circle
+      cx="790"
+      cy="790"
+      fill="#f8fafc"
+      r="148"
+      stroke="#312e81"
+      stroke-width="12"
+    />
+    <path
+      d="M738 770v-42a52 52 0 0 1 104 0v42"
+      fill="none"
+      stroke="#312e81"
+      stroke-width="25"
+    />
+    <rect
+      fill="#312e81"
+      height="115"
+      rx="22"
+      width="150"
+      x="715"
+      y="768"
+    />
+    <circle
+      cx="790"
+      cy="816"
+      fill="#fff"
+      r="16"
+    />
+  </svg>
+</button>
+`;
+
+exports[`AutofillInlineMenuButton initAutofillInlineMenuButton creates the button element with the normal icon when the user's auth status is Unlocked  1`] = `
+<button
+  aria-label="toggleBitwardenVaultOverlay"
+  class="inline-menu-button"
+  tabindex="-1"
+  type="button"
+>
+  <svg
+    aria-hidden="true"
+    aria-labelledby="title desc"
+    class="inline-menu-button-svg-icon logo-icon"
+    role="img"
+    viewBox="64 64 896 896"
+    xmlns="http://www.w3.org/2000/svg"
+  >
+    
+  
+    <title
+      id="title"
+    >
+      VaultMesh browser extension icon
+    </title>
+    
+  
+    <desc
+      id="desc"
+    >
+      A secure vault dial connected to six mesh nodes on an indigo rounded-square field.
+    </desc>
+    
+  
+    <defs>
+      
+    
+      <lineargradient
+        gradientUnits="userSpaceOnUse"
+        id="background"
+        x1="188"
+        x2="846"
+        y1="132"
+        y2="900"
+      >
+        <stop
+          offset="0"
+          stop-color="#312E81"
+        />
+        <stop
+          offset="0.5"
+          stop-color="#5B4FCE"
+        />
+        <stop
+          offset="1"
+          stop-color="#2563EB"
+        />
+      </lineargradient>
+      
+    
+      <radialgradient
+        cx="0"
+        cy="0"
+        gradientTransform="translate(328 260) rotate(47) scale(714)"
+        gradientUnits="userSpaceOnUse"
+        id="glow"
+        r="1"
+      >
+        <stop
+          stop-color="#A5B4FC"
+          stop-opacity="0.48"
+        />
+        <stop
+          offset="0.56"
+          stop-color="#818CF8"
+          stop-opacity="0.08"
+        />
+        <stop
+          offset="1"
+          stop-color="#1E1B4B"
+          stop-opacity="0"
+        />
+      </radialgradient>
+      
+    
+      <lineargradient
+        gradientUnits="userSpaceOnUse"
+        id="vaultFace"
+        x1="384"
+        x2="656"
+        y1="356"
+        y2="680"
+      >
+        <stop
+          stop-color="#262268"
+        />
+        <stop
+          offset="1"
+          stop-color="#171441"
+        />
+      </lineargradient>
+      
+    
+      <lineargradient
+        gradientUnits="userSpaceOnUse"
+        id="metal"
+        x1="380"
+        x2="670"
+        y1="340"
+        y2="704"
+      >
+        <stop
+          stop-color="#FFFFFF"
+        />
+        <stop
+          offset="0.55"
+          stop-color="#E0E7FF"
+        />
+        <stop
+          offset="1"
+          stop-color="#A5B4FC"
+        />
+      </lineargradient>
+      
+    
+      <lineargradient
+        gradientUnits="userSpaceOnUse"
+        id="key"
+        x1="480"
+        x2="551"
+        y1="438"
+        y2="604"
+      >
+        <stop
+          stop-color="#67E8F9"
+        />
+        <stop
+          offset="1"
+          stop-color="#38BDF8"
+        />
+      </lineargradient>
+      
+    
+      <clippath
+        id="appShape"
+      >
+        <rect
+          height="840"
+          rx="188"
+          width="840"
+          x="92"
+          y="92"
+        />
+      </clippath>
+      
+  
+    </defs>
+    
+  
+    <g
+      clip-path="url(#appShape)"
+    >
+      
+    
+      <rect
+        fill="url(#background)"
+        height="840"
+        rx="188"
+        width="840"
+        x="92"
+        y="92"
+      />
+      <rect
+        fill="url(#glow)"
+        height="840"
+        rx="188"
+        width="840"
+        x="92"
+        y="92"
+      />
+      <path
+        d="M92 716C250 640 304 750 456 718C624 683 714 541 932 562V932H92V716Z"
+        fill="#11133F"
+        opacity="0.13"
+      />
+      
+    
+      <g
+        fill="none"
+        opacity="0.34"
+        stroke="#C7D2FE"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="20"
+      >
+        <path
+          d="M512 246L742 379V645L512 778L282 645V379L512 246Z"
+        />
+        <path
+          d="M512 246V512M742 379L512 512M742 645L512 512M512 778V512M282 645L512 512M282 379L512 512"
+        />
+        <path
+          d="M282 379L742 645M742 379L282 645"
+          opacity="0.48"
+        />
+      </g>
+      
+    
+      <g
+        fill="#E0E7FF"
+      >
+        <circle
+          cx="512"
+          cy="246"
+          r="23"
+        />
+        <circle
+          cx="742"
+          cy="379"
+          r="23"
+        />
+        <circle
+          cx="742"
+          cy="645"
+          r="23"
+        />
+        <circle
+          cx="512"
+          cy="778"
+          r="23"
+        />
+        <circle
+          cx="282"
+          cy="645"
+          r="23"
+        />
+        <circle
+          cx="282"
+          cy="379"
+          r="23"
+        />
+      </g>
+      
+    
+      <circle
+        cx="512"
+        cy="512"
+        fill="#131039"
+        opacity="0.22"
+        r="210"
+      />
+      <circle
+        cx="512"
+        cy="512"
+        fill="url(#vaultFace)"
+        r="184"
+        stroke="url(#metal)"
+        stroke-width="24"
+      />
+      <circle
+        cx="512"
+        cy="512"
+        fill="none"
+        opacity="0.42"
+        r="145"
+        stroke="#818CF8"
+        stroke-width="8"
+      />
+      
+    
+      <g
+        fill="#C7D2FE"
+      >
+        <circle
+          cx="512"
+          cy="376"
+          r="15"
+        />
+        <circle
+          cx="630"
+          cy="580"
+          r="15"
+        />
+        <circle
+          cx="394"
+          cy="580"
+          r="15"
+        />
+      </g>
+      
+    
+      <path
+        d="M512 433C470 433 436 467 436 509C436 539 454 565 480 577L464 646H560L544 577C570 565 588 539 588 509C588 467 554 433 512 433Z"
+        fill="url(#key)"
+      />
+      <circle
+        cx="512"
+        cy="507"
+        fill="#171441"
+        r="31"
+      />
+      <path
+        d="M512 532L494 609H530L512 532Z"
+        fill="#171441"
+      />
+      
+    
+      <path
+        d="M255 249C344 155 508 129 640 181"
+        fill="none"
+        opacity="0.13"
+        stroke="#FFFFFF"
+        stroke-linecap="round"
+        stroke-width="18"
+      />
+      
+  
+    </g>
+    
+  
+    <rect
+      fill="none"
+      height="820"
+      opacity="0.15"
+      rx="179"
+      stroke="#FFFFFF"
+      stroke-width="5"
+      width="820"
+      x="102"
+      y="102"
+    />
+    
+
+  </svg>
+</button>
+`;

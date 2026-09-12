@@ -1,5 +1,101 @@
 use super::*;
 
+fn native_plan_fixture() -> Value {
+    let handle = Uuid::new_v4();
+    json!({
+        "mode": "selection", "userGestureId": Uuid::new_v4(),
+        "nativeLoginPlan": [{ "handle": handle, "source": "password" }],
+        "discovery": {
+            "version": 1, "requestId": Uuid::new_v4(), "issuedAt": "2027-01-15T08:00:00.000Z", "expiresAt": "2027-01-15T08:00:30.000Z",
+            "tabId": 1, "topOrigin": "https://example.test", "targetOrigin": "https://example.test", "targetPageUrl": "https://example.test/login",
+            "selectedItem": { "kind": "login", "id": Uuid::new_v4(), "title": "Synthetic" },
+            "frames": [{ "frameId": 0, "documentId": Uuid::new_v4(), "frameOrigin": "https://example.test", "fields": [{
+                "handle": handle, "control": "input", "inputType": "password", "isEmpty": true, "autocomplete": [],
+                "label": "", "name": "", "id": "", "placeholder": "", "context": "unknown"
+            }] }]
+        }
+    })
+}
+
+#[test]
+fn native_login_plan_rejects_unbound_unsupported_and_non_explicit_sources() {
+    let now = DateTime::parse_from_rfc3339("2027-01-15T08:00:01.000Z").unwrap().timestamp_millis();
+    let original = native_plan_fixture();
+    assert!(parse_execute(original.as_object().unwrap(), now).is_ok());
+    let cases: Vec<(&str, Value)> = vec![
+        ("/mode", json!("automatic")), ("/userGestureId", Value::Null),
+        ("/nativeLoginPlan/0/source", json!("totpCode")),
+        ("/nativeLoginPlan/0/handle", json!(Uuid::new_v4())),
+        ("/nativeLoginPlan", json!([])),
+        ("/nativeLoginPlan", Value::Null),
+        ("/discovery/topOrigin", json!("https://untrusted.test")),
+        ("/discovery/selectedItem/kind", json!("card")),
+        ("/discovery/frames/0/fields/0/inputType", json!("text")),
+        ("/discovery/frames/0/fields/0/name", json!("couponCode")),
+        ("/discovery/frames/0/fields/0/autocomplete", json!(["new-password"])),
+        ("/discovery/frames/0/fields/0/context", json!("signup")),
+    ];
+    for (pointer, value) in cases {
+        let mut input = original.clone();
+        *input.pointer_mut(pointer).unwrap() = value;
+        assert!(parse_execute(input.as_object().unwrap(), now).is_err(), "{pointer}");
+    }
+    let mut duplicate = original.clone();
+    duplicate["nativeLoginPlan"].as_array_mut().unwrap().push(original["nativeLoginPlan"][0].clone());
+    assert!(parse_execute(duplicate.as_object().unwrap(), now).is_err());
+    let mut with_value = original.clone();
+    with_value["discovery"]["frames"][0]["fields"][0]["value"] = json!("must-never-be-discovery");
+    assert!(parse_execute(with_value.as_object().unwrap(), now).is_err());
+}
+
+#[test]
+fn native_login_plan_allows_bound_iframe_totp_and_custom_sources() {
+    let now = DateTime::parse_from_rfc3339("2027-01-15T08:00:01.000Z").unwrap().timestamp_millis();
+    let mut input = native_plan_fixture();
+    input["discovery"]["frames"][0]["frameId"] = json!(4);
+    assert!(parse_execute(input.as_object().unwrap(), now).is_ok());
+    let mut cross = input.clone();
+    cross["discovery"]["topOrigin"] = json!("https://parent.test");
+    assert!(parse_execute(cross.as_object().unwrap(), now).is_err());
+    cross["confirmedTargetOrigin"] = json!("https://example.test");
+    assert!(parse_execute(cross.as_object().unwrap(), now).is_ok());
+    cross["confirmedTargetOrigin"] = json!("https://wrong.test");
+    assert!(parse_execute(cross.as_object().unwrap(), now).is_err());
+    let mut automatic = input.clone();
+    automatic["mode"] = json!("automatic");
+    automatic.as_object_mut().unwrap().remove("userGestureId");
+    automatic["discovery"]["frames"][0]["fields"][0]["context"] = json!("login");
+    assert!(parse_execute(automatic.as_object().unwrap(), now).is_ok());
+    automatic["discovery"]["frames"][0]["fields"][0]["isEmpty"] = json!(false);
+    assert!(parse_execute(automatic.as_object().unwrap(), now).is_err());
+    input["nativeLoginPlan"][0]["source"] = json!("totpCode");
+    input["nativeLoginPlan"][0]["index"] = json!(0);
+    input["discovery"]["frames"][0]["fields"][0]["inputType"] = json!("text");
+    input["discovery"]["frames"][0]["fields"][0]["maxLength"] = json!(1);
+    input["discovery"]["frames"][0]["fields"][0]["autocomplete"] = json!(["one-time-code"]);
+    assert!(parse_execute(input.as_object().unwrap(), now).is_ok());
+    for (pointer, value) in [
+        ("/nativeLoginPlan/0/index", json!(6)),
+        ("/discovery/frames/0/fields/0/isEmpty", json!(false)),
+        ("/discovery/frames/0/fields/0/maxLength", json!(6)),
+    ] {
+        let mut bad = input.clone();
+        *bad.pointer_mut(pointer).unwrap() = value;
+        assert!(parse_execute(bad.as_object().unwrap(), now).is_err(), "{pointer}");
+    }
+    let mut values = FillValues::default();
+    values.values.insert("totpCode".into(), "654321".into());
+    values.custom_fields.push(("tenant".into(), "synthetic-custom".into()));
+    let mut entry = NativeLoginSource { handle: Uuid::new_v4(), source: "totpCode".into(), index: Some(1), name: None };
+    assert_eq!(native_login_value(&values, &entry).ok(), Some(Some("5".into())));
+    entry.index = None;
+    assert_eq!(native_login_value(&values, &entry).ok(), Some(Some("654321".into())));
+    entry.source = "custom".into(); entry.index = Some(0); entry.name = Some("tenant".into());
+    assert_eq!(native_login_value(&values, &entry).ok(), Some(Some("synthetic-custom".into())));
+    entry.name = Some("stale-name".into());
+    assert!(native_login_value(&values, &entry).is_err());
+}
+
 #[test]
 fn maps_qualified_bare_login_controls_and_ssh_host_without_inventing_metadata() {
     let mut values = FillValues::default();

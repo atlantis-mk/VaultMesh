@@ -29,6 +29,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-VAULT-001 创建、解锁和锁定
 
 - 必须：用户可以创建加密 Vault，以正确主密码解锁，错误密码失败，并显式或按策略锁定。
+- 必须：实验性 Bitwarden 副本只在没有 Vault 时提供创建入口，使用既有 command-bound confirmation 和桌面创建操作；插件不得覆盖已有 Vault。密码须重复输入并明确确认，提交前清空组件输入，取消、隐藏、锁定或五分钟期限清除草稿。
 - 失败：锁定后所有数据操作失败；重复锁定保持幂等。
 - 验收：`CT-VAULT-001`、`CT-NATIVE-VAULT-001`、`CT-NATIVE-RESPONSIVENESS-001`、
   `AT-VAULT-001`、`AT-NATIVE-MACOS-001`。
@@ -36,6 +37,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-VAULT-002 主密码轮换
 
 - 必须：验证旧主密码后更换包装材料，不改变用户 payload。
+- 必须：实验性 Bitwarden 副本复用桌面主密码轮换和一次性确认；不得本地重加密、保存旧/新主密码或在响应不确定时重放操作。
 - 失败：验证、加密或原子提交失败时旧密码和旧文件仍有效。
 - 验收：`CT-VAULT-002`。
 
@@ -43,6 +45,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 - 必须：备份保持为加密 Vault envelope；恢复前验证格式和密码并原子替换。
 - 必须：备份不提供绕过主密码的恢复路径。
+- 必须：实验性 Bitwarden 副本按 Scope Matrix 的桌面集中范围不提供 Vault 备份/恢复入口；桌面功能及既有兼容 RPC 保持不变。
 - 验收：`CT-VAULT-003`、`CT-NATIVE-DESKTOP-001`、`AT-VAULT-002`、`AT-NATIVE-MACOS-004`。
 
 ## Item 与恢复
@@ -50,6 +53,9 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-ITEM-001 Login
 
 - 必须：支持 login CRUD、URI/custom fields、TOTP、re-prompt、受控 copy/reveal 和自动填充策略。
+- 必须：实验性 Bitwarden 副本的 Login 编辑使用现有 Browser RPC 和当前 popup 草稿；只有显式编辑才读取带 fresh gesture 的详情，普通列表不得读取自定义字段值。修改普通信息时必须保留未替换的密码、TOTP、恢复码及全部 URI/custom fields；删除必须先由用户确认，再取得并消费现有一次性确认。取消、离开、隐藏、锁定、断连或编辑会话超过 5 分钟必须清除草稿；迟到详情不得重新打开编辑器，写入结果不确定时不得自动重试或显示成功。
+- 必须：实验副本的用户名、密码和 TOTP 复制使用已有桌面特权 clipboard RPC；二次验证必须由桌面重新校验，插件只接收清除期限，不接收复制值。复制确认、主密码和迟到结果遵循当前 popup 的会话/期限失效边界，结果不确定时不得自动重试。
+- 可以：实验副本使用由可信 popup 创建、绑定精确浏览器窗口和 tab 的独立编辑窗口。仅其主动发起的恢复码文件对话框期间允许保留当前内存草稿，最多 45 秒且不得延长原 5 分钟编辑期限；取消、窗口关闭/导航、锁定、撤销、断连或超时仍必须清除。文件导入先保留源文件，确认 Login 保存成功后才允许再次原生确认删除；失败或不确定的保存不得进入删除阶段。
 - 必须：支持把 2FA 恢复码作为 Login 的受保护字段保存；summary/detail 只能返回存在性，
   桌面端与浏览器扩展每次查看或复制都必须由 core 重新验证主密码，不受 Login 普通 re-prompt 设置影响；插件查看值只能在当前 popup 内存中短暂存在，插件复制必须由桌面特权 runtime 写入带过期清理的系统剪贴板。
 - 必须：桌面 Login 新建/编辑与插件 Login 编辑可通过特权 runtime 选择 UTF-8 文本文件；普通文本按换行解析并保留每个非空码，完整识别为 Google 编号双栏下载格式时必须忽略说明文字、拆分两列并按编号排序。插件发起时必须先恢复、显示并聚焦 VaultMesh 主窗口，文件选择和删除确认框必须以主窗口为 parent。解析后必须由原生确认框询问是否删除源文件，只有用户明确同意且文件未变时才可删除。完整路径不得进入 renderer 或插件，插件解析结果只能保留在当前 popup 编辑草稿。
@@ -61,27 +67,35 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 ### REQ-ITEM-002 Payment card
 
+- 必须：实验副本使用原生无值 card 计划及逐字段 assignment 完成显式填充（含有效期/select），每次验证主密码；原生捕获只在明确 Save 后创建或部分更新，保留未捕获信息。
 - 必须：支持 card CRUD；列表/详情省略完整卡号、安全码和 PIN，浏览器填充始终重新验证主密码。
+- 必须：实验性 Bitwarden 副本的卡片编辑、删除与特权复制使用现有桌面契约；空替换值保留原秘密，明确清除与替换不得同时提交。编辑草稿只保留在当前组件，离开、隐藏、锁定、断连或 5 分钟到期时清除，未知写入结果不得自动重试。
 - 验收：`CT-ITEM-002`、`AT-ITEM-002`。
 
 ### REQ-ITEM-003 SSH credential
 
 - 必须：支持密码/密钥凭证、生成、受限本地扫描、外部客户端和公钥安装；秘密不进入 summary/detail。
+- 必须：实验性 Bitwarden 副本通过现有 Browser RPC 管理 account/key 记录、保留未替换秘密及明确清除选项；复制密码、公钥、私钥和口令必须由桌面执行，插件只接收剪贴板清理期限。当前编辑组件的隐藏、离开、锁定、断连和期限必须使草稿与迟到响应失效。
 - 验收：`CT-ITEM-003`、`AT-ITEM-003`。
 
 ### REQ-ITEM-004 Identity
 
+- 必须：实验副本使用原生无值 identity 计划及逐字段 assignment 完成显式填充（含国家/地区/select）；捕获更新不得覆盖未捕获字段或丢弃既有多值集合。
 - 必须：支持部分身份资料 CRUD、表单映射、trash/history；自动流程不得泄露未选择字段。
+- 必须：实验性 Bitwarden 副本编辑身份时完整保留多邮箱、电话、地址的 ID、标签、首选标志及未修改字段；隐藏、离开、锁定、断连或 5 分钟到期必须清除当前草稿，不得持久化到插件 storage。
 - 验收：`CT-ITEM-004`、`AT-ITEM-004`。
 
 ### REQ-ITEM-005 Developer/service secret
 
 - 必须：以平台无关 kind 保存 API key、token、authenticator key、client/webhook secret 等；受保护值只允许替换或特权复制。
+- 必须：实验性 Bitwarden 副本接入既有 Secret CRUD 和桌面复制，保留未替换值及 scopes 等完整元数据；Passkey 记录不得通过普通 Secret 编辑、复制或删除入口处理。删除必须明确告知无回收站并确认，响应丢失不得自动重试。
 - 验收：`CT-ITEM-005`、`AT-ITEM-005`。
 
 ### REQ-RECOVERY-001 Trash 与 history
 
 - 必须：适用 Item 的删除和编辑前版本保留在加密 payload 中，并支持 restore、purge/clear。
+- 必须：实验性 Bitwarden 副本的 Login 回收站与历史页只读取摘要，不预读历史秘密；恢复、永久删除和清空必须显式确认，破坏性操作消费桌面签发的一次性确认。目标、会话或确认期限失效时不得执行，响应丢失不得自动重试；锁定、隐藏或退出时清除瞬态列表与确认。
+- 必须：实验副本的 card、identity、SSH 回收站与历史使用相同瞬态和显式确认规则，按既有类型化命令绑定准确的条目/版本；Secret 未提供的恢复契约不得伪造为可用入口。
 - 失败：任一恢复或清理提交失败不改变当前状态。
 - 验收：`CT-RECOVERY-001`、`AT-RECOVERY-001`。
 
@@ -171,6 +185,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-SEC-002 Quick unlock、锁定与剪贴板
 
 - 必须：quick unlock 只包装随机 Vault Key，不保存主密码；锁定撤销授权；剪贴板值按配置过期。
+- 必须：实验性 Bitwarden 副本通过独立 Broker 接入 PIN/生物识别设置及解锁、安全设置、配对撤销和安全摘要；PIN 与设置的持久化仍归桌面所有。浏览器空闲/重启/系统锁定偏好使用副本独立非秘密键，不能绕过桌面强制锁定。插件偏好与桌面设置分别保存时必须说明部分成功，不得声称跨所有者原子提交。
 - 验收：`CT-SEC-002`、`CT-NATIVE-PRIVILEGED-001`、
   `CT-NATIVE-QUICK-UNLOCK-001`、`CT-NATIVE-CLIPBOARD-001`、`AT-SEC-001`、
   `AT-NATIVE-MACOS-003`。
@@ -188,6 +203,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-IMPORT-001 Import 与本地 SSH scan
 
 - 必须：文件选择和 SSH scan 由 main 发起，内容存在有界临时 session；renderer/extension 只收安全预览与 opaque ID。
+- 必须：实验性 Bitwarden 副本不迁移批量文件导入及 SSH 扫描导入入口，这些工作流由桌面端完成；不得将缺少这些入口判为插件迁移未完成。网页 Save/Ignore、TOTP QR 与 `REQ-ITEM-001` 的恢复码编辑辅助不属于批量导入。
 - 必须：扫描到仅含私钥的 SSH 候选时，用户可以在导入前手动补充公钥，也可以不补充直接导入；仅私钥记录必须允许之后在 SSH 密钥编辑器中补充公钥。手动输入的公钥必须经过格式校验，扫描所得私钥不得返回 renderer。
 - 验收：`CT-IMPORT-001`、`CT-SSH-SCAN-001`、`CT-NATIVE-IMPORT-001`、`AT-NATIVE-MACOS-004`。
 
@@ -313,11 +329,37 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
   重复产生 toast。
 - 验收：`CT-FEEDBACK-001`。
 
+## Android
+
+### REQ-ANDROID-001 Compose 客户端 Vault 生命周期
+
+- 必须：Android 客户端使用 Jetpack Compose 原生 UI 与 Kotlin 平台 shell，通过固定、窄且可测试的 JNI operation 调用 Rust Android runtime；JNI 不得暴露 `vault-core` 对象、裸 Rust pointer、Vault Key、持久 secret handle 或通用方法分派。
+- 必须：首个切片支持在应用私有目录创建 format 4 Vault、以主密码解锁、读取锁定状态和显式锁定；已存在 Vault 时 create 必须拒绝覆盖，错误密码、损坏文件、未知格式和 IO 失败必须 fail closed。
+- 必须：Rust runtime 只有在加密 Vault 原子落盘成功后才发布新解锁会话；锁定必须幂等并清除解密 payload 与 Vault Key。Kotlin 不得缓存主密码，operation 完成或失败后必须清空 Compose 输入状态。
+- 必须：主 Activity 从创建起启用 `FLAG_SECURE`，应用禁止 Android backup 与 cleartext traffic；进入后台或收到显式系统锁定信号时必须锁定 Rust runtime。应用重启不得恢复解锁状态或持久化明文 UI 状态。
+- 必须：Android 首切片不得注册网络、Autofill、Credential Manager、Passkey、外部文件、后台同步或通用 WebView 权限；后续能力必须独立扩展 Requirement、ADR 和平台验收。
+- 验收：`CT-ANDROID-RUNTIME-001`、`CT-ANDROID-JNI-001`、`AT-ANDROID-001`。
+
+### REQ-ANDROID-002 Compose 客户端 Login CRUD
+
+- 必须：Android 客户端在 Vault 解锁后通过固定 JNI operation 展示 Login 安全摘要，并支持创建、编辑和删除 Login。当前编辑字段为标题、用户名、密码和 URL；列表不得返回密码、notes、TOTP、恢复码或 custom field 值。
+- 必须：编辑时空密码表示保留原密码，不得为了编辑普通字段把现有密码返回 Kotlin。删除前必须由用户确认，删除沿用 core 的加密回收站语义；锁定后所有列表与修改操作必须 fail closed。
+- 必须：每次 Login mutation 必须先由 `vault-core` 修改候选状态并生成加密 Vault，再原子提交文件；提交失败必须恢复旧内存 payload 和旧文件。Compose 编辑草稿不得持久化，取消、完成、失败、进入后台或锁定时必须清除密码和解密列表。
+- 验收：`CT-ANDROID-JNI-002`、`AT-ANDROID-002`。
+
+### REQ-ANDROID-003 Compose 搜索与 Login 回收站
+
+- 必须：Android 客户端只在当前已解锁进程内对 Login 与回收站安全摘要执行标题、用户名和适用 URL 的大小写不敏感搜索；查询不得发送到 JNI、写入持久化状态或在锁定后保留。
+- 必须：Login 删除进入 `vault-core` 加密回收站；Android 可以读取不含秘密的回收站摘要、恢复条目、永久删除单项或清空回收站。永久删除和清空必须分别显式确认，恢复不读取条目密码。
+- 必须：恢复、永久删除与清空复用原子提交和内存回滚；锁定、迟到响应、未知 ID、IO 失败和重复操作必须 fail closed，不得自动重试或把回收站秘密返回 Kotlin。
+- 验收：`CT-ANDROID-JNI-003`、`AT-ANDROID-003`。
+
 ## Browser
 
 ### REQ-BROWSER-001 配对与独立授权
 
 - 必须：扩展通过固定 ID/native host 配对；桌面 unlock 不授权扩展，撤销立即清除浏览器访问。
+- 必须：实验性 Bitwarden 副本的默认 popup 进入 VaultMesh 会话页，使用现有 Browser RPC 独立解锁、读取登录摘要和锁定；不得将主密码或条目交给上游云账号登录、同步或本地 Vault 存储。连接权限必须由用户点击申请；锁定、断连或离开会话页清空瞬态摘要，并丢弃失效会话的迟到响应。未接入的数据操作不得展示为可用。
 - 验收：`CT-BROWSER-001`、`CT-NATIVE-BROWSER-001`、`AT-BROWSER-001`。
 
 ### REQ-BROWSER-002 RPC 策略
@@ -327,15 +369,26 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 ### REQ-BROWSER-003 插件非秘密偏好持久化
 
+- 必须：生成器结果支持显式插入合格的空目标与桌面受控复制；保持文档/授权/期限绑定、无历史、无自动提交，失败及未知结果不得自动重试。
 - 必须：用户明确选择的生成器类型与全部生成参数、插件安全策略和按 origin 记住的
   Login 选择跨 popup 关闭和浏览器重启保留；desktop-owned 安全设置、PIN、生物识别与配对
   继续由 privileged desktop runtime 持久化。
 - 必须：扩展持久化设置经过 schema 校验；生成结果与历史、搜索/筛选、表单草稿、秘密、
   popup workspace 和授权/确认会话保持瞬态，不得进入 extension storage。
+- 必须：实验性 Bitwarden 副本的密码、口令短语、用户名和 UUID 生成使用本地熵源及原生生成器；读取保存参数完成前不得覆盖用户输入，修改密码填充采用已保存密码规则并检查控件最大长度。生成结果仅在组件中保留至多 60 秒，失焦（独立窗口）、隐藏或授权变化清除，不保存生成历史。
 - 验收：`CT-BROWSER-003`。
 
 ### REQ-BROWSER-004 跨浏览器扩展打包与分发
 
+- 必须：实验性 `apps/bitwarden-browser` 的产品名称、主品牌图形、工具栏状态图标和核心品牌文案使用
+  `apps/browser-extension` 的 VaultMesh 标识；必须保留上游许可证、版权及第三方产品的真实名称。
+  品牌替换不表示已接入桌面，也不得自动将实验副本纳入发布或替换现有扩展身份。
+- 必须：经用户选择，实验副本使用独立固定开发身份，与既有 WXT 扩展并存；专用 Native Host
+  注册、配对凭据和 Broker 解锁会话必须隔离，不能扩张现有 Host allowlist、复制其配对秘密或
+  继承其解锁/PIN/生物识别授权。开发入口必须显式启用，不自动纳入产品发布。
+- 必须：实验副本的浏览器共享源码、构建配置、npm 依赖清单和锁文件收纳在自身目录内；
+  编译和测试不得依赖下载目录或 VaultMesh 根目录的 Bitwarden 路径别名与 Node 包。
+  商业版源码和其他客户端不得作为普通浏览器构建的隐式依赖；依赖准备不改变扩展的秘密所有权。
 - 必须：同一 WXT 扩展源码生成版本一致的 Chrome/Chromium MV3 ZIP 和 Firefox MV2 ZIP；Chrome
   使用固定 manifest key 派生 ID，Firefox 使用固定 `browser_specific_settings.gecko.id`。Review
   本地安装 ZIP 必须显式选择仓库固定的 `sideload-review` 公共身份；商店或正式发布必须提供独立
@@ -357,6 +410,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-AUTOFILL-001 安全 discovery 与 fill
 
 - 必须：discovery 不发送页面现有值；assignment 绑定 origin/tab/frame/document/handle/expiry；自动填充仅限符合策略的空 login/OTP 字段且不提交表单。
+- 必须：实验性 Bitwarden 副本的 Login 填充复用原生 collector、字段匹配和 script generator/executor；数据适配只能将无值计划解析为一次性 assignment，不得读取整条明文登录数据或使用另一套匹配算法回退。TOTP 只在桌面端生成；扩展使用固定非秘密规划标记复用原生 OTP 匹配与分段逻辑。自定义字段规划只读取名称与索引，桌面端必须按当前名称与索引重验来源。每次执行仅针对浏览器确认的一个 frame，跨源显式填充必须确认实际目标来源；未接通或未验证的入口不得展示为已适配。
 - 必须：页内选择和页面自动填充使用来源 frame 内的短期不透明目标引用，将 discovery 限定到所属表单簇；主密码二次确认不得丢失原目标或覆盖策略。目标过期、移动、失去资格或文档改变时必须拒绝，不得回退全页填充；逐次写入必须继续校验表单归属。
 - 必须：页内图标和菜单按具体字段的可填充类型与角色判定；页面或表单场景不得使无关字段获得图标。搜索、筛选、评论、优惠码、图形验证码、禁用和只读字段不得展示填充图标；字段动态失去资格时必须撤下图标并丢弃迟到候选。支付表单内的个人资料字段必须按其自身类型处理，分段 OTP 不得使同簇无关字段被判为验证码。
 - 必须：content script 先在同一真实或最小可见伪表单内识别账号、当前密码、新密码、确认密码和 OTP 字段角色，再按显式字段语义、同表单结构、form action/page path/submit 语义与排除导航链接后的弱上下文依次推导场景；表单外或导航注册链接不得把登录表单识别为注册，密码生成只允许可靠的新密码角色。
@@ -382,6 +436,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：旧 BE=0 Passkey 不参与同步且不得改变备份资格；新注册 Passkey 使用 BE=1、counter=0，副本持久化成功后才设置 BS。私钥只经已授权 Rust 同步通道复制，使用仍执行逐次原生确认。
 
 - 必须：Chromium WebAuthn proxy 的 ES256 私钥保存在加密 secret 中，签名在 main 完成，每次 registration/assertion 显示 native confirmation。
+- 必须：实验性 Bitwarden 副本只从 Chromium 原生 proxy 事件接收 WebAuthn 请求，不允许 popup/content 提交任意代理请求；独立授权锁定、断连或撤销必须 detach，取消或失效后不得回传迟到结果。与现有扩展并存时不能抢占其他扩展已占用的 proxy；Firefox 不启用该入口。
+- 必须：副本的 Passkey 管理入口属于关联 Login，只展示安全摘要；删除必须验证关联、明确提示永久删除与保留其他登录方式，并复用一次性确认。不得经普通 Secret 编辑器修改、复制或显示 Passkey 私钥。
 - 必须：Passkey 创建或导入使用当前 RP/origin 的默认 Login 作为归属提示，并由 desktop 重新验证；无有效默认值时可以唯一用户名匹配，仍不确定时作为 Passkey-only Login，禁止进入普通 Secret/密钥分类。
 - 验收：`CT-PASSKEY-001`、`AT-PASSKEY-001`。
 
@@ -617,6 +673,7 @@ managed web 或 protected-action 工具完成受支持的任务。
 
 - 必须：增量 cursor、短时 boost、dedup 和 expiry 由 main 管理；最后授权锁定后清除连接和候选。
 - 必须：受信任的网页获取/重发验证码点击立即检查一次，并启动或刷新 90 秒、3 秒间隔的高频监听；超时后回到普通轮询，导航、锁定或 final lock 停止对应监听。
+- 必须：实验性 Bitwarden 副本的监听只保存来源、tab/frame 与期限，不保存验证码；开始、取消及刷新必须按序执行，防止迟到的开始请求复活已取消监听。脚本生成的点击与普通页面扫描不能开启监听。
 - 必须：验证码提取支持 4–8 位、至少包含一个数字的 ASCII 字母数字 token，保留原始大小写和完整 token 边界；反向上下文不得跨越品牌名或无关字母数字文本形成候选。
 - 验收：`CT-EMAIL-002`、`AT-EMAIL-002`。
 
@@ -625,6 +682,7 @@ managed web 或 protected-action 工具完成受支持的任务。
 - 必须：独立解锁的插件 popup 或 OTP 字段页内图标可以在任意 HTTP(S) 网站展示全部未过期邮箱验证码候选，不得按当前网站与发件域名过滤；Provider credential、邮件正文、收件地址、subject 和 message ID 不得进入 Browser RPC。
 - 必须：用户显式选择候选后，desktop 必须重验 origin、candidate、expiry 和 discovery，并只返回绑定 tab/frame/document/handle/expiry 的单次 assignment；只填空 OTP 字段且不提交表单。
 - 必须：popup/页内候选关闭、导航、断开、锁定、撤销、失败、成功或过期清除插件侧候选/assignment；验证码不得进入 extension storage、通知正文、日志、audit 或持久化 UI state。
+- 必须：实验性 Bitwarden 副本使用原生 OTP qualification、按候选长度的无值规划及原生 executor，支持 4–8 位完整或分格控件。邮件 assignment 不携带 Vault selectedItem，不得混作 Login/TOTP 授权；后台页内选择登记只能保存 candidate ID，不保留 code。popup 候选最多保留 30 秒且不得超过桌面 expiry。
 - 验收：`CT-EMAIL-003`、`AT-EMAIL-003`。
 
 ## 非功能需求

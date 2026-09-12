@@ -1,0 +1,120 @@
+// FIXME: Update this file to be type safe and remove this and next line
+// @ts-strict-ignore
+import {
+  connect,
+  dematerialize,
+  map,
+  materialize,
+  ReplaySubject,
+  skipWhile,
+  switchMap,
+  takeUntil,
+  takeWhile,
+} from "rxjs";
+
+// This import has been flagged as unallowed for this class. It may be involved in a circular dependency loop.
+// eslint-disable-next-line no-restricted-imports
+import { KeyService } from "@bitwarden/key-management";
+// eslint-disable-next-line no-restricted-imports
+import { EncryptService } from "@bitwarden/legacy-crypto";
+
+import { SdkService } from "../../platform/abstractions/sdk/sdk.service";
+import { OrganizationId } from "../../types/guid";
+import {
+  OrganizationBound,
+  SingleOrganizationDependency,
+  SingleUserDependency,
+  UserBound,
+} from "../dependencies";
+import { anyComplete, errorOnChange } from "../rx";
+import { PaddedDataPacker } from "../state/padded-data-packer";
+
+import { LegacyEncryptorProvider } from "./legacy-encryptor-provider";
+import { OrganizationEncryptor } from "./organization-encryptor.abstraction";
+import { OrganizationKeyEncryptor } from "./organization-key-encryptor";
+import { UserEncryptor } from "./user-encryptor.abstraction";
+import { UserKeyEncryptor } from "./user-key-encryptor";
+
+/** Creates encryptors
+ */
+export class KeyServiceLegacyEncryptorProvider implements LegacyEncryptorProvider {
+  /** Instantiates the legacy encryptor provider.
+   *  @param encryptService injected into encryptors to perform encryption
+   *  @param keyService looks up keys for construction into an encryptor
+   *  @param sdkService provides SDK crypto client for user encryptors
+   */
+  constructor(
+    private readonly encryptService: EncryptService,
+    private readonly keyService: KeyService,
+    private readonly sdkService: SdkService,
+  ) {}
+
+  userEncryptor$(frameSize: number, dependencies: SingleUserDependency) {
+    const packer = new PaddedDataPacker(frameSize);
+    return dependencies.singleUserId$.pipe(
+      errorOnChange(
+        (userId) => userId,
+        (expectedUserId, actualUserId) => ({ expectedUserId, actualUserId }),
+      ),
+      map((userId) => {
+        const encryptor = new UserKeyEncryptor(userId, this.sdkService, packer);
+
+        return { userId, encryptor } satisfies UserBound<"encryptor", UserEncryptor>;
+      }),
+    );
+  }
+
+  organizationEncryptor$(frameSize: number, dependencies: SingleOrganizationDependency) {
+    const packer = new PaddedDataPacker(frameSize);
+    const encryptor$ = dependencies.singleOrganizationId$.pipe(
+      errorOnChange(
+        (pair) => pair.userId,
+        (expectedUserId, actualUserId) => ({ expectedUserId, actualUserId }),
+      ),
+      errorOnChange(
+        (pair) => pair.organizationId,
+        (expectedOrganizationId, actualOrganizationId) => ({
+          expectedOrganizationId,
+          actualOrganizationId,
+        }),
+      ),
+      connect((singleOrganizationId$) => {
+        const singleOrganizationId = new ReplaySubject<UserBound<"organizationId", OrganizationId>>(
+          1,
+        );
+        singleOrganizationId$.subscribe(singleOrganizationId);
+
+        return singleOrganizationId.pipe(
+          switchMap((pair) =>
+            this.keyService.orgKeys$(pair.userId).pipe(
+              // wait until the key becomes available
+              skipWhile((keys) => !keys),
+              // complete when the key becomes unavailable
+              takeWhile((keys) => !!keys),
+              map((keys) => {
+                const organizationId = pair.organizationId;
+                const key = keys[organizationId];
+                const encryptor = new OrganizationKeyEncryptor(
+                  organizationId,
+                  this.encryptService,
+                  key,
+                  packer,
+                );
+
+                return { organizationId, encryptor } satisfies OrganizationBound<
+                  "encryptor",
+                  OrganizationEncryptor
+                >;
+              }),
+              materialize(),
+            ),
+          ),
+          dematerialize(),
+          takeUntil(anyComplete(singleOrganizationId)),
+        );
+      }),
+    );
+
+    return encryptor$;
+  }
+}

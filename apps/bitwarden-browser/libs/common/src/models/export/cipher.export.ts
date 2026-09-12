@@ -1,0 +1,258 @@
+// eslint-disable-next-line no-restricted-imports
+import { EncString } from "@bitwarden/legacy-crypto";
+
+import { CipherRepromptType } from "../../vault/enums/cipher-reprompt-type";
+import { CipherType } from "../../vault/enums/cipher-type";
+import { Cipher as CipherDomain } from "../../vault/models/domain/cipher";
+import { CipherView } from "../../vault/models/view/cipher.view";
+
+import { BankAccountExport } from "./bank-account.export";
+import { CardExport } from "./card.export";
+import { DriversLicenseExport } from "./drivers-license.export";
+import { FieldExport } from "./field.export";
+import { IdentityExport } from "./identity.export";
+import { LoginExport } from "./login.export";
+import { PassportExport } from "./passport.export";
+import { PasswordHistoryExport } from "./password-history.export";
+import { SecureNoteExport } from "./secure-note.export";
+import { SshKeyExport } from "./ssh-key.export";
+import { safeGetString } from "./utils";
+
+export class CipherExport {
+  static template(): CipherExport {
+    const req = new CipherExport();
+    req.type = CipherType.Login;
+    req.name = "Item name";
+    req.notes = "Some notes about this item.";
+    req.favorite = false;
+    req.fields = [];
+    req.reprompt = CipherRepromptType.None;
+    req.passwordHistory = [];
+    return req;
+  }
+
+  static toView(req: CipherExport, view = new CipherView(), allowDerivedSshKeys = false) {
+    view.type = req.type;
+    view.folderId = req.folderId;
+    if (view.organizationId == null) {
+      view.organizationId = req.organizationId;
+    }
+    if (view.collectionIds || req.collectionIds) {
+      const set = new Set((view.collectionIds ?? []).concat(req.collectionIds ?? []));
+      view.collectionIds = Array.from(set.values());
+    }
+    view.name = req.name;
+    view.notes = req.notes;
+    view.favorite = req.favorite;
+    view.reprompt = req.reprompt ?? CipherRepromptType.None;
+    view.key = req.key != null ? new EncString(req.key) : undefined;
+
+    if (req.fields != null) {
+      view.fields = req.fields.map((f) => FieldExport.toView(f));
+    }
+
+    switch (req.type) {
+      case CipherType.Login:
+        if (req.login != null) {
+          view.login = LoginExport.toView(req.login);
+        }
+        break;
+      case CipherType.SecureNote:
+        if (req.secureNote != null) {
+          view.secureNote = SecureNoteExport.toView(req.secureNote);
+        }
+        break;
+      case CipherType.Card:
+        if (req.card != null) {
+          view.card = CardExport.toView(req.card);
+        }
+        break;
+      case CipherType.Identity:
+        if (req.identity != null) {
+          view.identity = IdentityExport.toView(req.identity);
+        }
+        break;
+      case CipherType.SshKey:
+        if (req.sshKey != null) {
+          // toView only returns undefined when req is null, which we've already checked
+          view.sshKey = SshKeyExport.toView(req.sshKey, undefined, allowDerivedSshKeys)!;
+        }
+        break;
+      case CipherType.BankAccount:
+        if (req.bankAccount != null) {
+          view.bankAccount = BankAccountExport.toView(req.bankAccount)!;
+        }
+        break;
+      case CipherType.DriversLicense:
+        if (req.driversLicense != null) {
+          view.driversLicense = DriversLicenseExport.toView(req.driversLicense)!;
+        }
+        break;
+      case CipherType.Passport:
+        if (req.passport != null) {
+          view.passport = PassportExport.toView(req.passport)!;
+        }
+        break;
+    }
+
+    if (req.passwordHistory != null) {
+      view.passwordHistory = req.passwordHistory.map((ph) => PasswordHistoryExport.toView(ph));
+    }
+
+    view.creationDate = req.creationDate ? new Date(req.creationDate) : view.creationDate;
+    view.revisionDate = req.revisionDate ? new Date(req.revisionDate) : view.revisionDate;
+    view.deletedDate = req.deletedDate ? new Date(req.deletedDate) : view.deletedDate;
+    view.archivedDate = req.archivedDate ? new Date(req.archivedDate) : view.archivedDate;
+    return view;
+  }
+
+  static toDomain(req: CipherExport, domain = new CipherDomain()) {
+    domain.type = req.type;
+    domain.folderId = req.folderId;
+    if (domain.organizationId == null) {
+      domain.organizationId = req.organizationId;
+    }
+    domain.name = req.name != null ? new EncString(req.name) : new EncString("");
+    domain.notes = req.notes != null ? new EncString(req.notes) : undefined;
+    domain.favorite = req.favorite;
+    domain.reprompt = req.reprompt ?? CipherRepromptType.None;
+    domain.key = req.key != null ? new EncString(req.key) : undefined;
+
+    if (req.fields != null) {
+      domain.fields = req.fields.map((f) => FieldExport.toDomain(f));
+    }
+
+    switch (req.type) {
+      case CipherType.Login:
+        if (req.login != null) {
+          domain.login = LoginExport.toDomain(req.login);
+        }
+        break;
+      case CipherType.SecureNote:
+        if (req.secureNote != null) {
+          domain.secureNote = SecureNoteExport.toDomain(req.secureNote);
+        }
+        break;
+      case CipherType.Card:
+        if (req.card != null) {
+          domain.card = CardExport.toDomain(req.card);
+        }
+        break;
+      case CipherType.Identity:
+        if (req.identity != null) {
+          domain.identity = IdentityExport.toDomain(req.identity);
+        }
+        break;
+      case CipherType.SshKey:
+        if (req.sshKey != null) {
+          domain.sshKey = SshKeyExport.toDomain(req.sshKey);
+        }
+        break;
+      case CipherType.BankAccount:
+        if (req.bankAccount != null) {
+          domain.bankAccount = BankAccountExport.toDomain(req.bankAccount);
+        }
+        break;
+      case CipherType.DriversLicense:
+        if (req.driversLicense != null) {
+          domain.driversLicense = DriversLicenseExport.toDomain(req.driversLicense);
+        }
+        break;
+      case CipherType.Passport:
+        if (req.passport != null) {
+          domain.passport = PassportExport.toDomain(req.passport);
+        }
+        break;
+    }
+
+    if (req.passwordHistory != null) {
+      domain.passwordHistory = req.passwordHistory.map((ph) => PasswordHistoryExport.toDomain(ph));
+    }
+
+    domain.creationDate = req.creationDate ? new Date(req.creationDate) : domain.creationDate;
+    domain.revisionDate = req.revisionDate ? new Date(req.revisionDate) : domain.revisionDate;
+    domain.deletedDate = req.deletedDate ? new Date(req.deletedDate) : undefined;
+    domain.archivedDate = req.archivedDate ? new Date(req.archivedDate) : undefined;
+    return domain;
+  }
+
+  type: CipherType = CipherType.Login;
+  folderId?: string;
+  organizationId?: string;
+  collectionIds?: string[];
+  name: string = "";
+  notes?: string;
+  favorite: boolean = false;
+  fields?: FieldExport[];
+  login?: LoginExport;
+  secureNote?: SecureNoteExport;
+  card?: CardExport;
+  identity?: IdentityExport;
+  sshKey?: SshKeyExport;
+  bankAccount?: BankAccountExport;
+  driversLicense?: DriversLicenseExport;
+  passport?: PassportExport;
+  reprompt: CipherRepromptType = CipherRepromptType.None;
+  passwordHistory?: PasswordHistoryExport[];
+  revisionDate?: Date;
+  creationDate?: Date;
+  deletedDate?: Date;
+  archivedDate?: Date;
+  key?: string;
+
+  // Use build method instead of ctor so that we can control order of JSON stringify for pretty print
+  build(o: CipherView | CipherDomain) {
+    this.organizationId = o.organizationId;
+    this.folderId = o.folderId;
+    this.type = o.type;
+    this.reprompt = o.reprompt;
+
+    this.name = safeGetString(o.name) ?? "";
+    this.notes = safeGetString(o.notes);
+    if ("key" in o) {
+      this.key = o.key?.encryptedString;
+    }
+
+    this.favorite = o.favorite;
+
+    if (o.fields != null) {
+      this.fields = o.fields.map((f) => new FieldExport(f));
+    }
+
+    switch (o.type) {
+      case CipherType.Login:
+        this.login = new LoginExport(o.login);
+        break;
+      case CipherType.SecureNote:
+        this.secureNote = new SecureNoteExport(o.secureNote);
+        break;
+      case CipherType.Card:
+        this.card = new CardExport(o.card);
+        break;
+      case CipherType.Identity:
+        this.identity = new IdentityExport(o.identity);
+        break;
+      case CipherType.SshKey:
+        this.sshKey = new SshKeyExport(o.sshKey);
+        break;
+      case CipherType.BankAccount:
+        this.bankAccount = new BankAccountExport(o.bankAccount);
+        break;
+      case CipherType.DriversLicense:
+        this.driversLicense = new DriversLicenseExport(o.driversLicense);
+        break;
+      case CipherType.Passport:
+        this.passport = new PassportExport(o.passport);
+        break;
+    }
+
+    if (o.passwordHistory != null) {
+      this.passwordHistory = o.passwordHistory.map((ph) => new PasswordHistoryExport(ph));
+    }
+
+    this.creationDate = o.creationDate;
+    this.revisionDate = o.revisionDate;
+    this.deletedDate = o.deletedDate;
+    this.archivedDate = o.archivedDate;
+  }
+}

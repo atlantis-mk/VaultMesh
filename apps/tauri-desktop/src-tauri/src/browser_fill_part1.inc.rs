@@ -37,6 +37,21 @@ impl BrowserFillService {
         self.seen_discoveries.clear();
     }
 
+    pub fn profile(&self, runtime: &mut DesktopRuntime, input: &Map<String, Value>) -> Result<Value, BrowserPlatformError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ProfileInput { id: Uuid }
+        let request: ProfileInput = serde_json::from_value(Value::Object(input.clone()))
+            .map_err(|_| invalid("填充规划查询无效。"))?;
+        let detail = runtime.execute("items.detail", json!({ "id": request.id })).map_err(runtime_error)?;
+        let custom_fields = detail.get("customFields").and_then(Value::as_array)
+            .into_iter().flatten().enumerate().take(100).filter_map(|(index, field)| {
+                let name = field.get("label")?.as_str()?;
+                (!name.is_empty() && name.chars().count() <= 1024).then(|| json!({ "index": index, "name": name }))
+            }).collect::<Vec<_>>();
+        Ok(json!({ "id": request.id, "customFields": custom_fields }))
+    }
+
     pub fn candidates(
         &self,
         runtime: &mut DesktopRuntime,
@@ -219,7 +234,8 @@ impl BrowserFillService {
             .map_err(|_| confirmation("无法确认所选填充项目。"))?;
         if request.mode == "automatic" {
             let page = http_page(&discovery.target_page_url)?;
-            if !detail
+            if request.master_password.is_some() || detail.get("masterPasswordReprompt").and_then(Value::as_bool).unwrap_or(false)
+                || !detail
                 .get("autofillOnPageLoad")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
@@ -253,7 +269,18 @@ impl BrowserFillService {
         for frame in &discovery.frames {
             let mut assignments = Vec::new();
             for field in &frame.fields {
-                let Some(value) = map_field(&selected.kind, &values, field) else {
+                let value = if let Some(plan) = &request.native_item_plan {
+                    let entry = plan.iter().find(|entry| entry.handle == field.handle)
+                        .ok_or_else(|| invalid("原生填充计划目标无效。"))?;
+                    native_item_value(&values, &entry.source)
+                } else if let Some(plan) = &request.native_login_plan {
+                    let entry = plan.iter().find(|entry| entry.handle == field.handle)
+                        .ok_or_else(|| invalid("原生填充计划目标无效。"))?;
+                    native_login_value(&values, entry)?
+                } else {
+                    map_field(&selected.kind, &values, field)
+                };
+                let Some(value) = value else {
                     continue;
                 };
                 if value.is_empty() || value.chars().count() > 10_000 {
@@ -440,11 +467,27 @@ struct CandidateInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ExecuteInput {
     discovery: Discovery,
+    native_login_plan: Option<Vec<NativeLoginSource>>,
+    native_item_plan: Option<Vec<NativeItemSource>>,
+    confirmed_target_origin: Option<String>,
     #[serde(default = "automatic_mode")]
     mode: String,
     master_password: Option<String>,
     #[serde(default, rename = "userGestureId")]
     _user_gesture_id: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeItemSource { handle: Uuid, source: String }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeLoginSource {
+    handle: Uuid,
+    source: String,
+    index: Option<usize>,
+    name: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -519,6 +562,9 @@ fn parse_execute(
     input: &Map<String, Value>,
     now_millis: i64,
 ) -> Result<ExecuteInput, BrowserPlatformError> {
+    if input.get("nativeLoginPlan").is_some_and(Value::is_null) || input.get("nativeItemPlan").is_some_and(Value::is_null) {
+        return Err(invalid("原生 Login 字段计划不能为空。"));
+    }
     let mut request: ExecuteInput = serde_json::from_value(Value::Object(input.clone()))
         .map_err(|_| invalid("自动填充页面字段描述无效。"))?;
     let discovery = &mut request.discovery;
@@ -576,7 +622,127 @@ fn parse_execute(
     {
         return Err(invalid("自动填充页面字段描述无效。"));
     }
+    if let Some(plan) = &request.native_login_plan {
+        if !matches!(request.mode.as_str(), "selection" | "automatic")
+            || (request.mode == "selection" && request._user_gesture_id.is_none())
+            || (discovery.top_origin != discovery.target_origin && (request.mode != "selection"
+                || request.confirmed_target_origin.as_deref() != Some(discovery.target_origin.as_str())))
+            || request.confirmed_target_origin.as_ref().is_some_and(|origin| origin != &discovery.target_origin)
+            || discovery.frames.len() != 1
+            || discovery.selected_item.as_ref().is_none_or(|item| item.kind != "login")
+            || plan.is_empty() || plan.len() > 300 || plan.len() != field_count
+        {
+            return Err(invalid("原生 Login 字段计划必须绑定单 frame，跨源需要显式来源确认。"));
+        }
+        let mut planned = HashSet::new();
+        for entry in plan {
+            let field = discovery.frames[0].fields.iter().find(|field| field.handle == entry.handle)
+                .ok_or_else(|| invalid("原生 Login 计划目标无效。"))?;
+            if !planned.insert(entry.handle) || !valid_native_login_source(field, entry) {
+                return Err(invalid("原生 Login 计划字段无效。"));
+            }
+            if request.mode == "automatic" && (!field.is_empty || !matches!(field.context.as_str(), "login" | "otp") || entry.source == "custom") {
+                return Err(invalid("自动填充只允许已识别的空 Login/OTP 字段。"));
+            }
+        }
+    }
+    if let Some(plan) = &request.native_item_plan {
+        let kind = discovery.selected_item.as_ref().map(|item| item.kind.as_str()).unwrap_or("");
+        if request.native_login_plan.is_some() || request.mode != "selection" || request._user_gesture_id.is_none()
+            || !matches!(kind, "card" | "identity") || discovery.frames.len() != 1
+            || plan.is_empty() || plan.len() > 300 || plan.len() != field_count
+            || (discovery.top_origin != discovery.target_origin && request.confirmed_target_origin.as_deref() != Some(discovery.target_origin.as_str()))
+            || request.confirmed_target_origin.as_ref().is_some_and(|origin| origin != &discovery.target_origin)
+            || (kind == "card" && page.scheme() != "https")
+        { return Err(invalid("原生项目计划需要单 frame 显式选择与来源确认。")); }
+        let mut planned = HashSet::new();
+        for entry in plan {
+            let field = discovery.frames[0].fields.iter().find(|field| field.handle == entry.handle)
+                .ok_or_else(|| invalid("原生项目计划目标无效。"))?;
+            if !planned.insert(entry.handle) || !valid_native_item_source(kind, field, &entry.source) {
+                return Err(invalid("原生项目计划来源无效。"));
+            }
+        }
+    }
+    if request.confirmed_target_origin.is_some() && request.native_login_plan.is_none() && request.native_item_plan.is_none() {
+        return Err(invalid("跨源原生确认不能用于旧字段映射。"));
+    }
     Ok(request)
+}
+
+fn native_item_key(source: &str) -> Option<&'static str> {
+    Some(match source {
+        "card:cardholderName" => "cardholderName", "card:number" => "cardNumber",
+        "card:code" => "securityCode", "card:brand" => "brand",
+        "card:expMonth" => "expirationMonth", "card:expYear" => "expirationYear", "card:exp" => "expiration",
+        "identity:fullName" => "fullName", "identity:firstName" => "firstName",
+        "identity:middleName" => "middleName", "identity:lastName" => "lastName",
+        "identity:email" => "email", "identity:address1" => "addressLine1",
+        "identity:address2" => "addressLine2", "identity:fullAddress" => "fullAddress",
+        "identity:postalCode" => "postalCode", "identity:city" => "city",
+        "identity:state" => "region", "identity:country" => "country",
+        "identity:phone" => "phone", "identity:company" => "organization", _ => return None,
+    })
+}
+
+fn valid_native_item_source(kind: &str, field: &DiscoveredField, source: &str) -> bool {
+    let metadata = format!("{} {} {} {} {}", field.label, field.name, field.id, field.placeholder, field.autocomplete.join(" "));
+    source.starts_with(&format!("{kind}:")) && native_item_key(source).is_some() && field.is_empty
+        && !excluded_fill_field(&metadata)
+        && !field.autocomplete.iter().any(|v| matches!(v.as_str(), "new-password" | "current-password" | "one-time-code"))
+        && (field.control == "select" || field.control == "textarea" || field.control == "input"
+            && matches!(field.input_type.as_deref(), Some("text" | "email" | "tel" | "number" | "month")))
+}
+
+fn native_item_value(values: &FillValues, source: &str) -> Option<String> {
+    native_item_key(source).and_then(|key| values.values.get(key)).cloned()
+}
+
+// Authorization guard, not a second heuristic classifier. The upstream engine
+// owns source selection; these checks cannot invent or redirect a source.
+fn valid_native_login_source(field: &DiscoveredField, entry: &NativeLoginSource) -> bool {
+    let metadata = format!("{} {} {} {} {}", field.label, field.name, field.id,
+        field.placeholder, field.autocomplete.join(" "));
+    if field.control != "input" || excluded_fill_field(&metadata)
+        || !matches!(field.context.as_str(), "unknown" | "login" | "otp")
+        || field.autocomplete.iter().any(|value| value == "new-password")
+    {
+        return false;
+    }
+    if entry.source != "totpCode" && entry.source != "custom" && (entry.index.is_some() || entry.name.is_some()) {
+        return false;
+    }
+    if entry.source != "totpCode" && field.autocomplete.iter().any(|value| value == "one-time-code") {
+        return false;
+    }
+    match entry.source.as_str() {
+        "username" => matches!(field.input_type.as_deref(), Some("text" | "email" | "tel")),
+        "password" => field.input_type.as_deref() == Some("password"),
+        "totpCode" => field.is_empty && entry.name.is_none()
+            && entry.index.is_none_or(|index| index < 6)
+            && matches!(field.input_type.as_deref(), Some("text" | "tel" | "number"))
+            && (entry.index.is_none() || field.max_length == Some(1)),
+        "custom" => entry.index.is_some_and(|index| index < 300)
+            && entry.name.as_ref().is_some_and(|name| !name.is_empty() && name.chars().count() <= 1024)
+            && matches!(field.input_type.as_deref(), Some("text" | "email" | "tel" | "password" | "number")),
+        _ => false,
+    }
+}
+
+fn native_login_value(values: &FillValues, entry: &NativeLoginSource) -> Result<Option<String>, BrowserPlatformError> {
+    if entry.source == "custom" {
+        let (name, value) = entry.index.and_then(|index| values.custom_fields.get(index))
+            .filter(|(name, _)| Some(name) == entry.name.as_ref())
+            .ok_or_else(|| invalid("自定义字段已改变，请重新选择填充。"))?;
+        let _ = name;
+        return Ok(Some(value.clone()));
+    }
+    let value = values.values.get(&entry.source);
+    if entry.source == "totpCode" {
+        return Ok(value.filter(|code| code.len() == 6 && code.bytes().all(|ch| ch.is_ascii_digit()))
+            .map(|code| entry.index.map_or_else(|| code.clone(), |index| code[index..index + 1].to_owned())));
+    }
+    Ok(value.cloned())
 }
 
 fn valid_field(field: &DiscoveredField) -> bool {

@@ -1,0 +1,266 @@
+export const TYPE_CHECK = {
+  FUNCTION: "function",
+  NUMBER: "number",
+  STRING: "string",
+} as const;
+
+export const EVENTS = {
+  CHANGE: "change",
+  INPUT: "input",
+  KEYDOWN: "keydown",
+  KEYPRESS: "keypress",
+  KEYUP: "keyup",
+  BLUR: "blur",
+  CLICK: "click",
+  FOCUS: "focus",
+  FOCUSIN: "focusin",
+  FOCUSOUT: "focusout",
+  SCROLL: "scroll",
+  RESIZE: "resize",
+  DOMCONTENTLOADED: "DOMContentLoaded",
+  LOAD: "load",
+  MESSAGE: "message",
+  VISIBILITYCHANGE: "visibilitychange",
+  MOUSEENTER: "mouseenter",
+  MOUSELEAVE: "mouseleave",
+  MOUSEUP: "mouseup",
+  MOUSEOUT: "mouseout",
+  SUBMIT: "submit",
+} as const;
+
+/**
+ * HTML attributes observed by the MutationObserver for autofill form/field tracking.
+ * If you need to observe a new attribute, add it here.
+ */
+export const AUTOFILL_ATTRIBUTES = {
+  ACTION: "action",
+  ARIA_DESCRIBEDBY: "aria-describedby",
+  ARIA_DISABLED: "aria-disabled",
+  ARIA_HASPOPUP: "aria-haspopup",
+  ARIA_HIDDEN: "aria-hidden",
+  ARIA_LABEL: "aria-label",
+  ARIA_LABELLEDBY: "aria-labelledby",
+  AUTOCOMPLETE: "autocomplete",
+  AUTOCOMPLETE_TYPE: "autocompletetype",
+  X_AUTOCOMPLETE_TYPE: "x-autocompletetype",
+  CHECKED: "checked",
+  // CLASS intentionally omitted because it can cause a callback storm on dynamic pages.
+  DATA_LABEL: "data-label",
+  DATA_STRIPE: "data-stripe",
+  DISABLED: "disabled",
+  ID: "id",
+  MAXLENGTH: "maxlength",
+  METHOD: "method",
+  NAME: "name",
+  PLACEHOLDER: "placeholder",
+  POPOVER: "popover",
+  POPOVERTARGET: "popovertarget",
+  POPOVERTARGETACTION: "popovertargetaction",
+  READONLY: "readonly",
+  REL: "rel",
+  TABINDEX: "tabindex",
+  TITLE: "title",
+  TYPE: "type",
+} as const;
+
+export const ClearClipboardDelay = {
+  Never: "never",
+  TenSeconds: "tenSeconds",
+  TwentySeconds: "twentySeconds",
+  ThirtySeconds: "thirtySeconds",
+  OneMinute: "oneMinute",
+  TwoMinutes: "twoMinutes",
+  FiveMinutes: "fiveMinutes",
+} as const;
+
+/* Ids for context menu items and messaging events */
+export const AUTOFILL_CARD_ID = "autofill-card";
+export const AUTOFILL_ID = "autofill";
+export const SHOW_AUTOFILL_BUTTON = "show-autofill-button";
+export const AUTOFILL_IDENTITY_ID = "autofill-identity";
+export const AUTOFILL_TRIAGE_ID = "autofill-triage";
+export const COPY_IDENTIFIER_ID = "copy-identifier";
+export const COPY_PASSWORD_ID = "copy-password";
+export const COPY_USERNAME_ID = "copy-username";
+export const COPY_VERIFICATION_CODE_ID = "copy-totp";
+export const CREATE_CARD_ID = "create-card";
+export const CREATE_IDENTITY_ID = "create-identity";
+export const CREATE_LOGIN_ID = "create-login";
+export const GENERATE_PASSWORD_ID = "generate-password";
+export const NOOP_COMMAND_SUFFIX = "noop";
+export const ROOT_ID = "root";
+export const SEPARATOR_ID = "separator";
+export const UPDATE_PASSWORD = "update-password";
+
+export const NOTIFICATION_BAR_LIFESPAN_MS = 150000; // 150 seconds
+
+export const AUTOFILL_OVERLAY_HANDLE_REPOSITION = "autofill-overlay-handle-reposition-event";
+
+export const AUTOFILL_OVERLAY_HANDLE_SCROLL = "autofill-overlay-handle-scroll-event";
+
+export const UPDATE_PASSKEYS_HEADINGS_ON_SCROLL = "update-passkeys-headings-on-scroll";
+
+export const AUTOFILL_TRIGGER_FORM_FIELD_SUBMIT = "autofill-trigger-form-field-submit";
+
+export const AutofillOverlayVisibility = {
+  Off: 0,
+  OnButtonClick: 1,
+  OnFieldFocus: 2,
+} as const;
+
+export const BrowserClientVendors = {
+  Chrome: "Chrome",
+  Firefox: "Firefox",
+  Opera: "Opera",
+  Edge: "Edge",
+  Vivaldi: "Vivaldi",
+  Unknown: "Unknown",
+} as const;
+
+export const BrowserShortcutsUris = {
+  Chrome: "chrome://extensions/shortcuts",
+  Firefox: "https://bitwarden.com/help/keyboard-shortcuts",
+  Opera: "opera://extensions/shortcuts",
+  Edge: "edge://extensions/shortcuts",
+  Vivaldi: "vivaldi://extensions/shortcuts",
+  Unknown: "https://bitwarden.com/help/keyboard-shortcuts",
+} as const;
+
+export const DisablePasswordManagerUris = {
+  Chrome: "chrome://password-manager/settings",
+  Firefox: "https://bitwarden.com/help/disable-browser-autofill/",
+  Opera: "opera://settings/autofill",
+  Edge: "edge://settings/autofill/passwords/settings",
+  Vivaldi: "vivaldi://settings/autofill",
+  Unknown: "https://bitwarden.com/help/disable-browser-autofill/",
+} as const;
+
+export const ExtensionCommand = {
+  AutofillCommand: "autofill_cmd",
+  AutofillCard: "autofill_card",
+  AutofillIdentity: "autofill_identity",
+  AutofillLogin: "autofill_login",
+  OpenAutofillOverlay: "open_autofill_overlay",
+  GeneratePassword: "generate_password",
+  OpenPopup: "open_popup",
+  LockVault: "lock_vault",
+  NoopCommand: "noop",
+} as const;
+
+export type ExtensionCommandType = (typeof ExtensionCommand)[keyof typeof ExtensionCommand];
+
+export const CLEAR_NOTIFICATION_LOGIN_DATA_DURATION = 60 * 1000; // 1 minute
+
+export const MAX_DEEP_QUERY_RECURSION_DEPTH = 4;
+
+export const DEEP_QUERY_SELECTOR_COMBINATOR = ">>>";
+
+// this list is derived from the `attachShadow` candidate elements list
+// https://developer.mozilla.org/en-US/docs/Web/API/Element/attachShadow
+export const SHADOW_ROOT_CANDIDATE_NODE_NAMES = Object.freeze(
+  new Set([
+    "ARTICLE",
+    "ASIDE",
+    "BLOCKQUOTE",
+    "BODY",
+    "DIV",
+    "FOOTER",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    "HEADER",
+    "MAIN",
+    "NAV",
+    "P",
+    "SECTION",
+    "SPAN",
+  ]),
+);
+
+/**
+ * The default rules feed base URL. Composed with resource paths
+ * (e.g. `manifest.json`) at fetch time.
+ */
+export const DEFAULT_FILL_ASSIST_RULES_URL =
+  "https://github.com/bitwarden/map-the-web/releases/latest/download";
+
+/**
+ * Field keys for targeting rules. These MUST match the `fieldKey` enum in
+ * the Forms Map schema.
+ */
+export const AutofillTargetingRuleTypes = {
+  // Authentication
+  username: "username",
+  password: "password",
+  newPassword: "newPassword",
+  oneTimeCode: "oneTimeCode",
+
+  // Name
+  fullName: "fullName",
+  honorificPrefix: "honorificPrefix",
+  firstName: "firstName",
+  middleName: "middleName",
+  lastName: "lastName",
+  honorificSuffix: "honorificSuffix",
+
+  // Contact
+  email: "email",
+  phone: "phone",
+  phoneCountryCode: "phoneCountryCode",
+  phoneAreaCode: "phoneAreaCode",
+  phoneLocal: "phoneLocal",
+  phoneExtension: "phoneExtension",
+  organization: "organization",
+
+  // Address
+  streetAddress: "streetAddress",
+  addressLine1: "addressLine1",
+  addressLine2: "addressLine2",
+  addressLine3: "addressLine3",
+  addressLevel1: "addressLevel1",
+  addressLevel2: "addressLevel2",
+  addressLevel3: "addressLevel3",
+  addressLevel4: "addressLevel4",
+  postalCode: "postalCode",
+  country: "country",
+
+  // Birthdate
+  birthdate: "birthdate",
+  birthdateDay: "birthdateDay",
+  birthdateMonth: "birthdateMonth",
+  birthdateYear: "birthdateYear",
+
+  // Payment card
+  cardholderName: "cardholderName",
+  cardNumber: "cardNumber",
+  cardExpirationDate: "cardExpirationDate",
+  cardExpirationMonth: "cardExpirationMonth",
+  cardExpirationYear: "cardExpirationYear",
+  cardCvv: "cardCvv",
+  cardType: "cardType",
+
+  // Consent
+  consentTerms: "consentTerms",
+  consentPrivacy: "consentPrivacy",
+  consentUser: "consentUser",
+
+  // Search
+  searchTerm: "searchTerm",
+} as const;
+
+export const FormPurposeCategories = {
+  AccountCreation: "account-creation",
+  AccountLogin: "account-login",
+  AccountRecovery: "account-recovery",
+  AccountUpdate: "account-update",
+  Address: "address",
+  Identity: "identity",
+  PaymentCard: "payment-card",
+  Search: "search",
+  Signup: "signup",
+} as const;
+
+export * from "./match-patterns";

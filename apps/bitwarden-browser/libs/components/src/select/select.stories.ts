@@ -1,0 +1,89 @@
+import { Meta, StoryObj, moduleMetadata } from "@storybook/angular";
+
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+
+import { FormFieldModule } from "../form-field";
+import { MultiSelectComponent } from "../multi-select/multi-select.component";
+import { I18nMockService } from "../utils/i18n-mock.service";
+
+import { SelectComponent } from "./select.component";
+import { SelectModule } from "./select.module";
+
+export default {
+  title: "Component Library/Form/Select",
+  component: SelectComponent,
+  decorators: [
+    moduleMetadata({
+      imports: [SelectModule, FormFieldModule],
+      providers: [
+        {
+          provide: I18nService,
+          useFactory: () => {
+            return new I18nMockService({
+              selectPlaceholder: "-- Select --",
+            });
+          },
+        },
+      ],
+    }),
+  ],
+  args: {
+    disabled: false,
+  },
+  parameters: {
+    design: {
+      type: "figma",
+      url: "https://www.figma.com/design/Zt3YSeb6E6lebAffrNLa0h/Tailwind-Component-Library?node-id=13213-55392&t=b5tDKylm5sWm2yKo-4",
+    },
+  },
+} as Meta;
+
+type Story = StoryObj<MultiSelectComponent>;
+
+export const Default: Story = {
+  render: (args) => ({
+    props: {
+      ...args,
+    },
+    template: /*html*/ `
+      <bit-form-field>
+        <bit-label>Choose a value</bit-label>
+        <bit-select [disabled]="disabled">
+          <bit-option value="value1" label="Value 1" icon="bwi-collection-shared" description="Very cool hint text that is also incredibly long, so helpful that it will need to truncate if you shrink the window width"></bit-option>
+          <bit-option value="value2" label="Value 2 very long label though so it will truncate on small screen" icon="bwi-collection-shared"></bit-option>
+          <bit-option value="value3" label="Value 3" icon="bwi-collection-shared"></bit-option>
+          <bit-option value="value4" label="Value 4" icon="bwi-collection-shared" disabled></bit-option>
+        </bit-select>
+      </bit-form-field>
+    `,
+  }),
+  args: {},
+};
+
+export const Disabled: Story = {
+  ...Default,
+  args: {
+    disabled: true,
+  },
+};
+
+export const IconTiles: Story = {
+  render: (args) => ({
+    props: {
+      ...args,
+    },
+    template: /*html*/ `
+      <bit-form-field>
+        <bit-label>Choose a value</bit-label>
+        <bit-select [disabled]="disabled">
+          <bit-option value="login" label="Login" [iconTile]="{ icon: 'bwi-globe', variant: 'brand' }" description="Very cool hint text that is also incredibly long, so helpful that it will need to truncate if you shrink the window width"></bit-option>
+          <bit-option value="card" label="Card with a very long label though so it will truncate on small screens" [iconTile]="{ icon: 'bwi-credit-card', variant: 'teal' }"></bit-option>
+          <bit-option value="identity" label="Identity" [iconTile]="{ icon: 'bwi-id-card', variant: 'purple', emphasis: 'bold' }"></bit-option>
+          <bit-option value="note" label="Note with a custom color" [iconTile]="{ icon: 'bwi-sticky-note', color: '#f8e71c' }"></bit-option>
+          <bit-option value="sshKey" label="SSH key" [iconTile]="{ icon: 'bwi-key', variant: 'green' }" disabled></bit-option>
+        </bit-select>
+      </bit-form-field>
+    `,
+  }),
+  args: {},
+};

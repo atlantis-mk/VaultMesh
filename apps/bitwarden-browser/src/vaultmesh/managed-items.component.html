@@ -1,0 +1,83 @@
+<section [attr.aria-label]="definitions[kind].label">
+  <header class="tw-flex tw-flex-wrap tw-gap-2 tw-mb-3">
+    <h2>{{ definitions[kind].label }}</h2>
+    <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="load()">列表</button>
+    <button bitButton buttonType="primary" type="button" [disabled]="busy()" (click)="create()">新建{{ definitions[kind].label }}</button>
+    @if (kind !== 'secret') { <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="load('trash')">回收站</button> }
+  </header>
+  @if (notice()) { <p role="status">{{ notice() }}</p> }
+  @if (busy()) { <p role="status">正在处理…</p><button bitButton buttonType="secondary" type="button" (click)="cancel()">取消等待</button> }
+  @if (draft(); as current) {
+    <form (ngSubmit)="save()" autocomplete="off" [attr.aria-label]="'编辑' + definitions[kind].label">
+      <p>草稿只保留在当前窗口。离开、隐藏、锁定或 5 分钟到期时清除。受保护字段留空表示保留原值。</p>
+      @if (current.maskedNumber) { <p>当前卡号：{{ current.maskedNumber }}</p> }
+      @for (field of current.fields; track field.key) {
+        @if (field.type === 'checkbox') {
+          <label class="tw-block tw-my-2"><input type="checkbox" [name]="field.key" [(ngModel)]="current.data[field.key]" /> {{ field.label }}</label>
+        } @else {
+          <bit-form-field><bit-label>{{ field.label }}</bit-label>
+            @if (field.type === 'multiline') {
+              <textarea bitInput [name]="field.key" [attr.name]="field.key" [(ngModel)]="current.data[field.key]" autocomplete="off" [spellcheck]="false" [maxlength]="field.key === 'privateKey' || field.key === 'publicKey' ? 1048576 : 10000"></textarea>
+            } @else if (field.type === 'select') {
+              <select bitInput [name]="field.key" [attr.name]="field.key" [(ngModel)]="current.data[field.key]">@for (option of field.options; track option) { <option [value]="option">{{ option }}</option> }</select>
+            } @else {
+              <input bitInput [type]="field.type || 'text'" [name]="field.key" [attr.name]="field.key" [(ngModel)]="current.data[field.key]" autocomplete="off" [spellcheck]="false" maxlength="10000" />
+            }
+          </bit-form-field>
+          @if (field.clear && current.id) { <label class="tw-block tw-mb-3"><input type="checkbox" [name]="field.clear" [(ngModel)]="current.data[field.clear]" /> 明确清除{{ field.label }}</label> }
+        }
+      }
+      @if (kind === 'identity') {
+        @for (collection of collections; track collection) {
+          <fieldset class="tw-my-4">
+            <legend>{{ collection === 'emails' ? '电子邮件' : collection === 'phones' ? '电话号码' : '地址' }}</legend>
+            @for (row of current.data[collection]; track row.id; let index = $index) {
+              <bit-form-field><bit-label>标签</bit-label><input bitInput [name]="collection + index + 'label'" [(ngModel)]="row.label" maxlength="256" /></bit-form-field>
+              @if (collection === 'addresses') {
+                @for (field of addressFields; track field.key) { <bit-form-field><bit-label>{{ field.label }}</bit-label><input bitInput [name]="collection + index + field.key" [(ngModel)]="row[field.key]" maxlength="10000" /></bit-form-field> }
+              } @else { <bit-form-field><bit-label>{{ collection === 'emails' ? '邮箱' : '号码' }}</bit-label><input bitInput [name]="collection + index + 'value'" [attr.name]="collection + index + 'value'" [(ngModel)]="row.value" maxlength="2048" /></bit-form-field> }
+              <label><input type="checkbox" [name]="collection + index + 'preferred'" [(ngModel)]="row.preferred" /> 首选</label>
+              <button bitButton buttonType="secondary" type="button" (click)="current.remove(collection, index)">移除此项</button>
+            }
+            <button bitButton buttonType="secondary" type="button" [disabled]="current.data[collection].length >= 20" (click)="current.add(collection)">添加</button>
+          </fieldset>
+        }
+      }
+      @if (kind === 'secret') { <bit-form-field><bit-label>Scopes（每行一个）</bit-label><textarea bitInput name="scopes" [(ngModel)]="current.scopes" maxlength="12850"></textarea></bit-form-field> }
+      <button bitButton buttonType="primary" type="submit" [disabled]="busy()">保存</button>
+      <button bitButton buttonType="secondary" type="button" (click)="cancel()">取消并清除草稿</button>
+    </form>
+  } @else if (pending(); as target) {
+    <form (ngSubmit)="confirm()" aria-label="确认条目操作">
+      <p>{{ target.title }}？</p>
+      @if (target.command.verb === 'copy') { <p>由桌面端执行复制，复制值不会返回插件。</p> }
+      @if (target.reprompt) { <bit-form-field><bit-label>当前主密码</bit-label><input bitInput name="managedMasterPassword" type="password" [(ngModel)]="masterPassword" autocomplete="off" minlength="8" maxlength="1024" required /></bit-form-field> }
+      <button bitButton buttonType="primary" type="submit" [disabled]="busy() || (target.reprompt && masterPassword.length < 8)">确认</button>
+      <button bitButton buttonType="secondary" type="button" (click)="cancel()">取消</button>
+    </form>
+  } @else if (fillTarget(); as target) {
+    @if ((kind === 'card' || kind === 'identity') && target.id) { <vaultmesh-item-fill [kind]="kind" [id]="target.id" [title]="target.title" [independent]="independent" /> }
+    <button type="button" (click)="cancel()">取消并返回</button>
+  } @else if (!busy()) {
+    <bit-form-field><bit-label>搜索{{ definitions[kind].label }}</bit-label><input bitInput name="managedSearch" type="search" [(ngModel)]="query" autocomplete="off" /></bit-form-field>
+    @for (row of filtered(); track row.id || row.trashId || row.revisionId) {
+      <article class="tw-my-4">
+        <h3>{{ row.title }}</h3>
+        <p class="tw-text-muted">{{ text(row, 'maskedNumber') || text(row, 'displayName') || text(row, 'host') || text(row, 'provider') }} {{ date(row) }}</p>
+        <div class="tw-flex tw-flex-wrap tw-gap-2">
+          @if (mode === 'list') {
+            @if (kind === 'card' || kind === 'identity') { <button bitButton buttonType="secondary" type="button" (click)="fillTarget.set(row)">填充</button> }
+            <button bitButton buttonType="secondary" type="button" (click)="edit(row)">编辑</button>
+            <button bitButton buttonType="danger" type="button" (click)="askDelete(row)">删除</button>
+            @if (kind !== 'secret') { <button bitButton buttonType="secondary" type="button" (click)="load('history', row.id)">历史</button> }
+            @for (field of copyFields(row); track field) { <button bitButton buttonType="secondary" type="button" (click)="askCopy(row, field)">复制{{ copyLabel(field) }}</button> }
+          } @else if (mode === 'trash') {
+            <button bitButton buttonType="secondary" type="button" (click)="askRecovery('restore-trash', row)">恢复</button>
+            <button bitButton buttonType="danger" type="button" (click)="askRecovery('purge', row)">永久删除</button>
+          } @else { <button bitButton buttonType="secondary" type="button" (click)="askRecovery('restore-history', row)">恢复完整版本</button> }
+        </div>
+      </article>
+    } @empty { <p>暂无条目，或会话已失效。可点击列表重新读取。</p> }
+    @if (mode !== 'list' && rows().length) { <button bitButton buttonType="danger" type="button" (click)="askRecovery(mode === 'trash' ? 'empty-trash' : 'clear-history')">{{ mode === 'trash' ? '清空此类回收站' : '清空此条目历史' }}</button> }
+  }
+</section>

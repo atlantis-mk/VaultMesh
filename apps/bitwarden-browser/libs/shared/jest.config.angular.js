@@ -1,0 +1,37 @@
+/* eslint-env node */
+/* eslint-disable @typescript-eslint/no-require-imports */
+const path = require("path");
+
+const { createCjsPreset } = require("jest-preset-angular/presets");
+
+const presetConfig = createCjsPreset({
+  tsconfig: "<rootDir>/tsconfig.spec.json",
+  astTransformers: {
+    // VaultMesh: resolve beside this vendored configuration, independent of app depth.
+    before: [path.resolve(__dirname, "es2020-transformer.ts")],
+  },
+  diagnostics: {
+    ignoreCodes: ["TS151001"],
+  },
+});
+
+/** @type {import('jest').Config} */
+module.exports = {
+  ...presetConfig,
+  testMatch: ["**/+(*.)+(spec).+(ts)"],
+
+  // oauth4webapi is ESM-only; allow jest-preset-angular's transformer to compile it.
+  transformIgnorePatterns: [
+    "node_modules/(?!(.*\\.mjs$|@angular/common/locales/.*\\.js$|oauth4webapi/.*))",
+  ],
+
+  setupFiles: [path.resolve(__dirname, "polyfill-node-globals.ts")],
+
+  testPathIgnorePatterns: [
+    "/node_modules/", // default value
+    ".*.type.spec.ts", // ignore type tests (which are checked at compile time and not run by jest)
+  ],
+
+  // Improves on-demand performance, for watches prefer 25%, overridable by setting --maxWorkers
+  maxWorkers: "50%",
+};

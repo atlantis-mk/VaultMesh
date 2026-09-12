@@ -15,6 +15,13 @@ Tauri privileged process
   └─ vault-ffi shared Rust operation → vault-core → atomic encrypted vault file
 ```
 
+Android 使用独立平台拓扑：
+
+```text
+Jetpack Compose → Kotlin ViewModel/platform lifecycle → narrow JNI operation
+  → vault-android-runtime → vault-core → app-private atomic encrypted vault file
+```
+
 对应当前决策：`ADR-0001`、`ADR-0003`、`ADR-0005`、`ADR-0006`。Electron 与
 SwiftUI/WinUI presentation 仅存在于历史 ADR/Change，不是当前可构建运行时。
 
@@ -49,7 +56,16 @@ browser UI/content → background RPC → Rust native-host → Rust broker → s
 | Page discovery/write | content script | desktop renderer |
 | Clipboard、dialog、recovery-code file read/delete、biometric、SSH、email IO | Tauri Rust/platform adapters | renderer、extension |
 | Quick-unlock wrapper | platform credential integration | Vault format |
+| Android Activity、lifecycle、系统服务与 app-private path | Kotlin Android shell | Compose state、Tauri desktop runtime、`vault-core` |
+| Android JNI operation、进程内会话与原子持久化 | `vault-android-runtime` | Kotlin UI、raw JNI pointer、Tauri desktop runtime |
 | LAN peer discovery、TLS identity、short-code pairing、peer trust index 与 lifecycle | Tauri Rust LAN pairing service | vault-core、renderer、Agent broker、Browser RPC |
+
+## Android 边界
+
+- `apps/android` 是唯一 Android 产品 shell；Compose 只持有 renderer-safe 状态和当前用户输入，不持有 Vault Key 或 core 对象。
+- `crates/vault-android-runtime` 是 Kotlin 与 `vault-core` 之间的唯一 JNI owner；公开函数必须是固定 operation，返回稳定错误码或按 operation 定义的脱敏 DTO，不允许通用 JSON method router。
+- Kotlin 拥有 `Activity`、`Application`、Android lifecycle、`FLAG_SECURE`、系统服务、瞬态编辑/搜索状态和 app-private 路径选择；Rust runtime 拥有解锁 session、Login/回收站 mutation 回滚、原子 Vault 文件提交和显式 lock。
+- Android 不依赖 `apps/tauri-desktop/src-tauri`。Autofill、Credential Manager、Passkey、Keystore quick unlock 与后台 LAN 服务进入独立受控切片前不得注册。
 
 ## Tauri 边界
 

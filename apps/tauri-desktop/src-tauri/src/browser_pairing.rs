@@ -22,25 +22,28 @@ trait PairingSecretStore: Send + Sync {
     fn delete(&self) -> Result<(), String>;
 }
 
-struct PlatformPairingSecretStore;
+struct PlatformPairingSecretStore {
+    service: &'static str,
+    account: &'static str,
+}
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 impl PairingSecretStore for PlatformPairingSecretStore {
     fn set(&self, encoded: &str) -> Result<(), String> {
-        keyring::Entry::new(TAURI_PAIRING_SERVICE, TAURI_PAIRING_ACCOUNT)
+        keyring::Entry::new(self.service, self.account)
             .and_then(|entry| entry.set_password(encoded))
             .map_err(|_| "无法保存浏览器配对凭据。".to_owned())
     }
 
     fn get(&self) -> Result<Zeroizing<String>, String> {
-        keyring::Entry::new(TAURI_PAIRING_SERVICE, TAURI_PAIRING_ACCOUNT)
+        keyring::Entry::new(self.service, self.account)
             .and_then(|entry| entry.get_password())
             .map(Zeroizing::new)
             .map_err(|_| "无法读取浏览器配对凭据，请重新配对。".to_owned())
     }
 
     fn delete(&self) -> Result<(), String> {
-        keyring::Entry::new(TAURI_PAIRING_SERVICE, TAURI_PAIRING_ACCOUNT)
+        keyring::Entry::new(self.service, self.account)
             .and_then(|entry| entry.delete_credential())
             .map_err(|_| "无法删除浏览器配对凭据。".to_owned())
     }
@@ -68,7 +71,20 @@ impl BrowserPairingService {
     pub fn new(record_path: PathBuf) -> Self {
         Self {
             record_path,
-            store: Arc::new(PlatformPairingSecretStore),
+            store: Arc::new(PlatformPairingSecretStore {
+                service: TAURI_PAIRING_SERVICE,
+                account: TAURI_PAIRING_ACCOUNT,
+            }),
+        }
+    }
+
+    pub fn new_bitwarden_development(record_path: PathBuf) -> Self {
+        Self {
+            record_path,
+            store: Arc::new(PlatformPairingSecretStore {
+                service: crate::browser_development_identity::PAIRING_SERVICE,
+                account: crate::browser_development_identity::PAIRING_ACCOUNT,
+            }),
         }
     }
 

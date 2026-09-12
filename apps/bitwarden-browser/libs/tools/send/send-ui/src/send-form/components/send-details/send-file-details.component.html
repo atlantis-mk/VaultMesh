@@ -1,0 +1,24 @@
+<bit-section [formGroup]="sendFileDetailsForm">
+  @if (sendFormService.sendFormConfig.mode === "edit") {
+    <div
+      [class]="
+        !editing()
+          ? 'tw-border-secondary-300/50 tw-border-b tw-border-0 tw-border-solid tw-pb-[2px]'
+          : ''
+      "
+    >
+      <div bitTypography="body2" class="tw-text-muted">{{ "file" | i18n }}</div>
+      <div class="tw-text-wrap tw-break-all" data-testid="file-name">
+        {{ sendFormService.originalSendView()?.file.fileName }}
+      </div>
+      <div data-testid="file-size" class="tw-text-muted">
+        {{ sendFormService.originalSendView()?.file.sizeName }}
+      </div>
+    </div>
+  } @else {
+    <bit-file-upload formControlName="file">
+      <bit-label>{{ "fileToShare" | i18n }}</bit-label>
+      <bit-hint>{{ "maxFileSize" | i18n }}</bit-hint>
+    </bit-file-upload>
+  }
+</bit-section>

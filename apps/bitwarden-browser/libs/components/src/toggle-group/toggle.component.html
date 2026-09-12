@@ -1,0 +1,16 @@
+<input
+  type="radio"
+  [id]="id"
+  [name]="name"
+  [class]="inputClasses"
+  [checked]="selected()"
+  (change)="handleInputChange()"
+/>
+<label [attr.aria-label]="labelTitle()" [for]="id" [class]="labelClasses">
+  <span class="tw-whitespace-nowrap" #labelContent>
+    <ng-content></ng-content>
+  </span>
+  <span class="tw-shrink-0 [&_bit-berry]:tw-flex" [hidden]="!hasBerry()">
+    <ng-content select="bit-berry"></ng-content>
+  </span>
+</label>

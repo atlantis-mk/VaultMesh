@@ -68,6 +68,8 @@ mod biometric_service;
 mod browser_broker;
 #[cfg(target_os = "windows")]
 mod browser_broker_windows;
+#[allow(dead_code)]
+mod browser_development_identity;
 mod browser_fill;
 #[cfg(any(target_os = "windows", test))]
 mod browser_host_registration;
@@ -217,6 +219,11 @@ struct RuntimeState {
     _agent_pipe_listener: Option<Arc<AgentBrokerWindowsListener>>,
     #[cfg(unix)]
     _browser_listener: Option<Arc<BrowserBrokerUnixListener>>,
+    #[cfg(unix)]
+    _bitwarden_development_listener: Option<Arc<BrowserBrokerUnixListener>>,
+    #[cfg(target_os = "windows")]
+    _bitwarden_development_listener:
+        Option<Arc<browser_broker_windows::BrowserBrokerWindowsListener>>,
     #[cfg(target_os = "windows")]
     browser_integration: Arc<Mutex<browser_integration_windows::WindowsBrowserIntegration>>,
     app_data: PathBuf,

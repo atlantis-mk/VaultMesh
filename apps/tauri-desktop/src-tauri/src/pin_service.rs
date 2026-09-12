@@ -140,6 +140,16 @@ impl PinQuickUnlockService {
         }
     }
 
+    pub fn new_bitwarden_development(record_path: PathBuf) -> Self {
+        Self {
+            record_path,
+            secrets: Arc::new(PlatformSecretStore {
+                service: "com.vaultmesh.desktop.bitwarden-dev-pin",
+            }),
+            credential_prefix: "bitwarden-dev-pin",
+        }
+    }
+
     #[cfg(test)]
     fn with_store(record_path: PathBuf, secrets: Arc<dyn DeviceSecretStore>) -> Self {
         Self {

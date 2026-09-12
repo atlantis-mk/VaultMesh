@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/agent-mcp",
+  "crates/vault-android-runtime",
   "crates/vault-core",
   "crates/vault-ffi",
   "apps/tauri-desktop/src-tauri",

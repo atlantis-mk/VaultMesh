@@ -41,6 +41,7 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   'browser.pairing.status': metadata(false),
   'browser.pairing.revoke': systemDialog(false, true),
   'browser.autofill.candidates': metadata(),
+  'browser.autofill.profile': metadata(),
   'browser.autofill.execute': automaticPageDisclosure,
   'browser.card.capture-status': automaticPageDisclosure,
   'browser.login.password-changed': automaticPageDisclosure,
@@ -74,7 +75,7 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   'items.copy-totp': copy,
   'items.recovery-codes': pageDisclosure,
   'items.copy-recovery-code': copy,
-  'items.recovery-codes.import-file': systemDialog(true, true),
+  'items.recovery-codes.import-file': systemDialog(true, true), // both prepare and finish require fresh confirmation
   'items.trash.list': metadata(),
   'items.trash.restore': mutation(),
   'items.trash.purge': mutation(true),
@@ -150,7 +151,7 @@ export function authorizeBrowserRpc(request: BrowserRpcRequest, unlocked: boolea
   if (policy.requiresUnlock && !unlocked) {
     return { authorized: false, code: 'unlock-required', message: '请先在 VaultMesh 插件中单独解锁。' };
   }
-  if (policy.requiresGesture) {
+  if (policy.requiresGesture || (request.operation === 'browser.autofill.execute' && (request.input.nativeItemPlan !== undefined || request.input.nativeLoginPlan !== undefined && request.input.mode !== 'automatic'))) {
     const gestureId = request.input.userGestureId;
     if (typeof gestureId !== 'string' || !/^[0-9a-f-]{36}$/i.test(gestureId)) {
       return { authorized: false, code: 'invalid-request', message: '该操作需要新的用户手势。' };

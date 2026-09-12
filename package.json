@@ -1,7 +1,7 @@
 {
   "name": "vaultmesh",
   "version": "0.0.9-review",
-  "description": "Local-first password manager for Tauri 2 desktop, Chromium and Firefox browsers",
+  "description": "Local-first password manager for Tauri 2 desktop, Android, Chromium and Firefox browsers",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
@@ -20,6 +20,10 @@
     "work:start": "node scripts/work-start.mjs",
     "work:finish": "node scripts/work-finish.mjs",
     "work:archive": "node scripts/archive-work.mjs",
+    "android:rust:test": "cargo test -p vaultmesh-android-runtime",
+    "android:contract:test": "node --test scripts/android-client-contract.test.mjs",
+    "android:rust:build": "bash apps/android/scripts/build-rust.sh",
+    "android:build": "apps/android/gradlew -p apps/android assembleDebug",
     "scripts:test": "node --test scripts/*.test.mjs",
     "tauri:dev": "pnpm --filter @vaultmesh/tauri-desktop tauri dev",
     "tauri:build": "node scripts/build-tauri.mjs",

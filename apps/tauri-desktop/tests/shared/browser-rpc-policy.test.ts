@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { NativeLoginPlanSchema } from '../../src/shared/browser-native-login-plan';
+import { BrowserRecoveryFileInputSchema, PreparedBrowserRecoveryFileSchema } from '../../src/shared/browser-recovery-file';
 
 import { BROWSER_RPC_VERSION, BrowserRpcOperationSchema, type BrowserRpcRequest } from '../../src/shared/browser-rpc';
 import { authorizeBrowserRpc, BROWSER_RPC_POLICIES } from '../../src/shared/browser-rpc-policy';
@@ -13,6 +15,16 @@ function request(operation: BrowserRpcRequest['operation'], input: Record<string
 }
 
 describe('browser RPC command authorization', () => {
+  it('CT-RECOVERY-CODES-001 keeps both file phases on the same unlock/gesture/confirmation policy', () => {
+    expect(BROWSER_RPC_POLICIES['items.recovery-codes.import-file']).toEqual({ capability: 'system-dialog', requiresUnlock: true, requiresGesture: true, requiresConfirmation: true });
+    for (const input of [{}, { phase: 'prepare' }, { phase: 'finish', cleanupId: '33333333-3333-4333-8333-333333333333' }]) {
+      expect(BrowserRecoveryFileInputSchema.safeParse(input).success).toBe(true);
+    }
+    for (const input of [{ phase: 'finish' }, { phase: 'prepare', path: '/synthetic/path' }, { phase: 'delete' }]) {
+      expect(BrowserRecoveryFileInputSchema.safeParse(input).success).toBe(false);
+    }
+    expect(PreparedBrowserRecoveryFileSchema.safeParse({ codes: ['synthetic-code'], fileName: 'synthetic.txt', sourceFileStatus: 'deleted', cleanup: { id: '33333333-3333-4333-8333-333333333333', expiresAt: 10 } }).success).toBe(false);
+  });
   it('assigns every operation an explicit capability policy', () => {
     expect(Object.keys(BROWSER_RPC_POLICIES).sort()).toEqual([...BrowserRpcOperationSchema.options].sort());
   });
@@ -36,6 +48,8 @@ describe('browser RPC command authorization', () => {
 
   it('allows automatic autofill without a synthetic gesture only while unlocked', () => {
     expect(authorizeBrowserRpc(request('browser.autofill.candidates'), true).authorized).toBe(true);
+    expect(authorizeBrowserRpc(request('browser.autofill.profile'), true).authorized).toBe(true);
+    expect(authorizeBrowserRpc(request('browser.autofill.profile'), false)).toMatchObject({ authorized: false, code: 'unlock-required' });
     expect(authorizeBrowserRpc(request('browser.autofill.execute'), true).authorized).toBe(true);
     expect(authorizeBrowserRpc(request('browser.card.capture-status'), true).authorized).toBe(true);
     expect(authorizeBrowserRpc(request('browser.login.password-changed'), true).authorized).toBe(true);
@@ -46,5 +60,22 @@ describe('browser RPC command authorization', () => {
     expect(authorizeBrowserRpc(request('browser.login.password-changed'), false)).toMatchObject({ authorized: false, code: 'unlock-required' });
     expect(authorizeBrowserRpc(request('browser.fill.record'), false)).toMatchObject({ authorized: false, code: 'unlock-required' });
     expect(authorizeBrowserRpc(request('browser.fill.request'), true)).toMatchObject({ authorized: false, code: 'invalid-request' });
+  });
+
+  it('requires a gesture for a native Login plan without changing legacy automatic fill policy', () => {
+    expect(authorizeBrowserRpc(request('browser.autofill.execute', { nativeLoginPlan: [] }), true))
+      .toMatchObject({ authorized: false, code: 'invalid-request' });
+    expect(authorizeBrowserRpc(request('browser.autofill.execute', { nativeLoginPlan: [], userGestureId: crypto.randomUUID() }), true).authorized).toBe(true);
+  });
+
+  it('validates native Login sources without allowing protected values or duplicate handles', () => {
+    const entry = { handle: crypto.randomUUID(), source: 'password' };
+    expect(NativeLoginPlanSchema.safeParse([entry]).success).toBe(true);
+    for (const source of [{ ...entry, source: 'totpCode' }, { ...entry, source: 'totpCode', index: 5 }, { ...entry, source: 'custom', index: 0, name: 'tenant' }]) {
+      expect(NativeLoginPlanSchema.safeParse([source]).success).toBe(true);
+    }
+    for (const input of [[], [entry, entry], [{ ...entry, source: 'totpCode', index: 6 }], [{ ...entry, source: 'custom' }], [{ ...entry, index: 1 }], [{ ...entry, value: 'not-allowed' }]]) {
+      expect(NativeLoginPlanSchema.safeParse(input).success).toBe(false);
+    }
   });
 });

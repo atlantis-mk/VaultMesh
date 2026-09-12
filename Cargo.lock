@@ -5914,6 +5914,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vaultmesh-android-runtime"
+version = "0.0.9-review"
+dependencies = [
+ "atomic-write-file",
+ "jni 0.21.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+ "vaultmesh-core",
+ "zeroize",
+]
+
+[[package]]
 name = "vaultmesh-core"
 version = "0.0.9-review"
 dependencies = [

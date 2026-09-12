@@ -1,0 +1,139 @@
+// FIXME: Update this file to be type safe and remove this and next line
+// @ts-strict-ignore
+import { CommonModule } from "@angular/common";
+import { Component, computed, inject, input, signal } from "@angular/core";
+// This import has been flagged as unallowed for this class. It may be involved in a circular dependency loop.
+import { toSignal } from "@angular/core/rxjs-interop";
+import { fromEvent, map, startWith } from "rxjs";
+
+import { JslibModule } from "@bitwarden/angular/jslib.module";
+import {
+  CollectionView,
+  CollectionTypes,
+} from "@bitwarden/common/admin-console/models/collections";
+import { Organization } from "@bitwarden/common/admin-console/models/domain/organization";
+import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
+import { FolderView } from "@bitwarden/common/vault/models/view/folder.view";
+import {
+  CardComponent,
+  FormFieldModule,
+  LinkComponent,
+  TypographyModule,
+} from "@bitwarden/components";
+
+import { OrgIconDirective } from "../../components/org-icon.directive";
+import { Vfo1I18nPipe } from "../../pipes/vfo1-i18n.pipe";
+import { Vfo1TerminologyService } from "../../services/vfo1-terminology.service";
+
+// FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
+// eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
+@Component({
+  selector: "app-item-details-v2",
+  templateUrl: "item-details-v2.component.html",
+  imports: [
+    CommonModule,
+    JslibModule,
+    CardComponent,
+    TypographyModule,
+    OrgIconDirective,
+    FormFieldModule,
+    LinkComponent,
+    Vfo1I18nPipe,
+  ],
+})
+export class ItemDetailsV2Component {
+  private readonly vfo1TerminologyService = inject(Vfo1TerminologyService);
+  protected readonly vfo1Enabled = this.vfo1TerminologyService.enabled;
+
+  readonly hideOwner = input<boolean>(false);
+  readonly cipher = input.required<CipherView>();
+  readonly organization = input<Organization | undefined>();
+  readonly folder = input<FolderView | undefined>();
+  readonly collections = input<CollectionView[] | undefined>();
+  readonly showAllDetails = signal(false);
+
+  readonly showOwnership = computed(() => {
+    return this.cipher().organizationId && this.organization() && !this.hideOwner();
+  });
+
+  readonly hasSmallScreen = toSignal(
+    fromEvent(window, "resize").pipe(
+      map(() => window.innerWidth),
+      startWith(window.innerWidth),
+      map((width) => width < 681),
+    ),
+  );
+
+  // Array to hold all details of item. Organization, Collections, and Folder
+  readonly allItems = computed(() => {
+    let items: any[] = [];
+    if (this.showOwnership() && this.organization()) {
+      items.push(this.organization());
+    }
+    if (this.cipher().collectionIds?.length > 0 && this.collections()) {
+      items = [...items, ...this.collections()];
+    }
+    if (this.cipher().folderId && this.folder()) {
+      items.push(this.folder());
+    }
+    return items;
+  });
+
+  readonly showItems = computed(() => {
+    if (
+      this.hasSmallScreen() &&
+      this.allItems().length > 2 &&
+      !this.showAllDetails() &&
+      this.cipher().collectionIds?.length > 1
+    ) {
+      return this.allItems().slice(0, 2);
+    } else {
+      return this.allItems();
+    }
+  });
+
+  constructor(private i18nService: I18nService) {}
+
+  toggleShowMore() {
+    this.showAllDetails.update((value) => !value);
+  }
+
+  getAriaLabel(item: Organization | CollectionView | FolderView): string {
+    if (item instanceof Organization) {
+      const key = this.vfo1Enabled() ? "vaultAriaLabel" : "ownerAriaLabel";
+      return this.i18nService.t(key, item.name);
+    } else if (item instanceof CollectionView) {
+      const key = this.vfo1Enabled() ? "sharedFolderAriaLabel" : "collectionAriaLabel";
+      return this.i18nService.t(key, item.name);
+    } else if (item instanceof FolderView) {
+      const key = this.vfo1Enabled() ? "myFolderAriaLabel" : "folderAriaLabel";
+      return this.i18nService.t(key, item.name);
+    }
+    return "";
+  }
+
+  getIconClass(item: Organization | CollectionView | FolderView): string {
+    if (item instanceof CollectionView) {
+      return this.vfo1TerminologyService.iconClass(
+        item.type === CollectionTypes.DefaultUserCollection ? "bwi-user" : "bwi-collection-shared",
+      );
+    } else if (item instanceof FolderView) {
+      return "bwi-folder";
+    }
+    return "";
+  }
+
+  getItemTitle(item: Organization | CollectionView | FolderView): string {
+    if (item instanceof CollectionView) {
+      return this.i18nService.t(this.vfo1Enabled() ? "sharedFolder" : "collection");
+    } else if (item instanceof FolderView) {
+      return this.i18nService.t(this.vfo1Enabled() ? "myFolder" : "folder");
+    }
+    return "";
+  }
+
+  isOrgIcon(item: Organization | CollectionView | FolderView): boolean {
+    return item instanceof Organization;
+  }
+}

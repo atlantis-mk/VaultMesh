@@ -94,7 +94,7 @@ impl BrowserBrokerWindowsListener {
         Self::start_with_pipe_name(BROWSER_PIPE_NAME.to_owned(), broker)
     }
 
-    fn start_with_pipe_name(
+    pub(crate) fn start_with_pipe_name(
         pipe_name: String,
         broker: Arc<Mutex<BrowserBrokerCore>>,
     ) -> io::Result<Self> {

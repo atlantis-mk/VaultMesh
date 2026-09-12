@@ -15,6 +15,8 @@ export type BrowserExtensionWorkflow = {
  * commands. `events.poll` and `confirmation.request` are transport helpers,
  * not user-facing workflows, and are checked separately below. */
 export const BROWSER_EXTENSION_WORKFLOWS: readonly BrowserExtensionWorkflow[] = [
+  // login-management import-file includes prepare/finish in the independent editor;
+  // finish is reachable only after a confirmed successful Login save.
   { id: 'vault-session', route: 'popup:vault', commands: ['vault.status', 'vault.workspace', 'vault.create', 'vault.unlock', 'vault.unlock-history', 'vault.lock'], requiresConfirmation: false },
   { id: 'login-management', route: 'popup:vault', commands: ['items.list', 'items.detail', 'items.add', 'items.update', 'items.delete', 'items.copy-username', 'items.copy-password', 'items.copy-totp', 'items.recovery-codes', 'items.copy-recovery-code', 'items.recovery-codes.import-file'], requiresConfirmation: true },
   { id: 'card-management', route: 'popup:vault', commands: ['cards.list', 'cards.detail', 'cards.add', 'cards.update', 'cards.delete', 'cards.copy-number', 'cards.copy-security-code', 'cards.copy-pin'], requiresConfirmation: true },
@@ -32,7 +34,8 @@ export const BROWSER_EXTENSION_WORKFLOWS: readonly BrowserExtensionWorkflow[] = 
   { id: 'browser-pairing', route: 'popup:settings', commands: ['browser.pairing.status', 'browser.pairing.revoke'], requiresConfirmation: true },
   { id: 'imports', route: 'popup:settings', commands: ['imports.select', 'imports.commit', 'imports.cancel'], requiresConfirmation: true },
   { id: 'ssh-key-scan', route: 'popup:settings', commands: ['ssh.scan', 'ssh.scan.commit', 'ssh.scan.cancel'], requiresConfirmation: true },
-  { id: 'browser-autofill', route: 'popup:vault', commands: ['browser.autofill.candidates', 'browser.autofill.execute', 'browser.card.capture-status', 'browser.login.password-changed', 'browser.fill.record', 'browser.fill.history', 'browser.fill.request'], requiresConfirmation: true },
+  // The experimental Bitwarden popup uses the same execute/audit workflow with a bounded nativeLoginPlan.
+  { id: 'browser-autofill', route: 'popup:vault', commands: ['browser.autofill.candidates', 'browser.autofill.profile', 'browser.autofill.execute', 'browser.card.capture-status', 'browser.login.password-changed', 'browser.fill.record', 'browser.fill.history', 'browser.fill.request'], requiresConfirmation: true },
   { id: 'email-otp', route: 'popup:vault', commands: ['email.otp.watch', 'email.otp.poll', 'email.otp.candidates', 'email.otp.fill'], requiresConfirmation: false },
   { id: 'passkeys', route: 'popup:vault', commands: ['passkeys.create', 'passkeys.get'], requiresConfirmation: false },
 ];

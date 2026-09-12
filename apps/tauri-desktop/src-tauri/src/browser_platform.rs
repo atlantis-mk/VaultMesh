@@ -35,7 +35,7 @@ use crate::{
     import_service::{ImportService, MAX_IMPORT_FILE_BYTES, validate_source},
     passkey_service::PasskeyService,
     pin_service::PinQuickUnlockService,
-    recovery_code_file::PreparedRecoveryCodeFile,
+    recovery_code_file::{PreparedRecoveryCodeFile, RecoveryFileCleanupSessions},
     ssh_scan::SshScanService,
     write_private_file,
 };
@@ -47,6 +47,7 @@ pub struct TauriBrowserPlatform {
     clipboard_value: Arc<Mutex<Option<Zeroizing<String>>>>,
     native_dialog_focus: Arc<NativeDialogFocusState>,
     imports: Mutex<ImportService>,
+    recovery_files: Mutex<RecoveryFileCleanupSessions>,
     pin: Mutex<PinQuickUnlockService>,
     biometric: Mutex<BiometricQuickUnlockService>,
     pairing: BrowserPairingService,
@@ -57,6 +58,22 @@ pub struct TauriBrowserPlatform {
 }
 
 impl TauriBrowserPlatform {
+    /// New OS credential slots and records; never inherits another extension's quick unlock.
+    pub fn into_bitwarden_development(mut self, app_data: &std::path::Path) -> Self {
+        let directory = app_data.join(crate::browser_development_identity::DIRECTORY);
+        self.pin = Mutex::new(PinQuickUnlockService::new_bitwarden_development(
+            directory.join("pin-unlock.json"),
+        ));
+        self.biometric = Mutex::new(BiometricQuickUnlockService::new(
+            directory.join("biometric-unlock.json"),
+            "com.vaultmesh.desktop.bitwarden-dev-biometric",
+            "bitwarden-dev-biometric",
+        ));
+        self.pairing =
+            BrowserPairingService::new_bitwarden_development(directory.join("pairing.json"));
+        self
+    }
+
     pub fn new(
         app: AppHandle,
         app_data: PathBuf,
@@ -78,6 +95,7 @@ impl TauriBrowserPlatform {
             clipboard_value,
             native_dialog_focus,
             imports: Mutex::new(ImportService::default()),
+            recovery_files: Mutex::new(RecoveryFileCleanupSessions::default()),
             pin: Mutex::new(PinQuickUnlockService::new_browser(
                 app_data.join("browser-pin-unlock.json"),
             )),
@@ -257,7 +275,44 @@ impl TauriBrowserPlatform {
             .map_err(|message| failure(&message))
     }
 
-    fn import_recovery_code_file(&self) -> Result<Value, BrowserPlatformError> {
+    fn import_recovery_code_file(
+        &self,
+        input: &Map<String, Value>,
+    ) -> Result<Value, BrowserPlatformError> {
+        let phase = input
+            .get("phase")
+            .map(|value| value.as_str().ok_or_else(invalid))
+            .transpose()?;
+        if input.keys().any(|key| {
+            !["phase", "cleanupId", "userGestureId", "confirmationToken"].contains(&key.as_str())
+        }) || !matches!(phase, None | Some("prepare") | Some("finish"))
+            || (phase != Some("finish") && input.contains_key("cleanupId"))
+        {
+            return Err(invalid());
+        }
+        let deadline = Utc::now().timestamp_millis().saturating_add(45_000);
+        if phase == Some("finish") {
+            let id =
+                Uuid::parse_str(&required_string(input, "cleanupId")?).map_err(|_| invalid())?;
+            // Consume before opening the dialog. Cancellation and duplicate calls cannot replay deletion.
+            let cleanup = self
+                .recovery_files
+                .lock()
+                .map_err(|_| failure("导入状态暂时不可用。"))?
+                .take(id, Utc::now().timestamp_millis())
+                .map_err(|message| failure(&message))?;
+            let window =
+                focus_main_window_for_dialog(&self.app).map_err(|message| failure(&message))?;
+            let _dialog_guard = self.native_dialog_focus.begin();
+            let confirmed = self.app.dialog().message(format!(
+                "登录信息已保存。是否删除已导入的原文件“{}”？\n\n删除不是安全擦除，不会清理其他副本或备份。", cleanup.file_name))
+                .title("删除已导入的恢复码文件？").parent(&window)
+                .buttons(MessageDialogButtons::OkCancelCustom("删除文件".into(), "保留文件".into())).blocking_show();
+            let now = Utc::now().timestamp_millis();
+            return Ok(
+                json!({ "sourceFileStatus": cleanup.finish(confirmed && now < deadline, now) }),
+            );
+        }
         let window =
             focus_main_window_for_dialog(&self.app).map_err(|message| failure(&message))?;
         let _dialog_guard = self.native_dialog_focus.begin();
@@ -273,6 +328,20 @@ impl TauriBrowserPlatform {
             return Err(cancelled());
         };
         let prepared = PreparedRecoveryCodeFile::load(path).map_err(|message| failure(&message))?;
+        if phase == Some("prepare") {
+            let now = Utc::now().timestamp_millis();
+            if now >= deadline {
+                return Err(cancelled());
+            }
+            let (result, id, expires_at) = self
+                .recovery_files
+                .lock()
+                .map_err(|_| failure("导入状态暂时不可用。"))?
+                .stage(prepared, now)
+                .map_err(|message| failure(&message))?;
+            return Ok(json!({ "codes": result.codes, "fileName": result.file_name,
+                "sourceFileStatus": result.source_file_status, "cleanup": { "id": id, "expiresAt": expires_at } }));
+        }
         let delete_confirmed = self
             .app
             .dialog()
@@ -627,7 +696,7 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                     let code = Zeroizing::new(codes.swap_remove(index));
                     self.copy(code, now_millis)
                 }
-                "items.recovery-codes.import-file" => self.import_recovery_code_file(),
+                "items.recovery-codes.import-file" => self.import_recovery_code_file(input),
                 "imports.select" => self.import_select(input, now_millis),
                 "imports.commit" => {
                     let session_id = required_string(input, "sessionId")?;
@@ -807,6 +876,9 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
     }
 
     fn clear(&self) {
+        if let Ok(mut files) = self.recovery_files.lock() {
+            files.clear();
+        }
         if let Ok(mut imports) = self.imports.lock() {
             imports.clear();
         }

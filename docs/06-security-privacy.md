@@ -61,7 +61,19 @@ Email token/app password 是 encrypted internal record。Main 只读邮件、内
 
 禁止把 email body/OTP、import secret、recovery-code file content/path、SSH private key、token、local path 或 pending assignment 写入 log、telemetry、browser storage 或 non-secret settings。文件删除只移除当前文件系统条目，不承诺安全擦除、副本或备份清理。
 
+两阶段恢复码文件导入的例外由 ADR-0003 授权：代码仍只进入当前独立编辑窗口组件；桌面只为短期、
+一次性清理句柄保留原路径、摘要和期限，不缓存恢复码。准备阶段不能删除文件，保存成功后的删除
+仍要求原生确认。窗口隐藏例外仅限该窗口主动发起且有界的原生对话框，不适用于普通失焦或关闭。
+
 插件查看 Login 恢复码时，每次必须由 core 重新验证当前主密码，解密列表只进入当前 popup 组件内存并在隐藏、离开、锁定、断开或失败时清除。复制同样逐次重新验证，但值只由 Tauri Rust platform 写入带过期清理的系统剪贴板；插件只接收清理时间，不接收复制值。查看授权不得复用于复制，恢复码不得进入 background、content script、extension storage、日志、通知或 crash data。
+
+## Android 边界
+
+Android UI 与系统框架均不得拥有 Vault Key 或 `vault-core` 对象。主密码和 Login 新密码只作为当前 JNI 调用输入，Kotlin 与 Compose 不得把它写入 saved state、Bundle、日志、崩溃数据、剪贴板或持久化 store；调用完成或失败后必须清空 UI 输入。JNI Login 与回收站列表只包含安全摘要，禁止返回密码、notes、TOTP、恢复码和 custom field 值；搜索只在内存摘要上执行。永久删除和清空必须明确确认；其他返回值只包含稳定错误码和非秘密状态，不包含解密 payload、路径、KDF 参数或内部错误详情。
+
+Vault 只保存在应用私有目录，禁止 Android Auto Backup、device transfer backup 与 cleartext traffic。主 Activity 从创建起启用 `FLAG_SECURE`；进入后台、系统锁定、显式锁定和进程退出必须使解锁会话不可继续使用。进程终止不是持久化秘密清理机制，任何解锁权限都不得写盘。
+
+首个 Android 切片不注册网络、WebView、Autofill、Credential Manager、Passkey、外部存储或后台服务权限。Keystore/生物识别 quick unlock 和系统级填充以后续 ADR 与独立 Requirement 所有；不得以保存主密码、将秘密返回 Compose 或复用桌面 broker 作为实现捷径。
 
 ## Agent Capability Broker 边界
 
