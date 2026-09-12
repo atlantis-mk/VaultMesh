@@ -1,39 +1,69 @@
-<main class="tw-p-4 tw-min-h-full">
-  <header class="tw-flex tw-items-center tw-justify-between tw-mb-4">
-    <h1 class="tw-text-lg tw-font-semibold">VaultMesh</h1>
-    <div class="tw-flex tw-gap-2">
-      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="session.refresh()">刷新</button>
-      @if (state().status === "ready") {
-        @if (!independentEditor()) { <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="openEditorWindow()">独立窗口</button> }
-        @if (!independentEditor()) { <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="openEmail()">邮箱验证码</button> }
+<popup-page>
+  <popup-header slot="header" [pageTitle]="pageTitle()" [showBackButton]="showBack()" [backAction]="backToList">
+    <ng-container slot="end">
+      @if (state().status === 'ready' && !hasDetail()) {
         @if (surface() === 'login') {
-          <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="newLogin()">新建</button>
-          <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="openRecovery()">回收站</button>
+          <button bitIconButton="bwi-plus" label="新建登录信息" type="button" [disabled]="state().busy" (click)="newLogin()"></button>
         }
-        <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="lock()">锁定</button>
+        @if (!independentEditor()) {
+          <button bitIconButton="bwi-popout" label="在独立窗口打开" type="button" [disabled]="state().busy" (click)="openEditorWindow()"></button>
+        }
       }
+      <button bitIconButton="bwi-ellipsis-v" label="保险库选项" type="button" [bitMenuTriggerFor]="vaultMenu"></button>
+      <bit-menu #vaultMenu>
+        <button bitMenuItem type="button" [disabled]="state().busy" (click)="session.refresh()">刷新</button>
+        @if (state().status === 'ready') {
+          @if (surface() === 'login') {
+            <button bitMenuItem type="button" [disabled]="state().busy" (click)="openRecovery()">回收站</button>
+            @if (!independentEditor()) { <button bitMenuItem type="button" [disabled]="state().busy" (click)="openEmail()">邮箱验证码</button> }
+          }
+          <button bitMenuItem type="button" [disabled]="state().busy" (click)="lock()">锁定</button>
+        }
+      </bit-menu>
+    </ng-container>
+  </popup-header>
+  @if (state().status === 'ready' && !hasDetail() && (surface() === 'login' || managedSurface().length)) {
+    <div slot="above-scroll-area">
+      <bit-form-field disableMargin>
+        <bit-label>条目类型</bit-label>
+        <select bitInput aria-label="条目类型" [ngModel]="surface()" (ngModelChange)="showSurface($event)" [disabled]="state().busy">
+          <option value="login">登录</option>
+          @for (tab of managedTabs; track tab.kind) { <option [value]="tab.kind">{{ tab.label }}</option> }
+        </select>
+      </bit-form-field>
     </div>
-  </header>
+  }
   @if (state().status === 'ready') {
-    <nav aria-label="条目类型" class="tw-flex tw-flex-wrap tw-gap-2 tw-mb-3">
-      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" [attr.aria-current]="surface() === 'login' ? 'page' : null" (click)="showSurface('login')">登录</button>
-      @for (tab of managedTabs; track tab.kind) { <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" [attr.aria-current]="surface() === tab.kind ? 'page' : null" (click)="showSurface(tab.kind)">{{ tab.label }}</button> }
-      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="showSurface('tools')">设置与工具</button>
-      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="showSurface('generator')">生成器</button>
-      <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="showSurface('vault')">保险库</button>
-    </nav>
     @for (kind of managedSurface(); track kind) { <vaultmesh-managed-items [kind]="kind" [independent]="independentEditor()" /> }
-    @if (surface() === 'tools') { <vaultmesh-security-tools [independent]="independentEditor()" /> }
+    @if (surface() === 'tools') {
+      <vaultmesh-security-tools [independent]="independentEditor()" />
+    }
     @if (surface() === 'generator') { <vaultmesh-generator [independent]="independentEditor()" /> }
-    @if (surface() === 'vault') { <vaultmesh-vault-lifecycle [independent]="independentEditor()" /> }
+    @if (surface() === 'vault') {
+      <vaultmesh-vault-lifecycle [independent]="independentEditor()" />
+    }
+    @if (surface() === 'settings') {
+      <bit-item-group>
+        <bit-item><a bit-item-content routerLink="/account-security" [truncate]="false"><i slot="start" class="bwi bwi-lock" aria-hidden="true"></i>安全<i slot="end" class="bwi bwi-angle-right" aria-hidden="true"></i></a></bit-item>
+        <bit-item><a bit-item-content routerLink="/vault-settings" [truncate]="false"><i slot="start" class="bwi bwi-vault" aria-hidden="true"></i>保险库设置<i slot="end" class="bwi bwi-angle-right" aria-hidden="true"></i></a></bit-item>
+        <bit-item><button bit-item-content type="button" [disabled]="state().busy" (click)="lock()"><i slot="start" class="bwi bwi-lock" aria-hidden="true"></i>锁定保险库</button></bit-item>
+      </bit-item-group>
+      <p class="tw-text-muted tw-text-sm tw-mt-4">VaultMesh · 独立开发副本</p>
+    }
   }
   <div aria-live="polite" class="tw-mb-3 tw-text-muted">
     @switch (state().status) {
-      @case ("loading") { 正在连接桌面端… }
+      @case ("loading") {
+        @switch (state().loadingStage) {
+          @case ("permission") { 正在等待浏览器连接权限… }
+          @case ("logins") { 桌面端已响应，正在读取登录列表… }
+          @default { 正在检查桌面连接… }
+        }
+      }
       @case ("unavailable") { 请启动 VaultMesh 桌面端，并允许插件连接桌面应用。 }
       @case ("unpaired") { 请在桌面端完成此插件的配对。 }
-      @case ("locked") { 插件已锁定，需要单独解锁。 }
-      @case ("ready") { 插件已独立解锁 }
+      @case ("locked") {}
+      @case ("ready") {}
     }
   </div>
   @if (state().error) { <p role="alert">{{ state().error }}</p> }
@@ -51,18 +81,7 @@
     <button bitButton buttonType="primary" type="button" [disabled]="state().busy" (click)="session.connect()">连接桌面端</button>
   }
   @if (state().status === "locked" && state().vault?.hasVault) {
-    @if (surface() === 'tools') { <vaultmesh-security-tools [locked]="true" [independent]="independentEditor()" /> }
-    @else { <button bitButton buttonType="secondary" type="button" [disabled]="state().busy" (click)="showSurface('tools')">PIN / 生物识别解锁</button> }
-    <form (ngSubmit)="unlock()">
-      <bit-form-field>
-        <bit-label>主密码</bit-label>
-        <input bitInput type="password" name="masterPassword" autocomplete="off"
-          [(ngModel)]="password" minlength="8" maxlength="1024" required [disabled]="state().busy" />
-      </bit-form-field>
-      <button bitButton buttonType="primary" type="submit" [disabled]="state().busy || password.length < 8">
-        {{ state().busy ? "正在解锁…" : "解锁插件" }}
-      </button>
-    </form>
+    <vaultmesh-unlock [independent]="independentEditor()" />
   }
   @if (state().status === "locked" && state().vault?.hasVault === false) {
     <vaultmesh-vault-lifecycle [hasVault]="false" [independent]="independentEditor()" />
@@ -182,31 +201,68 @@
         <button bitButton buttonType="secondary" type="button" (click)="closeEditor()">取消</button>
       </section>
     } @else {
-    <bit-form-field>
-      <bit-label>搜索登录信息</bit-label>
-      <input bitInput type="search" autocomplete="off" [ngModel]="query()" (ngModelChange)="query.set($event)" />
-    </bit-form-field>
-    <bit-item-group>
-      @for (cipher of rows(); track cipher.id) {
-        <bit-item>
-          <bit-item-content>
-            {{ cipher.name }}
-            <span slot="secondary">{{ cipher.login.username || cipher.login.uri }}</span>
-            <div slot="end" class="tw-flex tw-flex-wrap tw-gap-2">
-              @if (!independentEditor()) { <button bitButton buttonType="secondary" type="button" [attr.aria-label]="'填充 ' + cipher.name" (click)="requestFill(cipher.id)">填充</button> }
-              <button bitButton buttonType="secondary" type="button" [attr.aria-label]="'编辑 ' + cipher.name" (click)="editLogin(cipher.id)">编辑</button>
-              <button bitButton buttonType="secondary" type="button" [attr.aria-label]="'历史版本 ' + cipher.name" (click)="openRecovery(cipher.id)">历史</button>
-              <button bitButton buttonType="secondary" type="button" [attr.aria-label]="'Passkey ' + cipher.name" (click)="openPasskeys(cipher.id)">Passkey</button>
-              <button bitButton buttonType="secondary" type="button" [disabled]="!canCopy(cipher.id, 'username')" [attr.aria-label]="'复制用户名 ' + cipher.name" (click)="requestCopy(cipher.id, 'username')">用户名</button>
-              <button bitButton buttonType="secondary" type="button" [disabled]="!canCopy(cipher.id, 'password')" [attr.aria-label]="'复制密码 ' + cipher.name" (click)="requestCopy(cipher.id, 'password')">密码</button>
-              <button bitButton buttonType="secondary" type="button" [disabled]="!canCopy(cipher.id, 'totp')" [attr.aria-label]="'复制验证码 ' + cipher.name" (click)="requestCopy(cipher.id, 'totp')">验证码</button>
-              <button bitButton buttonType="secondary" type="button" [disabled]="!hasRecoveryCodes(cipher.id)" [attr.aria-label]="'查看恢复码 ' + cipher.name" (click)="requestCodes(cipher.id)">恢复码</button>
-            </div>
-          </bit-item-content>
-        </bit-item>
-      } @empty { <p>{{ state().logins.length ? "没有匹配的登录信息。" : "保险库暂无登录信息。" }}</p> }
-    </bit-item-group>
+    @if (viewedLogin(); as item) {
+      <section aria-label="条目详情">
+        <h2 class="tw-text-lg tw-font-semibold tw-mb-4">{{ item.title }}</h2>
+        <bit-item-group>
+          <bit-item><bit-item-content>用户名<span slot="secondary">{{ item.username }}</span><button slot="end" bitIconButton="bwi-clone" label="复制用户名" type="button" [disabled]="!canCopy(item.id, 'username')" (click)="requestCopy(item.id, 'username')"></button></bit-item-content></bit-item>
+          <bit-item><bit-item-content>密码<span slot="secondary">{{ item.hasPassword ? '••••••••' : '未设置' }}</span><button slot="end" bitIconButton="bwi-clone" label="复制密码" type="button" [disabled]="!canCopy(item.id, 'password')" (click)="requestCopy(item.id, 'password')"></button></bit-item-content></bit-item>
+          @if (item.url) { <bit-item><bit-item-content>网站地址<span slot="secondary">{{ item.url }}</span></bit-item-content></bit-item> }
+        </bit-item-group>
+        <p class="tw-text-muted tw-text-sm tw-my-3">受保护内容由桌面端保管，复制不会向插件返回密码。</p>
+        <div class="tw-flex tw-gap-2 tw-flex-wrap">
+          <button bitButton buttonType="primary" type="button" (click)="editLogin(item.id)">编辑</button>
+          @if (!independentEditor()) { <button bitButton buttonType="secondary" type="button" (click)="requestFill(item.id)">填充</button> }
+          <button bitButton buttonType="secondary" type="button" (click)="openRecovery(item.id)">历史版本</button>
+          <button bitButton buttonType="secondary" type="button" (click)="openPasskeys(item.id)">Passkey</button>
+          @if (item.hasTotpSecret) { <button bitButton buttonType="secondary" type="button" (click)="requestCopy(item.id, 'totp')">复制验证码</button> }
+          @if (item.hasRecoveryCodes) { <button bitButton buttonType="secondary" type="button" (click)="requestCodes(item.id)">查看恢复码</button> }
+        </div>
+      </section>
+    } @else {
+      <bit-form-field>
+        <bit-label>搜索保险库</bit-label>
+        <input bitInput type="search" autocomplete="off" [ngModel]="query()" (ngModelChange)="setLoginQuery($event)" />
+      </bit-form-field>
+      <div class="tw-flex tw-justify-between tw-items-center tw-mb-2">
+        <h2 class="tw-text-sm tw-font-semibold">{{ query() ? '搜索结果' : '所有登录条目' }}</h2>
+        <span class="tw-text-muted tw-text-sm">共 {{ filteredLogins().length }} 条</span>
+      </div>
+      <bit-item-group>
+        @for (cipher of rows(); track cipher.id) {
+          <bit-item class="tw-group/vault-item">
+            <button bit-item-content type="button" [attr.aria-label]="'填充 ' + cipher.name" (click)="selectLogin(cipher.id)">
+              <i slot="start" class="bwi bwi-globe tw-text-muted" aria-hidden="true"></i>
+              <span data-testid="item-name">{{ cipher.name }}</span>
+              <span slot="secondary">{{ cipher.login.username || cipher.login.uri }}</span>
+            </button>
+            <ng-container slot="end">
+              @if (!independentEditor()) {
+                <bit-item-action><button bitIconButton="bwi-autofill" size="small" [label]="'填充 ' + cipher.name" type="button" (click)="requestFill(cipher.id)"></button></bit-item-action>
+              }
+              <bit-item-action><button bitIconButton="bwi-ellipsis-v" size="small" [label]="'更多选项 ' + cipher.name" type="button" [bitMenuTriggerFor]="itemMenu"></button></bit-item-action>
+              <bit-menu #itemMenu>
+                <button bitMenuItem type="button" (click)="viewLogin(cipher.id)">查看</button>
+                <button bitMenuItem type="button" (click)="editLogin(cipher.id)">编辑</button>
+                <button bitMenuItem type="button" [disabled]="!canCopy(cipher.id, 'username')" (click)="requestCopy(cipher.id, 'username')">复制用户名</button>
+                <button bitMenuItem type="button" [disabled]="!canCopy(cipher.id, 'password')" (click)="requestCopy(cipher.id, 'password')">复制密码</button>
+                <button bitMenuItem type="button" [disabled]="!canCopy(cipher.id, 'totp')" (click)="requestCopy(cipher.id, 'totp')">复制验证码</button>
+                <button bitMenuItem type="button" (click)="openRecovery(cipher.id)">历史版本</button>
+                <button bitMenuItem type="button" (click)="openPasskeys(cipher.id)">Passkey</button>
+                <button bitMenuItem type="button" [disabled]="!hasRecoveryCodes(cipher.id)" (click)="requestCodes(cipher.id)">恢复码</button>
+              </bit-menu>
+            </ng-container>
+          </bit-item>
+        } @empty { <p class="tw-p-4 tw-text-muted">{{ state().logins.length ? '没有匹配的登录信息。' : '保险库暂无登录信息。' }}</p> }
+      </bit-item-group>
+      <nav aria-label="登录列表分页" class="tw-flex tw-items-center tw-justify-between tw-gap-2 tw-mt-3">
+        <button bitButton buttonType="secondary" type="button" [disabled]="state().busy || loginPage() === 0" (click)="changeLoginPage(-1)">上一页</button>
+        <span class="tw-text-muted tw-text-sm" role="status">{{ loginPage() + 1 }} / {{ loginPageCount() }}</span>
+        <button bitButton buttonType="secondary" type="button" [disabled]="state().busy || loginPage() + 1 >= loginPageCount()" (click)="changeLoginPage(1)">下一页</button>
+      </nav>
+    }
     }
   }
   @if (state().status === "ready" && state().busy) { <p role="status">正在处理，请稍候…</p> }
-</main>
+
+</popup-page>

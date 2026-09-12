@@ -3,12 +3,12 @@
 ## 当前基线
 
 - 规格修订：`0.1.53-active`
-- 产品版本：`0.0.9-review`
+- 产品版本：`0.0.10-review`
 - Vault 格式：`4`（唯一写入格式；format 3 仅允许 desktop 主密码验证、备份后升级；不提供降级）
 - Browser RPC：`2`
 - Native ABI：`1`
-- 状态：Tauri 2 desktop、Android Compose、Chromium MV3 与 Firefox MV2 扩展为当前实现；Android 首个 create/unlock/status/lock 切片实施中，Firefox 不包含 Chromium-only Passkey proxy；Electron/Native Preview 源码已移除；`0.0.1-review` 为独立 Review 安装基线，当前 Review 更新版本为 `0.0.9-review`，正式发布门禁未完成
-- 最后更新：`2026-09-12`
+- 状态：Tauri 2 desktop、Android Compose、Chromium MV3 与 Firefox MV2 扩展为当前实现；Android 首个 create/unlock/status/lock 切片实施中，Firefox 不包含 Chromium-only Passkey proxy；Electron/Native Preview 源码已移除；`0.0.1-review` 为独立 Review 安装基线，当前 Review 更新版本为 `0.0.10-review`，正式发布门禁未完成
+- 最后更新：`2026-09-13`
 
 ## 路由顺序
 

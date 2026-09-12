@@ -1,12 +1,42 @@
 import { ManagedDraft } from "./managed-draft";
 import { CapturedItemValuesSchema } from "./native-capture-contracts";
+import { SecretItemKindSchema } from "./vendor/model-contracts";
 
 /** Update only captured sources; retain all other fields and every collection entry. */
 export function applyCapturedItem(draft: ManagedDraft, raw: unknown): void {
   const rows = CapturedItemValuesSchema.parse(raw);
   if (!rows.every((row) => row.source.startsWith(`${draft.kind}:`))) throw new Error("capture-kind-mismatch");
   const values = new Map(rows.map((row) => [row.source.split(":")[1], row.value]));
+  if (draft.kind === "ssh") {
+    const key = ["publicKey", "privateKey", "keyPassphrase"].some((source) => values.has(source));
+    const account = ["host", "port", "username", "password"].some((source) => values.has(source));
+    if (key && account || !draft.id && !key && !account) throw new Error("ambiguous-ssh-capture");
+    const recordKind = key ? "key" : account ? "account" : draft.data.recordKind;
+    if (draft.id && recordKind !== draft.data.recordKind) throw new Error("capture-kind-mismatch");
+    if (!draft.id) draft.data.recordKind = recordKind;
+    for (const source of ["title", "host", "username", "password", "publicKey", "privateKey", "keyPassphrase"]) {
+      if (values.has(source)) draft.data[source] = values.get(source);
+    }
+    if (values.has("port")) {
+      if (!/^\d{1,5}$/.test(values.get("port")!)) throw new Error("invalid-ssh-port");
+      draft.data.port = Number(values.get("port"));
+    }
+    return;
+  }
+  if (draft.kind === "secret") {
+    const secrets = rows.filter((row) => SecretItemKindSchema.safeParse(row.source.slice(7)).success);
+    if (secrets.length > 1 || !draft.id && secrets.length !== 1) throw new Error("ambiguous-secret-capture");
+    if (secrets.length) {
+      const kind = SecretItemKindSchema.parse(secrets[0].source.slice(7));
+      if (draft.id && draft.data.kind !== kind) throw new Error("capture-kind-mismatch");
+      if (!draft.id) { draft.data.kind = kind; draft.data.masterPasswordReprompt = false; }
+      draft.data.secret = secrets[0].value;
+    }
+    for (const key of ["account", "provider"]) if (values.has(key)) draft.data[key] = values.get(key);
+    return;
+  }
   if (draft.kind === "card") {
+    if (!draft.id && (!values.has("number") || !values.has("exp") && !(values.has("expMonth") && values.has("expYear")))) throw new Error("incomplete-card-capture");
     for (const [source, key] of [["cardholderName", "cardholderName"], ["number", "cardNumber"], ["code", "securityCode"], ["brand", "network"]]) {
       if (values.has(source)) draft.data[key] = values.get(source);
     }

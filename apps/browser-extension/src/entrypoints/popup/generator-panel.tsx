@@ -28,6 +28,7 @@ import {
   type UsernameGeneratorOptions,
   type UuidGeneratorOptions,
 } from "@/lib/generated-credentials";
+import { desktopRpc } from "@/lib/desktop-rpc";
 import {
   DEFAULT_GENERATOR_PREFERENCES,
   loadGeneratorPreferences,
@@ -37,6 +38,7 @@ import {
 } from "@/lib/generator-preferences";
 
 type HistoryEntry = { id: string; mode: GeneratorMode; value: string; createdAt: number };
+const GENERATED_VALUE_LIFETIME_MS = 60_000;
 
 const modeMeta = {
   password: { label: "密码", icon: KeyRoundIcon },
@@ -51,6 +53,7 @@ export function GeneratorPanel({ onNotice }: { onNotice: (message: string, varia
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [expiresAt, setExpiresAt] = useState(() => Date.now() + GENERATED_VALUE_LIFETIME_MS);
   const persistenceFailureNotified = useRef(false);
   const { mode, password: passwordOptions, passphrase: passphraseOptions, username: usernameOptions, uuid: uuidOptions } = preferences;
 
@@ -60,11 +63,23 @@ export function GeneratorPanel({ onNotice }: { onNotice: (message: string, varia
   const passwordIssue = useMemo(() => validatePasswordRules(passwordOptions), [passwordOptions]);
 
   useEffect(() => {
+    let active = true;
     void loadGeneratorPreferences().then((loaded) => {
+      if (!active || document.hidden) return;
       setPreferences(loaded);
       setResult(createGeneratorValue(loaded.mode, loaded));
+      setExpiresAt(Date.now() + GENERATED_VALUE_LIFETIME_MS);
     });
+    return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    const clear = () => { setResult(""); setHistory([]); setCopied(false); };
+    const timer = setTimeout(clear, Math.max(0, expiresAt - Date.now()));
+    const hide = () => { if (document.hidden) clear(); };
+    document.addEventListener("visibilitychange", hide);
+    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", hide); };
+  }, [expiresAt]);
 
   function updatePreferences(next: GeneratorPreferences) {
     setPreferences(next);
@@ -83,6 +98,7 @@ export function GeneratorPanel({ onNotice }: { onNotice: (message: string, varia
     try {
       const value = createValue(nextMode);
       setResult(value);
+      setExpiresAt(Date.now() + GENERATED_VALUE_LIFETIME_MS);
       setHistory((current) => [{ id: crypto.randomUUID(), mode: nextMode, value, createdAt: Date.now() }, ...current].slice(0, 8));
       setCopied(false);
     } catch (error) {
@@ -96,6 +112,7 @@ export function GeneratorPanel({ onNotice }: { onNotice: (message: string, varia
     try {
       const value = createGeneratorValue(nextMode, next);
       setResult(value);
+      setExpiresAt(Date.now() + GENERATED_VALUE_LIFETIME_MS);
       setHistory((current) => [{ id: crypto.randomUUID(), mode: nextMode, value, createdAt: Date.now() }, ...current].slice(0, 8));
       setCopied(false);
     } catch (error) {
@@ -103,13 +120,14 @@ export function GeneratorPanel({ onNotice }: { onNotice: (message: string, varia
     }
   }
 
-  async function copy(value = result) {
+  async function copy(value = result, valueMode = mode) {
+    if (!value) return;
     try {
-      await navigator.clipboard.writeText(value);
+      await desktopRpc("browser.generated.copy", { mode: valueMode, value });
       setCopied(value === result);
-      onNotice("已复制。生成记录会在关闭弹窗时清除。", "success");
+      onNotice("已复制，桌面端会按安全策略清除剪贴板。", "success");
     } catch {
-      onNotice("无法写入剪贴板，请检查浏览器权限。", "error");
+      onNotice("桌面端无法写入安全剪贴板，请检查连接和插件解锁状态。", "error");
     }
   }
 
@@ -133,11 +151,11 @@ export function GeneratorPanel({ onNotice }: { onNotice: (message: string, varia
             <span className="text-xs font-medium text-muted-foreground">生成结果</span>
             <Badge variant="secondary">{mode === "username" ? "可用性" : mode === "uuid" ? "版本" : "强度"} · {mode === "uuid" ? "v4" : strength}</Badge>
           </div>
-          <output className="min-h-12 break-all font-mono text-[15px] font-semibold leading-6 tracking-wide" aria-live="polite">{result}</output>
+          <output className="min-h-12 break-all font-mono text-[15px] font-semibold leading-6 tracking-wide" aria-live="polite">{result || "结果已清除，请重新生成"}</output>
           <div className="h-1 overflow-hidden rounded-full bg-primary/10" aria-hidden="true"><div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${strengthWidth}%` }} /></div>
           <div className="grid grid-cols-[1fr_auto] gap-2">
             <Button type="button" onClick={() => generate()} disabled={Boolean(passwordIssue && mode === "password")}><RefreshCwIcon data-icon="inline-start" />重新生成</Button>
-            <Button type="button" variant="outline" size="icon" aria-label="复制生成结果" onClick={() => void copy()}>{copied ? <CheckIcon /> : <CopyIcon />}</Button>
+            <Button type="button" variant="outline" size="icon" aria-label="复制生成结果" disabled={!result} onClick={() => void copy()}>{copied ? <CheckIcon /> : <CopyIcon />}</Button>
           </div>
         </CardContent>
       </Card>
@@ -155,7 +173,7 @@ export function GeneratorPanel({ onNotice }: { onNotice: (message: string, varia
               <ChevronDownIcon size={16} className={historyOpen ? "rotate-180 transition-transform" : "transition-transform"} aria-hidden="true" />
             </button>
             {historyOpen ? <CardContent className="flex flex-col gap-1 border-t pt-2">
-              {history.map((entry) => <div key={entry.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-muted"><span className="min-w-0 flex-1"><span className="block truncate font-mono text-xs">{entry.value}</span><span className="block text-[10px] text-muted-foreground">{modeMeta[entry.mode].label} · {new Date(entry.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></span><Button type="button" variant="ghost" size="icon-xs" aria-label={`复制 ${entry.value}`} onClick={() => void copy(entry.value)}><CopyIcon /></Button></div>)}
+              {history.map((entry) => <div key={entry.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-muted"><span className="min-w-0 flex-1"><span className="block truncate font-mono text-xs">{entry.value}</span><span className="block text-[10px] text-muted-foreground">{modeMeta[entry.mode].label} · {new Date(entry.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></span><Button type="button" variant="ghost" size="icon-xs" aria-label={`复制 ${entry.value}`} onClick={() => void copy(entry.value, entry.mode)}><CopyIcon /></Button></div>)}
               {history.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">再次生成后，结果会暂时出现在这里。</p> : null}
             </CardContent> : null}
           </Card>

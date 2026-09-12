@@ -32,6 +32,9 @@ const sshSchema = z.object({ id: z.string().uuid(), title: z.string(), host: z.s
 const sshDetailSchema = sshSchema.extend({ folder: z.string().nullable(), favorite: z.boolean() });
 const secretSchema = z.object({ id: z.string().uuid(), title: z.string(), kind: z.enum(["api-key", "access-token", "authenticator-key", "client-secret", "webhook-secret", "database-credential", "recovery-codes", "certificate", "software-license", "identity-document", "secure-note", "crypto-wallet", "other"]), provider: z.string().nullable(), account: z.string().nullable(), environment: z.string().nullable(), expiresAt: z.string().nullable(), website: z.string().nullable(), notes: z.string().nullable(), favorite: z.boolean(), masterPasswordReprompt: z.boolean(), isPasskey: z.boolean().default(false), loginId: z.string().uuid().nullable().default(null) });
 const secretDetailSchema = secretSchema.extend({ scopes: z.array(z.string()), folder: z.string().nullable() });
+const recoveryBaseSchema = z.object({ trashId: z.string().uuid(), itemId: z.string().uuid(), title: z.string(), deletedAt: z.number().int().nonnegative() });
+const revisionBaseSchema = z.object({ revisionId: z.string().uuid(), itemId: z.string().uuid(), title: z.string(), savedAt: z.number().int().nonnegative() });
+const passwordHealthSchema = z.object({ weakItemIds: z.array(z.string().uuid()), reusedItemIds: z.array(z.string().uuid()), oldItemIds: z.array(z.string().uuid()), score: z.number().int().min(0).max(100) });
 
 export const workspaceSchema = z.object({
   status: statusSchema,
@@ -51,6 +54,10 @@ export type RecoveryCodeFileResult = z.infer<typeof recoveryCodeFileResultSchema
 export type PasskeySummary = z.infer<typeof secretSchema>;
 export type EmailOtpCandidate = z.infer<typeof EmailOtpCandidateSchema>;
 export type EmailOtpCandidates = z.infer<typeof emailOtpCandidatesSchema>;
+export type RecoverableKind = "login" | "card" | "identity" | "ssh";
+export type RecoveryTrashSummary = z.infer<typeof recoveryBaseSchema> & { detail: string };
+export type RecoveryRevisionSummary = z.infer<typeof revisionBaseSchema> & { detail: string };
+export type PasswordHealth = z.infer<typeof passwordHealthSchema>;
 
 const responseSchema = z.discriminatedUnion("ok", [
   z.object({ kind: z.literal("vaultmesh.rpc-result"), version: z.literal(VERSION), requestId: z.string().uuid(), ok: z.literal(true), result: z.unknown() }),
@@ -78,7 +85,7 @@ export type Operation =
   | "identities.list" | "identities.detail" | "identities.add" | "identities.update" | "identities.delete" | "identities.trash.list" | "identities.trash.restore" | "identities.trash.purge" | "identities.trash.empty" | "identities.history.list" | "identities.history.restore" | "identities.history.clear"
   | "ssh.list" | "ssh.detail" | "ssh.add" | "ssh.update" | "ssh.delete" | "ssh.copy-password" | "ssh.copy-public-key" | "ssh.copy-private-key" | "ssh.copy-key-passphrase" | "ssh.trash.list" | "ssh.trash.restore" | "ssh.trash.purge" | "ssh.trash.empty" | "ssh.history.list" | "ssh.history.restore" | "ssh.history.clear" | "ssh.scan" | "ssh.scan.commit" | "ssh.scan.cancel"
   | "secrets.list" | "secrets.detail" | "secrets.add" | "secrets.update" | "secrets.delete" | "secrets.copy-value"
-  | "imports.select" | "imports.commit" | "imports.cancel" | "password.generate" | "password.health";
+  | "imports.select" | "imports.commit" | "imports.cancel" | "password.generate" | "browser.generated.copy" | "password.health";
 
 const NO_GESTURE_OPERATIONS = new Set<Operation>(["vault.status", "vault.workspace", "vault.unlock-history", "biometric.status", "pin.status", "security.settings.get", "events.poll", "browser.pairing.status", "browser.autofill.candidates", "browser.autofill.profile", "browser.autofill.execute", "browser.card.capture-status", "browser.login.password-changed", "browser.fill.record", "browser.fill.history", "email.otp.poll", "email.otp.candidates", "passkeys.create", "passkeys.get", "items.list", "items.trash.list", "items.history.list", "cards.list", "cards.detail", "cards.trash.list", "cards.history.list", "identities.list", "identities.detail", "identities.trash.list", "identities.history.list", "ssh.list", "ssh.detail", "ssh.trash.list", "ssh.history.list", "secrets.list", "secrets.detail", "password.health"]);
 
@@ -205,6 +212,49 @@ export async function getSecretDetail(id: string) { return secretDetailSchema.pa
 export async function saveSecret(input: Record<string, unknown>) { await desktopRpc(typeof input.id === "string" ? "secrets.update" : "secrets.add", input); }
 export async function getIdentityDetail(id: string) { return identityDetailSchema.parse(await desktopRpc("identities.detail", { id })); }
 export async function getSshDetail(id: string) { return sshDetailSchema.parse(await desktopRpc("ssh.detail", { id })); }
+
+const recoveryPrefix = { login: "items", card: "cards", identity: "identities", ssh: "ssh" } as const;
+const recoveryDetailKey = { login: "username", card: "maskedNumber", identity: "displayName", ssh: "host" } as const;
+
+export async function getRecoveryTrash(kind: RecoverableKind): Promise<RecoveryTrashSummary[]> {
+  const rows = z.array(recoveryBaseSchema.passthrough()).max(10_000).parse(await desktopRpc(`${recoveryPrefix[kind]}.trash.list` as Operation));
+  return rows.map((row) => ({ ...recoveryBaseSchema.parse(row), detail: String(row[recoveryDetailKey[kind]] ?? "") }));
+}
+
+export async function getRecoveryHistory(kind: RecoverableKind, itemId: string): Promise<RecoveryRevisionSummary[]> {
+  const id = z.string().uuid().parse(itemId);
+  const rows = z.array(revisionBaseSchema.passthrough()).max(10_000).parse(await desktopRpc(`${recoveryPrefix[kind]}.history.list` as Operation, { id }));
+  if (rows.some((row) => row.itemId !== id)) throw new DesktopRpcError("invalid-broker-response", "历史记录目标不匹配。");
+  return rows.map((row) => ({ ...revisionBaseSchema.parse(row), detail: String(row[recoveryDetailKey[kind]] ?? "") }));
+}
+
+export async function restoreRecoveryTrash(kind: RecoverableKind, trashId: string, itemId: string): Promise<void> {
+  const expected = z.string().uuid().parse(itemId);
+  const result = z.object({ id: z.string().uuid() }).passthrough().parse(await desktopRpc(`${recoveryPrefix[kind]}.trash.restore` as Operation, { trashId: z.string().uuid().parse(trashId) }));
+  if (result.id !== expected) throw new DesktopRpcError("execution-unknown", "恢复结果无法确认，请刷新检查。");
+}
+
+export async function purgeRecoveryTrash(kind: RecoverableKind, trashId: string): Promise<void> {
+  await confirmedDesktopRpc(`${recoveryPrefix[kind]}.trash.purge` as Operation, { trashId: z.string().uuid().parse(trashId) });
+}
+
+export async function emptyRecoveryTrash(kind: RecoverableKind): Promise<void> {
+  await confirmedDesktopRpc(`${recoveryPrefix[kind]}.trash.empty` as Operation, {});
+}
+
+export async function restoreRecoveryHistory(kind: RecoverableKind, itemId: string, revisionId: string): Promise<void> {
+  const expected = z.string().uuid().parse(itemId);
+  const result = z.object({ id: z.string().uuid() }).passthrough().parse(await confirmedDesktopRpc(`${recoveryPrefix[kind]}.history.restore` as Operation, { itemId: expected, revisionId: z.string().uuid().parse(revisionId) }));
+  if (result.id !== expected) throw new DesktopRpcError("execution-unknown", "历史恢复结果无法确认，请刷新检查。");
+}
+
+export async function clearRecoveryHistory(kind: RecoverableKind, itemId: string): Promise<void> {
+  await confirmedDesktopRpc(`${recoveryPrefix[kind]}.history.clear` as Operation, { id: z.string().uuid().parse(itemId) });
+}
+
+export async function getPasswordHealth(): Promise<PasswordHealth> {
+  return passwordHealthSchema.parse(await desktopRpc("password.health"));
+}
 
 export async function confirmedDesktopRpc(operation: Operation, input: Record<string, unknown>): Promise<unknown> {
   const userGestureId = crypto.randomUUID();

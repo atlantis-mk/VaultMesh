@@ -8,8 +8,8 @@ export const CAPTURE_SAVE = "vaultmesh.native-capture.save";
 export const CAPTURE_STATUS = "vaultmesh.native-capture.status";
 export const CaptureRequestSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal(CAPTURE_STATUS) }).strict(),
-  z.object({ kind: z.literal(CAPTURE_OPTIONS), captureId: z.string().uuid(), itemKind: z.enum(["card", "identity"]).optional() }).strict(),
-  z.object({ kind: z.literal(CAPTURE_ITEM_SAVE), captureId: z.string().uuid(), nonce: z.string().uuid(), itemKind: z.enum(["card", "identity"]),
+  z.object({ kind: z.literal(CAPTURE_OPTIONS), captureId: z.string().uuid(), itemKind: z.enum(["card", "identity", "ssh", "secret"]).optional() }).strict(),
+  z.object({ kind: z.literal(CAPTURE_ITEM_SAVE), captureId: z.string().uuid(), nonce: z.string().uuid(), itemKind: z.enum(["card", "identity", "ssh", "secret"]),
     values: CapturedItemValuesSchema, itemId: z.string().uuid().optional() }).strict(),
   z.object({ kind: z.literal(CAPTURE_SAVE), captureId: z.string().uuid(), nonce: z.string().uuid(),
     username: z.string().max(2048), password: z.string().min(1).max(10000), itemId: z.string().uuid().optional(),

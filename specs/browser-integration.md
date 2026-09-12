@@ -146,6 +146,8 @@ executor 填入空的新密码/确认框；Web Crypto 熵源不得使用带偏�
 
 实验副本的 card/identity 使用独立的无值来源计划，复用原生字段匹配。计划必须限定单 frame、显式选择及空字段，跨源必须确认；card 每次验证主密码。Rust 按所选类型校验封闭来源、control、handle、期限及来源绑定，只返回逐字段值，不返回整条 CipherView。content 只可在已批准的同一字段复用原生有效期、国家/地区和 select 格式化；选项改变、未知来源、非空字段、导航、取消、锁定及重放必须拒绝。
 
+SSH 与普通服务 Secret 必须使用同一封闭无值计划，但不得借用 Login/card/identity 来源。SSH 公钥与同真实表单标题复用上游 SSH 分支；无 form 的通用标题不授予资格。VaultMesh 特有 SSH 账号/私钥/口令及具体 Secret 类型通过原生 custom-field 精确匹配接入，别名由适配器代码拥有，禁止宽泛 key/token/password 子串或页面场景回退。歧义来源必须拒绝，原生 Login 隐式密码与捕获不得占用这些字段。两类只能显式填入 HTTPS 空文本类控件，数字控件只允许 SSH port；原生执行器仍重验原节点与期限。桌面必须校验 Secret 具体 kind、排除 Passkey、执行当前主密码二次验证，并仅解密计划请求的来源；已批准值不得重新规划其他控件。
+
 生成器复制必须通过解锁且 fresh-gesture 的有界桌面操作写入过期清理剪贴板，仅返回清理期限。插入必须来自可信 popup，绑定当前 tab/frame/document 及短期原生角色目标；密码/口令只允许可靠的空新密码和同簇确认框，用户名只允许空用户名字段；UUID 使用用户显式选择的空文本目标。结果不得写入后台缓存或持久化存储，取消、隐藏、锁定、超时与迟到响应必须清理且不得自动重试。
 
 ## Email OTP 候选与填充
@@ -158,9 +160,11 @@ Content script 只在可信用户点击语义明确的获取/发送/重发验证
 
 ## Capture
 
-Submission observation 可以对新生成或用户编辑的 login/card/identity 显示 Save/Ignore。只有用户确认才写入；观察到 submit 不等于 server success。未修改的 autofilled password 不得重复 capture。
+Submission observation 可以对新生成或用户编辑的 login/card/identity/SSH/Secret 显示 Save/Ignore。只有用户确认才写入；观察到 submit 不等于 server success。未修改的 autofilled password 不得重复 capture。
 
 实验副本的 card/identity 捕获必须使用原生角色和同簇归属；只有用户编辑过的支持字段可成为候选。类型歧义或重复来源冲突必须拒绝。Save 必须绑定来源 frame、URL、短期单次 nonce 和同类型更新候选；更新只替换明确捕获的字段，保留其余元数据、未读取秘密和多值身份集合，Ignore 或结果不确定不得执行或重试写入。
+
+SSH/Secret 捕获复用相同来源匹配与 Save 生命周期，且仅限 HTTPS；SSH account/key 混合来源必须拒绝，缺少必填主机/账号或密钥不得虚构。Secret 的具体类型必须在确认 UI 明示，多个受保护类型来源必须拒绝，更新必须重验现有 kind 且不能转换。新 Secret 的 website 绑定捕获 origin，默认不要求二次验证；更新保留 website、scopes 及二次验证。捕获只保存用户实际编辑过的字段，未编辑受保护值不得重新读取或清除。
 
 Capture 与生成填充必须复用局部表单归属，包含 `form=` 关联控件和可访问 Shadow DOM；非 composed submit 在对应 root 内监听。SPA 保存点击必须在页面处理器可能同步销毁输入框前提取候选，捕获仍仅触发用户确认。生成记录必须绑定所属表单，不能在相邻表单提交时使用；字段实际提交的新密码优先于先前生成记录。
 

@@ -48,6 +48,10 @@ describe("CT-BROWSER-003 native generators and transient results", () => {
     jest.useFakeTimers(); await fixture.componentInstance["generate"](); fixture.detectChanges();
     const result = fixture.componentInstance["value"](); expect(result).toHaveLength(20);
     expect(fixture.nativeElement.querySelector('input[readonly]').value).toBe(result);
+    const colored = fixture.nativeElement.querySelector('bit-color-password');
+    const copy = new Event('copy', { bubbles: true, cancelable: true });
+    colored.dispatchEvent(copy);
+    expect(copy.defaultPrevented).toBe(true);
     expect(JSON.stringify(stored)).not.toContain(result);
     jest.advanceTimersByTime(60001); expect(fixture.componentInstance["value"]()).toBe("");
     await fixture.componentInstance["generate"](); state$.next({ ...state$.value, status: "locked" }); expect(fixture.componentInstance["value"]()).toBe(""); fixture.destroy();

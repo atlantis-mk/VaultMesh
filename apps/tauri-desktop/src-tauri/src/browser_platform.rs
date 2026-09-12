@@ -405,6 +405,58 @@ impl TauriBrowserPlatform {
     }
 }
 
+fn generated_copy_value(
+    input: &Map<String, Value>,
+) -> Result<Zeroizing<String>, BrowserPlatformError> {
+    if input
+        .keys()
+        .any(|key| !matches!(key.as_str(), "mode" | "value" | "userGestureId"))
+        || !input
+            .get("mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| matches!(mode, "password" | "passphrase" | "username" | "uuid"))
+    {
+        return Err(invalid());
+    }
+    let value = input
+        .get("value")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.chars().count() <= 1024
+                && !value.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}')
+        })
+        .ok_or_else(invalid)?;
+    Ok(Zeroizing::new(value.to_owned()))
+}
+
+#[cfg(test)]
+mod generated_copy_tests {
+    use super::*;
+    #[test]
+    fn generated_values_are_bounded_and_do_not_accept_paths_or_control_characters() {
+        for mode in ["password", "passphrase", "username", "uuid"] {
+            let input = json!({"mode": mode, "value": "synthetic-generated-value", "userGestureId": uuid::Uuid::new_v4()});
+            assert_eq!(
+                generated_copy_value(input.as_object().unwrap())
+                    .ok()
+                    .unwrap()
+                    .as_str(),
+                "synthetic-generated-value"
+            );
+        }
+        for input in [
+            json!({"mode":"unknown","value":"synthetic"}),
+            json!({"mode":"password","value":""}),
+            json!({"mode":"password","value":"a".repeat(1025)}),
+            json!({"mode":"password","value":"a\nb"}),
+            json!({"mode":"password","value":"synthetic","path":"/not-allowed"}),
+        ] {
+            assert!(generated_copy_value(input.as_object().unwrap()).is_err());
+        }
+    }
+}
+
 impl BrowserBrokerPlatform for TauriBrowserPlatform {
     fn dispatch(
         &self,
@@ -720,6 +772,9 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                     Ok(json!({}))
                 }
                 "password.generate" => self.generate_password(input),
+                "browser.generated.copy" => {
+                    generated_copy_value(input).and_then(|value| self.copy(value, now_millis))
+                }
                 "ssh.scan" => self
                     .ssh_scan
                     .lock()
@@ -941,6 +996,7 @@ pub(crate) fn is_platform_operation(operation: &str) -> bool {
             | "imports.commit"
             | "imports.cancel"
             | "password.generate"
+            | "browser.generated.copy"
             | "ssh.scan"
             | "ssh.scan.commit"
             | "ssh.scan.cancel"

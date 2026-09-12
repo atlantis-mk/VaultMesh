@@ -1,4 +1,4 @@
-import { NgTemplateOutlet } from "@angular/common";
+import { Location, NgTemplateOutlet } from "@angular/common";
 import {
   ChangeDetectionStrategy,
   Component,
@@ -28,7 +28,6 @@ import {
   TypographyModule,
 } from "@bitwarden/components";
 
-import { PopupRouterCacheService } from "../view-cache/popup-router-cache.service";
 
 import { PopupPageComponent } from "./popup-page.component";
 
@@ -46,7 +45,8 @@ import { PopupPageComponent } from "./popup-page.component";
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class PopupHeaderComponent {
-  private readonly popupRouterCacheService = inject(PopupRouterCacheService);
+  // Keep navigation transient; the upstream route cache persists popup workspace state.
+  private readonly location = inject(Location);
   private readonly scrollLayout = inject(ScrollLayoutService);
 
   /**
@@ -99,7 +99,7 @@ export class PopupHeaderComponent {
    * If unset, will call `location.back()`
    **/
   readonly backAction = input<FunctionReturningAwaitable>(async () => {
-    return this.popupRouterCacheService.back();
+    return this.location.back();
   });
 
   private readonly titleBar = viewChild<ElementRef<HTMLElement>>("titleBar");

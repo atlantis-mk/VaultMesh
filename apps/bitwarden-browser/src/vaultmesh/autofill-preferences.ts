@@ -35,7 +35,7 @@ export class AutofillPreferences {
 
 export function automaticCandidate(candidates: NativeCandidate[], remembered?: string): NativeCandidate | undefined {
   const rank = { path: 0, origin: 1, domain: 2 };
-  const eligible = candidates.filter((candidate) => candidate.autofillOnPageLoad && !candidate.masterPasswordReprompt && candidate.matchScope in rank);
+  const eligible = candidates.filter((candidate) => candidate.kind === "login" && candidate.autofillOnPageLoad && !candidate.masterPasswordReprompt && candidate.matchScope in rank);
   const prior = eligible.find((candidate) => candidate.id === remembered);
   if (prior) return prior;
   eligible.sort((a, b) => rank[a.matchScope as keyof typeof rank] - rank[b.matchScope as keyof typeof rank]);

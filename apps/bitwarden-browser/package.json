@@ -1,6 +1,6 @@
 {
   "name": "@vaultmesh/bitwarden-browser",
-  "version": "0.0.9-review",
+  "version": "0.0.10-review",
   "description": "VaultMesh browser extension prototype based on Bitwarden",
   "private": true,
   "license": "GPL-3.0",
@@ -49,6 +49,8 @@
     "package:dev:chrome": "npm run update:dev:chrome && ./scripts/compress.sh dev-chrome.zip",
     "package:dev:beta:chrome": "npm run update:dev:chrome && ./scripts/compress.sh dev-chrome-beta.zip",
     "test": "jest",
+    "test:popup-build": "node --test scripts/popup-render.test.mjs",
+    "test:content-build": "node --test scripts/content-render.test.mjs",
     "test:adapter": "jest --runInBand src/vaultmesh src/platform/services/vaultmesh-browser-rpc.service.spec.ts src/background/vaultmesh-rpc.background.spec.ts src/autofill/services/autofill.service.spec.ts src/autofill/services/insert-autofill-content.service.spec.ts src/autofill/services/collect-autofill-content.service.spec.ts src/autofill/services/dom-element-visibility.service.spec.ts src/autofill/services/inline-menu-field-qualification.service.spec.ts",
     "test:watch": "jest --watch",
     "test:watch:all": "jest --watchAll",

@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, Input, OnDestroy, OnInit, inject, signal } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { FormsModule } from "@angular/forms";
-import { ButtonModule, FormFieldModule } from "@bitwarden/components";
+import { ButtonModule, FormFieldModule, ItemModule, IconButtonModule, MenuModule } from "@bitwarden/components";
 import { VaultMeshBrowserRpcService } from "../platform/services/vaultmesh-browser-rpc.service";
 import { ManagedDraft, ADDRESS_FIELDS, IDENTITY_COLLECTIONS } from "./managed-draft";
 import { MANAGED_ITEMS, type ManagedKind, type ManagedCommand, type ManagedRow } from "./managed-items";
@@ -9,7 +9,7 @@ import { clearLoginSecrets } from "./login-contracts";
 import { VaultMeshItemFillComponent } from "./item-fill.component";
 
 @Component({ selector: "vaultmesh-managed-items", templateUrl: "./managed-items.component.html",
-  imports: [FormsModule, ButtonModule, FormFieldModule, VaultMeshItemFillComponent], changeDetection: ChangeDetectionStrategy.OnPush })
+  imports: [FormsModule, ButtonModule, FormFieldModule, ItemModule, IconButtonModule, MenuModule, VaultMeshItemFillComponent], changeDetection: ChangeDetectionStrategy.OnPush })
 export class VaultMeshManagedItemsComponent implements OnInit, OnDestroy {
   @Input({ required: true }) kind!: ManagedKind;
   @Input() independent = false;
@@ -25,6 +25,12 @@ export class VaultMeshManagedItemsComponent implements OnInit, OnDestroy {
   protected mode: "list" | "trash" | "history" = "list";
   protected historyId = "";
   protected query = "";
+  protected page = 0;
+  protected setQuery(query: string): void { this.query = query; this.page = 0; }
+  protected pageCount(): number { return Math.max(1, Math.ceil(this.filtered().length / 25)); }
+  protected currentPage(): number { return Math.min(this.page, this.pageCount() - 1); }
+  protected visibleRows(): ManagedRow[] { const offset = this.currentPage() * 25; return this.filtered().slice(offset, offset + 25); }
+  protected changePage(delta: number): void { this.page = Math.max(0, Math.min(this.pageCount() - 1, this.currentPage() + delta)); }
   protected masterPassword = "";
   private readonly session = inject(VaultMeshBrowserRpcService);
   private readonly destroyRef = inject(DestroyRef);
@@ -128,7 +134,7 @@ export class VaultMeshManagedItemsComponent implements OnInit, OnDestroy {
   protected cancel(notify = true): void {
     this.fillTarget.set(null);
     if (notify && this.busy()) this.session.cancelManaged();
-    this.generation++; this.busy.set(false); this.query = this.masterPassword = "";
+    this.generation++; this.busy.set(false); this.query = this.masterPassword = ""; this.page = 0;
     this.draft()?.clear(); this.draft.set(null);
     clearLoginSecrets(this.pending()?.command); this.pending.set(null); this.rows.set([]);
     if (this.timer) clearTimeout(this.timer); this.timer = undefined; this.deadline = 0;

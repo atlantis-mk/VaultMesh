@@ -1,7 +1,10 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, OnDestroy, OnInit, computed, inject, signal } from "@angular/core";
 import { takeUntilDestroyed, toSignal } from "@angular/core/rxjs-interop";
 import { FormsModule } from "@angular/forms";
-import { ButtonModule, FormFieldModule, ItemModule } from "@bitwarden/components";
+import { ActivatedRoute, Router, RouterLink } from "@angular/router";
+import { ButtonModule, FormFieldModule, ItemModule, IconButtonModule, MenuModule } from "@bitwarden/components";
+import { PopupPageComponent } from "../platform/popup/layout/popup-page.component";
+import { PopupHeaderComponent } from "../platform/popup/layout/popup-header.component";
 import { VaultMeshBrowserRpcService } from "../platform/services/vaultmesh-browser-rpc.service";
 import { loginSummaryView } from "./login-view";
 import { LoginDraft } from "./login-draft";
@@ -13,6 +16,7 @@ import type { RecoveryFileCleanup } from "./vendor/browser-recovery-file";
 import { VaultMeshManagedItemsComponent } from "./managed-items.component";
 import { MANAGED_ITEMS, type ManagedKind } from "./managed-items";
 import { VaultMeshSecurityToolsComponent } from "./security-tools.component";
+import { VaultMeshUnlockComponent } from "./unlock.component";
 import { VaultMeshGeneratorComponent } from "./generator.component";
 import { VaultMeshVaultLifecycleComponent } from "./vault-lifecycle.component";
 import { clearQr, type TotpQr } from "./qr-contracts";
@@ -23,24 +27,60 @@ import { clearEmail, type EmailPopup } from "./email-otp";
 @Component({
   selector: "vaultmesh-session",
   templateUrl: "./session.component.html",
-  imports: [FormsModule, ButtonModule, FormFieldModule, ItemModule, VaultMeshLoginEditorComponent, VaultMeshManagedItemsComponent, VaultMeshSecurityToolsComponent, VaultMeshGeneratorComponent, VaultMeshVaultLifecycleComponent],
-  providers: [VaultMeshBrowserRpcService],
+  imports: [FormsModule, RouterLink, PopupPageComponent, PopupHeaderComponent, IconButtonModule, MenuModule, ButtonModule, FormFieldModule, ItemModule, VaultMeshLoginEditorComponent, VaultMeshManagedItemsComponent, VaultMeshSecurityToolsComponent, VaultMeshUnlockComponent, VaultMeshGeneratorComponent, VaultMeshVaultLifecycleComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: "tw-block tw-h-full" },
 })
 export class VaultMeshSessionComponent implements OnInit, OnDestroy {
   private readonly destroyRef = inject(DestroyRef);
+  private readonly route = inject(ActivatedRoute, { optional: true });
+  private readonly router = inject(Router, { optional: true });
   protected readonly session = inject(VaultMeshBrowserRpcService);
   protected readonly state = toSignal(this.session.state$, { requireSync: true });
   protected password = "";
   protected readonly query = signal("");
-  protected readonly surface = signal<"login" | "tools" | "generator" | "vault" | ManagedKind>("login");
+  private readonly requestedLoginPage = signal(0);
+  protected readonly loginPageSize = 25;
+  protected readonly filteredLogins = computed(() => {
+    const query = this.query().trim().toLocaleLowerCase();
+    return this.state().logins.filter(item => !query || [item.title, item.username, item.url ?? ""].some(value => value.toLocaleLowerCase().includes(query)));
+  });
+  private readonly loginById = computed(() => new Map(this.state().logins.map(item => [item.id, item])));
+  protected readonly loginPageCount = computed(() => Math.max(1, Math.ceil(this.filteredLogins().length / this.loginPageSize)));
+  protected readonly loginPage = computed(() => Math.min(this.requestedLoginPage(), this.loginPageCount() - 1));
+  protected setLoginQuery(value: string): void { this.query.set(value); this.requestedLoginPage.set(0); }
+  protected changeLoginPage(delta: number): void {
+    if (this.state().busy) return;
+    this.requestedLoginPage.set(Math.max(0, Math.min(this.loginPageCount() - 1, this.loginPage() + delta)));
+  }
+  protected readonly surface = signal<"login" | "tools" | "generator" | "vault" | "settings" | ManagedKind>("login");
   protected readonly managedTabs = Object.entries(MANAGED_ITEMS).map(([kind, value]) => ({ kind: kind as ManagedKind, label: value.label }));
-  protected readonly managedSurface = computed(() => ["login", "tools", "generator", "vault"].includes(this.surface()) ? [] : [this.surface() as ManagedKind]);
-  protected showSurface(surface: "login" | "tools" | "generator" | "vault" | ManagedKind): void {
+  protected readonly managedSurface = computed(() => ["login", "tools", "generator", "vault", "settings"].includes(this.surface()) ? [] : [this.surface() as ManagedKind]);
+  protected showSurface(surface: "login" | "tools" | "generator" | "vault" | "settings" | ManagedKind): void {
     if (this.state().busy) return;
     this.closeEditor(); this.surface.set(surface);
   }
+  protected readonly viewedLoginId = signal<string | null>(null);
+  protected readonly viewedLogin = computed(() => this.loginById().get(this.viewedLoginId() ?? "") ?? null);
+  protected viewLogin(id: string): void {
+    if (this.state().status !== "ready" || this.state().busy || !this.loginById().has(id)) return;
+    this.closeEditor(); this.viewedLoginId.set(id);
+  }
+  protected readonly hasDetail = computed(() => !!(this.viewedLogin() || this.draft() || this.recovery() || this.recoveryTarget() || this.deleteTarget() || this.fillTarget() || this.copyTarget() || this.codesTarget() || this.codesView() || this.passkeyRows() || this.passkeyDelete() || this.email()));
+  protected readonly pageTitle = computed(() => {
+    if (this.state().status !== "ready") return "VaultMesh";
+    if (this.draft()) return this.draft()!.cipher.id ? "编辑登录信息" : "新建登录信息";
+    if (this.viewedLogin()) return "查看条目";
+    if (this.recovery()) return this.recovery()!.title;
+    if (this.hasDetail()) return "确认操作";
+    return this.surface() === "generator" ? "生成器" : this.surface() === "settings" ? "设置"
+      : this.surface() === "tools" ? "安全" : this.surface() === "vault" ? "保险库设置" : "保险库";
+  });
+  protected readonly showBack = computed(() => this.hasDetail() || this.surface() === "tools" || this.surface() === "vault");
+  protected readonly backToList = () => {
+    if (this.hasDetail()) this.closeEditor();
+    else return this.router?.navigateByUrl("/tabs/settings");
+  };
   protected readonly draft = signal<LoginDraft | null>(null);
   protected readonly independentEditor = signal(false);
   protected readonly fileDialogActive = signal(false);
@@ -147,14 +187,16 @@ export class VaultMeshSessionComponent implements OnInit, OnDestroy {
   private editorDeadline = 0;
   private editorTimer?: ReturnType<typeof setTimeout>;
   protected readonly rows = computed(() => {
-    const query = this.query().trim().toLocaleLowerCase();
-    return this.state().logins
-      .filter((item) => !query || [item.title, item.username, item.url ?? ""].some((v) => v.toLocaleLowerCase().includes(query)))
-      .map(loginSummaryView);
+    const offset = this.loginPage() * this.loginPageSize;
+    // Build presentation models only for visible rows. Full metadata remains
+    // transient and searchable; nothing is truncated or persisted.
+    return this.filteredLogins().slice(offset, offset + this.loginPageSize).map(loginSummaryView);
   });
-  private readonly clearInput = () => { this.password = ""; this.query.set(""); this.closeEditor(); };
+  private readonly clearInput = () => { this.password = ""; this.setLoginQuery(""); this.closeEditor(); };
 
   ngOnInit(): void {
+    const surface = this.route?.snapshot.data["surface"];
+    if (["login", "generator", "settings", "tools", "vault"].includes(surface)) this.surface.set(surface);
     chrome.webNavigation.onCommitted.addListener(this.pageNavigated); chrome.webNavigation.onHistoryStateUpdated.addListener(this.pageNavigated); chrome.webNavigation.onReferenceFragmentUpdated.addListener(this.pageNavigated);
     let revision: number | undefined;
     let sessionId: string | undefined;
@@ -164,7 +206,7 @@ export class VaultMeshSessionComponent implements OnInit, OnDestroy {
       revision = state.revision;
       sessionId = state.sessionId;
       if (state.status !== "locked") this.password = "";
-      if (state.status !== "ready") { this.query.set(""); this.closeEditor(); }
+      if (state.status !== "ready") { this.setLoginQuery(""); this.closeEditor(); }
     });
     this.session.start();
     if (new URLSearchParams(location.search).has("editor")) {
@@ -249,6 +291,7 @@ export class VaultMeshSessionComponent implements OnInit, OnDestroy {
   }
 
   protected closeEditor(preserveCleanupId?: string): void {
+    this.viewedLoginId.set(null);
     this.clearQrCandidates();
     this.passkeyRows.set(null); this.passkeyDelete.set(null);
     clearEmail(this.email()); this.email.set(null);
@@ -375,6 +418,26 @@ export class VaultMeshSessionComponent implements OnInit, OnDestroy {
     });
   }
 
+  protected async selectLogin(id: string): Promise<void> {
+    if (this.state().busy || this.state().status !== "ready") return;
+    const item = this.state().logins.find((entry) => entry.id === id);
+    if (!item) return;
+    if (item.masterPasswordReprompt) {
+      this.requestFill(id);
+      return;
+    }
+    this.closeEditor();
+    this.notice.set(null);
+    const result = await this.session.fillLogin(id);
+    if (result.ok === false) {
+      this.showError(result.code);
+      return;
+    }
+    this.notice.set(result.value.filled > 0
+      ? `已填入 ${result.value.filled} 个字段，未提交表单。${result.value.auditRecorded ? "" : "填充记录未保存，请勿因此重复填充。"}`
+      : "没有字段完成填充。页面可能已变化，请重新选择。");
+  }
+
   protected async openRecovery(itemId?: string): Promise<void> {
     if (this.state().busy || this.state().status !== "ready") return;
     const item = itemId ? this.state().logins.find((entry) => entry.id === itemId) : undefined;
@@ -431,7 +494,7 @@ export class VaultMeshSessionComponent implements OnInit, OnDestroy {
     this.armEditorExpiry(30_000);
   }
 
-  protected hasRecoveryCodes(id: string): boolean { return this.state().logins.some((item) => item.id === id && item.hasRecoveryCodes); }
+  protected hasRecoveryCodes(id: string): boolean { return this.loginById().get(id)?.hasRecoveryCodes ?? false; }
 
   protected async confirmCodes(): Promise<void> {
     const target = this.codesTarget();
@@ -468,7 +531,7 @@ export class VaultMeshSessionComponent implements OnInit, OnDestroy {
   }
 
   protected canCopy(id: string, field: "username" | "password" | "totp"): boolean {
-    const item = this.state().logins.find((entry) => entry.id === id);
+    const item = this.loginById().get(id);
     return !!item && (field === "username" ? !!item.username : field === "password" ? item.hasPassword : item.hasTotpSecret);
   }
 

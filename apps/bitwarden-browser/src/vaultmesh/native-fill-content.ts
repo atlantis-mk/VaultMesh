@@ -12,7 +12,7 @@ import { createVaultMeshUuid } from "./uuid";
 import { sendSessionMessage } from "./runtime";
 import { NativePasswordMaintenance } from "./native-password-maintenance";
 import { NativeItemSourceSchema } from "./vendor/browser-native-item-plan";
-import { formatNativeItem } from "./native-item-planner";
+import { formatNativeItem, planNativeItem, credentialCustomSources } from "./native-item-planner";
 import { fillableControl, isFillControl, type FillControl } from "./native-fill-contracts";
 import { AssignmentSchema, EmailAssignmentSchema, CollectedPageSchema, FILL_APPLY, FILL_CANCEL, FILL_CHECK, FILL_COLLECT,
   FILL_LIFETIME, clearAssignment, fillableLoginInput, projectField, nativePage, type CollectedPage } from "./native-fill-contracts";
@@ -23,7 +23,7 @@ export const PlannedScriptSchema = z.array(z.tuple([
 ])).max(1_201);
 type Binding = { element: FillControl; form: HTMLFormElement | null; parent: Node | null; semantics: string };
 type Pending = { page: CollectedPage; bindings: Map<string, Binding>; generation: number; topOrigin: string; target?: LocalTarget; maintenanceFields: CaptureField[]; automatic: boolean };
-type LocalTarget = Binding & { scope: HTMLElement; url: string; expires: number; context: "login" | "otp"; automatic: boolean };
+type LocalTarget = Binding & { scope: HTMLElement; url: string; expires: number; context: "login" | "otp" | "card" | "identity" | "ssh" | "secret"; automatic: boolean };
 export type CaptureControl = Binding & { field: AutofillField; scope: HTMLElement };
 export type CaptureField = CaptureControl & { element: HTMLInputElement };
 const semantics = (element: FillControl) => [element.type, element.id, element.name, element.autocomplete,
@@ -32,8 +32,31 @@ const semantics = (element: FillControl) => [element.type, element.id, element.n
 
 /** Thin lifetime/assignment boundary around the actual upstream collector and executor. */
 export class VaultMeshNativeFillContent {
+  private readonly generated = new WeakSet<HTMLInputElement>();
+  currentGeneration(): number { return this.generation; }
+  isCollecting(): boolean { return this.busy; }
   private readonly maintenance = new NativePasswordMaintenance();
-  wasGenerated(element: HTMLInputElement): boolean { return this.maintenance.wasGenerated(element); }
+  wasGenerated(element: HTMLInputElement): boolean { return this.generated.has(element) || this.maintenance.wasGenerated(element); }
+
+  async executeGenerated(targets: CaptureField[], actions: (string | null)[][], value: string, current: () => Promise<boolean>, password: boolean) {
+    if (this.busy) return null;
+    this.busy = true;
+    const written = new Set<Element>(); const fill = new AutofillScript();
+    const guard = (element: Element) => targets.some((f) => f.element === element) && targets.every((f) => this.captureFieldCurrent(f)
+      && (written.has(f.element) ? f.element.value === value : !f.element.value));
+    const executor = new InsertAutofillContentService(this.visibility, this.collector, guard,
+      (element) => { written.add(element); if (password && element instanceof HTMLInputElement) this.generated.add(element); }, current);
+    try {
+      for (const [action, opid] of actions) {
+        if (!opid || !["fill_by_opid", "click_on_opid", "focus_by_opid"].includes(action ?? "")) return null;
+        fill.script.push(action === "fill_by_opid" ? [action, opid, value] : [action as "click_on_opid" | "focus_by_opid", opid]);
+      }
+      fill.autosubmit = null; fill.savedUrls = []; fill.untrustedIframe = false;
+      if (!await current()) return null;
+      await executor.fillForm(fill, false);
+      return { filled: written.size };
+    } finally { value = ""; for (const action of fill.script) if (action.length > 2) action[2] = ""; fill.script.length = 0; this.busy = false; }
+  }
   private readonly visibility = new DomElementVisibilityService();
   private readonly domQuery = new DomQueryService();
   private readonly ownedHosts = new WeakSet<Element>();
@@ -48,6 +71,7 @@ export class VaultMeshNativeFillContent {
   private documentId = createVaultMeshUuid();
   private timer?: ReturnType<typeof setTimeout>;
   private busy = false;
+  private captureRequest?: Promise<CaptureControl[]>;
   private clearActiveValues?: () => void;
   private overwrites = new Set<string>();
   private written = new Set<Element>();
@@ -129,7 +153,7 @@ export class VaultMeshNativeFillContent {
         const element = this.collector.getAutofillFieldElementByOpid(field.opid);
         if (!isFillControl(element) || !fillableControl(element) || !field.viewable) return [];
         if (target && !this.belongs(element, target)) return [];
-        if (automatic && (element.value || !this.qualification.isFieldForLoginForm(field, details))) return [];
+        if (automatic && (element.value || credentialCustomSources(field).length || !this.qualification.isFieldForLoginForm(field, details))) return [];
         bindings.set(field.opid, { element, form: element.form, parent: element.parentNode, semantics: semantics(element) });
         const projected = projectField(field, createVaultMeshUuid());
         if (this.qualification.isTotpField(field)) projected.context = "otp";
@@ -166,14 +190,20 @@ export class VaultMeshNativeFillContent {
 
   private validTarget(target: LocalTarget): boolean {
     return target.expires > Date.now() && target.url === location.href && target.scope.isConnected
+      && (["login", "otp"].includes(target.context) || !target.element.value || this.written.has(target.element))
       && target.element.form === target.form && target.element.parentNode === target.parent
       && semantics(target.element) === target.semantics && this.belongs(target.element, target)
       && fillableControl(target.element) && this.visibility.isElementViewableNow(target.element);
   }
 
   /** Field qualification remains upstream; only DOM ownership and lifetime are adapted. */
-  async createTarget(element: HTMLInputElement): Promise<{ targetRef: string; context: "login" | "otp"; automatic: boolean; scope: HTMLElement } | null> {
-    if (this.busy || !fillableLoginInput(element)) return null;
+  async createTarget(element: FillControl): Promise<{ targetRef: string; context: "login" | "otp" | "card" | "identity" | "ssh" | "secret"; automatic: boolean; scope: HTMLElement } | null> {
+    // Startup capture and focus may arrive together. Wait for the existing
+    // read-only collection rather than dropping the focused field's icon.
+    const generation = this.generation;
+    if (this.captureRequest) await this.captureRequest;
+    if (generation !== this.generation || !element.isConnected) return null;
+    if (this.busy || !fillableControl(element)) return null;
     const page = await this.collect(createVaultMeshUuid());
     if (!page || !this.pending) return null;
     const field = page.fields.find((field) => this.pending?.bindings.get(field.opid)?.element === element);
@@ -187,9 +217,23 @@ export class VaultMeshNativeFillContent {
       return node && this.belongs(node, target);
     }) });
     const nativeField = scopedPage.fields.find((candidate) => candidate.opid === field.opid)!;
-    if (!this.qualification.isFieldForLoginForm(nativeField, scopedPage) || !this.validTarget(target)) return null;
-    target.context = this.qualification.isTotpField(nativeField) ? "otp" : "login";
-    target.automatic = field.empty && ![...this.newPasswordElements].some((node) => this.belongs(node, target));
+    if (credentialCustomSources(nativeField).length > 1) return null;
+    const card = (await planNativeItem(scopedPage, "card")).has(field.opid);
+    const identity = (await planNativeItem(scopedPage, "identity")).has(field.opid);
+    const ssh = (await planNativeItem(scopedPage, "ssh")).has(field.opid);
+    const secret = (await planNativeItem(scopedPage, "secret")).has(field.opid);
+    if (!this.pending || !this.current(this.pending) || !this.validTarget(target)) return null;
+    if (ssh && secret) return null;
+    if (ssh) target.context = "ssh";
+    else if (secret) target.context = "secret";
+    else if (card) target.context = "card";
+    else if (this.qualification.isTotpField(nativeField)) target.context = "otp";
+    else if (this.qualification.isFieldForLoginForm(nativeField, scopedPage)) target.context = "login";
+    else if (identity) target.context = "identity";
+    else return null;
+    if (!["login", "otp"].includes(target.context) && !field.empty) return null;
+    if (["card", "ssh", "secret"].includes(target.context) && location.protocol !== "https:") return null;
+    target.automatic = (target.context === "login" || target.context === "otp") && field.empty && ![...this.newPasswordElements].some((node) => this.belongs(node, target));
     for (const [id, ref] of this.targets) if (!this.validTarget(ref)) this.targets.delete(id);
     if (this.targets.size >= 64) return null;
     const targetRef = createVaultMeshUuid();
@@ -208,7 +252,17 @@ export class VaultMeshNativeFillContent {
     return (await this.captureControls()).filter((field): field is CaptureField => field.element instanceof HTMLInputElement);
   }
 
-  async captureControls(): Promise<CaptureControl[]> {
+  captureControls(): Promise<CaptureControl[]> {
+    // Login and managed capture share one collector read. Otherwise identically
+    // scheduled refresh timers can permanently starve the second observer.
+    if (this.captureRequest) return this.captureRequest;
+    const request = this.readCaptureControls();
+    this.captureRequest = request;
+    void request.finally(() => { if (this.captureRequest === request) this.captureRequest = undefined; }).catch((): undefined => undefined);
+    return request;
+  }
+
+  private async readCaptureControls(): Promise<CaptureControl[]> {
     if (this.busy) return [];
     this.busy = true;
     const generation = this.generation;
@@ -243,6 +297,13 @@ export class VaultMeshNativeFillContent {
       const nativeField = details.fields.find((value) => value.opid === field.opid)!;
       return element instanceof HTMLInputElement && field.empty && this.qualification.isFieldForLoginForm(nativeField, details) ? [element] : [];
     }).slice(0, 64);
+  }
+
+  async automaticTargetAttempted(element: HTMLInputElement, attempted: WeakSet<HTMLElement>): Promise<boolean> {
+    // Resolve ownership before createTarget's full collection. The actual target
+    // is still freshly collected/qualified and marked only when an attempt starts.
+    const scope = await this.ownership.getLocalFormScope(element);
+    return !!scope && attempted.has(scope);
   }
 
   private current(pending: Pending): boolean {
@@ -300,7 +361,7 @@ export class VaultMeshNativeFillContent {
           if (email || !source?.startsWith(`${AssignmentSchema.parse(assignment).selectedItem.kind}:`) || !field.empty || value.overwrite) return null;
           const formatted = await formatNativeItem(nativePage(pending.page), opid, NativeItemSourceSchema.parse(source), value.value);
           if (!this.current(pending)) return null;
-          if (formatted != null) fill.script.push([action, opid, formatted]);
+          if (formatted != null && !(field.maxLength != null && field.maxLength > 0 && formatted.length > field.maxLength)) fill.script.push([action, opid, formatted]);
         } else fill.script.push(action === "fill_by_opid" ? [action, opid, value.value] : [action, opid]);
       }
       if (used.size !== values.size) return null;

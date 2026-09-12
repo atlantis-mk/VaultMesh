@@ -11,12 +11,12 @@ describe("CT-RECOVERY-CODES-001 bounded independent editor dialog lifecycle", ()
   let component: VaultMeshSessionComponent;
   let states: BehaviorSubject<SessionState>;
   let service: { state$: unknown; start: jest.Mock; ngOnDestroy: jest.Mock; cancelFileDialog: jest.Mock;
-    prepareRecoveryFile: jest.Mock; finishRecoveryFile: jest.Mock; saveLogin: jest.Mock; discardRecoveryFile: jest.Mock };
+    prepareRecoveryFile: jest.Mock; finishRecoveryFile: jest.Mock; saveLogin: jest.Mock; discardRecoveryFile: jest.Mock; cancelManaged: jest.Mock };
   beforeEach(() => {
     jest.useFakeTimers();
     states = new BehaviorSubject<SessionState>({ status: "ready", vault: null, logins: [], busy: false, error: null });
     service = { state$: states, start: jest.fn(), ngOnDestroy: jest.fn(), cancelFileDialog: jest.fn(),
-      discardRecoveryFile: jest.fn(),
+      discardRecoveryFile: jest.fn(), cancelManaged: jest.fn(),
       prepareRecoveryFile: jest.fn().mockImplementation(async () => result()),
       finishRecoveryFile: jest.fn().mockResolvedValue({ ok: true, value: { sourceFileStatus: "kept" } }),
       saveLogin: jest.fn().mockResolvedValue({ ok: true, value: { id } }) };
@@ -100,5 +100,6 @@ describe("CT-RECOVERY-CODES-001 bounded independent editor dialog lifecycle", ()
     const draft = component["draft"]()!;
     window.dispatchEvent(new Event("blur"));
     expect(component["draft"]()).toBeNull(); expect(draft.cipher.login.password).toBe("");
+    expect(service.cancelManaged).toHaveBeenCalled();
   });
 });

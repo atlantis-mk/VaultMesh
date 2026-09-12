@@ -1,6 +1,6 @@
 {
   "name": "vaultmesh",
-  "version": "0.0.9-review",
+  "version": "0.0.10-review",
   "description": "Local-first password manager for Tauri 2 desktop, Android, Chromium and Firefox browsers",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",

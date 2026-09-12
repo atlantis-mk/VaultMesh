@@ -366,7 +366,7 @@ export function getHttpOrigin(url: string | undefined) {
   }
 }
 
-function getHttpPageUrl(url: string | undefined) {
+export function getHttpPageUrl(url: string | undefined) {
   if (!url) return null;
   try {
     const parsed = new URL(url);

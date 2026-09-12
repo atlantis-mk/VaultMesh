@@ -47,6 +47,8 @@ type CharacterType = "letter" | "emoji" | "special" | "number";
 export class ColorPasswordComponent {
   readonly password = input<string>("");
   readonly showCount = input<boolean>(false);
+  /** Remote surfaces delegate clipboard writes to their privileged owner. */
+  readonly allowCopy = input<boolean>(true);
 
   // Convert to an array to handle cases that strings have special characters, i.e.: emoji.
   readonly passwordCharArray = computed(() => {
@@ -63,7 +65,7 @@ export class ColorPasswordComponent {
     ),
   );
 
-  private platformUtilsService = inject(PlatformUtilsService);
+  private platformUtilsService = inject(PlatformUtilsService, { optional: true });
   private elementRef = inject(ElementRef);
   private i18nService = inject(I18nService);
 
@@ -118,6 +120,7 @@ export class ColorPasswordComponent {
   @HostListener("copy", ["$event"])
   onCopy(event: ClipboardEvent) {
     event.preventDefault();
+    if (!this.allowCopy() || !this.platformUtilsService) return;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
       return;

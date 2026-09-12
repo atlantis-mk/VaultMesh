@@ -27,7 +27,7 @@ export const BROWSER_EXTENSION_WORKFLOWS: readonly BrowserExtensionWorkflow[] = 
   { id: 'card-recovery', route: 'popup:settings', commands: ['cards.trash.list', 'cards.trash.restore', 'cards.trash.purge', 'cards.trash.empty', 'cards.history.list', 'cards.history.restore', 'cards.history.clear'], requiresConfirmation: true },
   { id: 'identity-recovery', route: 'popup:settings', commands: ['identities.trash.list', 'identities.trash.restore', 'identities.trash.purge', 'identities.trash.empty', 'identities.history.list', 'identities.history.restore', 'identities.history.clear'], requiresConfirmation: true },
   { id: 'ssh-recovery', route: 'popup:settings', commands: ['ssh.trash.list', 'ssh.trash.restore', 'ssh.trash.purge', 'ssh.trash.empty', 'ssh.history.list', 'ssh.history.restore', 'ssh.history.clear'], requiresConfirmation: true },
-  { id: 'password-security', route: 'popup:settings', commands: ['password.generate', 'password.health', 'security.settings.get', 'security.settings.update'], requiresConfirmation: false },
+  { id: 'password-security', route: 'popup:settings', commands: ['password.generate', 'browser.generated.copy', 'password.health', 'security.settings.get', 'security.settings.update'], requiresConfirmation: false },
   { id: 'vault-lifecycle', route: 'popup:settings', commands: ['vault.backup', 'vault.restore', 'vault.change-password'], requiresConfirmation: true },
   { id: 'biometrics', route: 'popup:settings', commands: ['biometric.status', 'biometric.enable', 'biometric.disable', 'biometric.unlock'], requiresConfirmation: false },
   { id: 'pin-unlock', route: 'popup:settings', commands: ['pin.status', 'pin.enable', 'pin.disable', 'pin.unlock'], requiresConfirmation: false },

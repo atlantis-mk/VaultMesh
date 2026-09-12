@@ -2,7 +2,7 @@ import { z } from "zod";
 import { UriMatchStrategy } from "@bitwarden/common/models/domain/domain-service";
 import { FieldView } from "@bitwarden/common/vault/models/view/field.view";
 import { FieldType } from "@bitwarden/common/vault/enums";
-import { planNativeItem, type NativeItemKind } from "./native-item-planner";
+import { planNativeItem, credentialCustomSources, type NativeItemKind } from "./native-item-planner";
 import { NativeItemPlanSchema } from "./vendor/browser-native-item-plan";
 import type { AutofillService } from "../autofill/services/abstractions/autofill.service";
 import { loginSummaryView } from "./login-view";
@@ -19,7 +19,7 @@ import { AssignmentSchema, CollectedPageSchema, FILL_APPLY, FILL_CANCEL, FILL_CH
 type PageTarget = { tabId: number; topUrl: string; frameId: number; url: string; targetRef: string; expires: number; candidates: NativeCandidate[]; emailIds?: string[] };
 const PageRequestSchema = z.object({
   kind: z.enum([FILL_CANDIDATES, FILL_SELECT, FILL_AUTOMATIC, EMAIL_SELECT]), targetRef: z.string().uuid(),
-  context: z.enum(["login", "otp"]), id: z.string().uuid().optional(),
+  context: z.enum(["login", "otp", "card", "identity", "ssh", "secret"]), id: z.string().uuid().optional(),
 }).strict();
 
 const fail = (code = "operation-expired"): never => { throw new VaultMeshRpcError(code, "填充未完成。"); };
@@ -48,7 +48,7 @@ export class VaultMeshNativeFillBackground {
   private running = false;
   private generation = 0;
   private readonly menus = new Map<string, PageTarget>();
-  private pendingSelection?: PageTarget & { id: string };
+  private pendingSelection?: PageTarget & { id: string; kind: "login" | NativeItemKind };
   private menuTimer?: ReturnType<typeof setTimeout>;
   private watchMenus(): void {
     if (this.menuTimer) return;
@@ -123,6 +123,25 @@ export class VaultMeshNativeFillBackground {
     });
   }
 
+  async insertGenerated(generated: { mode: string; value: string }, target: FillFrame, current: () => Promise<boolean>) {
+    if (this.running) fail("operation-busy");
+    this.running = true;
+    let active: NonNullable<typeof this.active> | undefined;
+    try {
+      const tab = await activeTab();
+      // A generator result is not a Vault assignment, but uses the same live authorization check.
+      active = { tabId: tab.id!, topUrl: tab.url!, frameId: target.frameId, url: target.url,
+        requestId: createVaultMeshUuid(), expires: Date.now() + FILL_LIFETIME, current };
+      this.active = active;
+      if (!await this.isCurrent(active)) fail();
+      const message = { kind: "vaultmesh.native-fill.generated", requestId: active.requestId, url: target.url,
+        expiresAt: new Date(active.expires).toISOString(), generated: { ...generated } };
+      try { return z.object({ filled: z.number().int().min(0).max(3) }).strict().parse(await tabMessage(active.tabId, message, active.frameId)); }
+      finally { message.generated.value = ""; }
+    } finally { if (this.active === active) this.active = undefined; this.running = false; generated.value = "";
+      if (active) void tabMessage(active.tabId, { kind: FILL_CANCEL }, active.frameId).catch((): undefined => undefined); }
+  }
+
   async emailCandidates(current: () => Promise<boolean>) {
     const tab = await activeTab(); const url = new URL(tab.url!);
     if (!/^https?:$/.test(url.protocol) || !await current()) fail();
@@ -189,8 +208,9 @@ export class VaultMeshNativeFillBackground {
     if (this.pendingSelection) {
       const target = this.pendingSelection;
       this.pendingSelection = undefined;
-      if (kind !== "login" || target.id !== id || target.expires <= Date.now() || selectedFrame) fail();
-      return this.fillTarget(id, masterPassword, current, target, false);
+      if (kind !== target.kind || target.id !== id || target.expires <= Date.now()
+        || selectedFrame && (kind === "login" || selectedFrame.frameId !== target.frameId || selectedFrame.url !== target.url)) fail();
+      return this.fillTarget(id, masterPassword, current, target, false, kind);
     }
     this.running = true;
     const generation = this.generation;
@@ -228,9 +248,9 @@ export class VaultMeshNativeFillBackground {
     } finally { masterPassword = undefined; this.running = false; }
   }
 
-  private async fillItemFrame(kind: NativeItemKind, id: string, masterPassword: string | undefined, current: () => Promise<boolean>, tab: chrome.tabs.Tab, target: FillFrame) {
+  private async fillItemFrame(kind: NativeItemKind, id: string, masterPassword: string | undefined, current: () => Promise<boolean>, tab: chrome.tabs.Tab, target: FillFrame, targetRef?: string) {
     const url = new URL(target.url);
-    if (kind === "card" && url.protocol !== "https:") fail("insecure-page");
+    if (kind !== "identity" && url.protocol !== "https:") fail("insecure-page");
     if (kind === "card" && !masterPassword) fail("re-prompt-required");
     const active: NonNullable<typeof this.active> = { tabId: tab.id!, topUrl: tab.url!, frameId: target.frameId,
       url: target.url, requestId: createVaultMeshUuid(), expires: Date.now() + FILL_LIFETIME, current };
@@ -241,7 +261,8 @@ export class VaultMeshNativeFillBackground {
       const rows = await this.client.managedItem({ verb: "list", kind }, () => this.active === active && active.expires > Date.now());
       const item = Array.isArray(rows) ? rows.find((row) => row.id === id) : undefined;
       if (!item) fail("invalid-request");
-      const page = CollectedPageSchema.parse(await tabMessage(active.tabId, { kind: FILL_COLLECT, requestId: active.requestId, topOrigin: new URL(active.topUrl).origin }, active.frameId));
+      if (item.masterPasswordReprompt && !masterPassword) fail("re-prompt-required");
+      const page = CollectedPageSchema.parse(await tabMessage(active.tabId, { kind: FILL_COLLECT, requestId: active.requestId, topOrigin: new URL(active.topUrl).origin, ...(targetRef ? { targetRef } : {}) }, active.frameId));
       if (page.url !== active.url || page.requestId !== active.requestId || Date.parse(page.expiresAt) > Date.now() + FILL_LIFETIME) fail();
       active.expires = Math.min(active.expires, Date.parse(page.expiresAt));
       const sources = await planNativeItem(nativePage(page), kind);
@@ -294,17 +315,18 @@ export class VaultMeshNativeFillBackground {
       if (!target || target.tabId !== tab.id || target.frameId !== sender.frameId || target.url !== sender.url || target.topUrl !== tab.url) return null;
       const candidate = target.candidates.find((candidate) => candidate.id === request.id);
       if (!candidate || !await current()) return null;
-      if (candidate.masterPasswordReprompt) {
-        this.pendingSelection = { ...target, id: candidate.id };
+      if (candidate.masterPasswordReprompt || candidate.kind === "card") {
+        this.pendingSelection = { ...target, id: candidate.id, kind: candidate.kind };
         return { reprompt: true };
       }
-      return this.fillTarget(candidate.id, undefined, current, target, false);
+      return this.fillTarget(candidate.id, undefined, current, target, false, candidate.kind);
     }
     const result = await this.client.candidates(sender.url, request.context);
     if (!await current()) return null;
     const target: PageTarget = { tabId: tab.id!, topUrl: tab.url!, frameId: sender.frameId, url: sender.url,
       targetRef: request.targetRef, expires: now + FILL_LIFETIME, candidates: result.candidates };
     if (request.kind === FILL_AUTOMATIC) {
+      if (request.context !== "login" && request.context !== "otp") return null;
       const candidate = automaticCandidate(result.candidates, await this.preferences.remembered(new URL(sender.url).origin));
       if (!candidate || !await current()) return null;
       return this.fillTarget(candidate.id, undefined, current, target, true);
@@ -325,13 +347,14 @@ export class VaultMeshNativeFillBackground {
     return result;
   }
 
-  private async fillTarget(id: string, masterPassword: string | undefined, current: () => Promise<boolean>, target: PageTarget, automatic: boolean) {
+  private async fillTarget(id: string, masterPassword: string | undefined, current: () => Promise<boolean>, target: PageTarget, automatic: boolean, kind: "login" | NativeItemKind = "login") {
     if (this.running || target.expires <= Date.now()) fail("operation-expired");
     this.running = true;
     try {
       const tab = await activeTab();
       if (tab.id !== target.tabId || tab.url !== target.topUrl || !await current()) fail();
-      return await this.fillFrame(id, masterPassword, current, tab, target, target.targetRef, automatic);
+      return kind === "login" ? await this.fillFrame(id, masterPassword, current, tab, target, target.targetRef, automatic)
+        : await this.fillItemFrame(kind, id, masterPassword, current, tab, target, target.targetRef);
     } finally { masterPassword = undefined; this.running = false; }
   }
 
@@ -350,10 +373,15 @@ export class VaultMeshNativeFillBackground {
       if (item.url?.startsWith("https:") && url.protocol !== "https:") fail("insecure-page");
       if (item.masterPasswordReprompt && !masterPassword) fail("re-prompt-required");
       if (automatic && (!item.autofillOnPageLoad || item.masterPasswordReprompt)) fail("confirmation-required");
-      const profile = await this.client.loginProfile(id);
-      const page = CollectedPageSchema.parse(await tabMessage(active.tabId, { kind: FILL_COLLECT, requestId: active.requestId,
-        topOrigin: new URL(active.topUrl).origin, ...(automatic ? { expectedUsername: item.username } : {}),
-        ...(targetRef ? { targetRef, automatic } : {}) }, active.frameId));
+      // Automatic plans never use custom fields. For explicit selection, metadata
+      // and value-less DOM collection are independent; validate both before planning.
+      const [profile, collected] = await Promise.all([
+        automatic ? Promise.resolve({ id, customFields: [] }) : this.client.loginProfile(id),
+        tabMessage(active.tabId, { kind: FILL_COLLECT, requestId: active.requestId,
+          topOrigin: new URL(active.topUrl).origin, ...(automatic ? { expectedUsername: item.username } : {}),
+          ...(targetRef ? { targetRef, automatic } : {}) }, active.frameId),
+      ]);
+      const page = CollectedPageSchema.parse(collected);
       if (page.url !== active.url || page.requestId !== active.requestId || Date.parse(page.expiresAt) > Date.now() + FILL_LIFETIME) fail();
       active.expires = Math.min(active.expires, Date.parse(page.expiresAt));
       if (!await this.isCurrent(active)) fail();
@@ -379,6 +407,7 @@ export class VaultMeshNativeFillBackground {
         sources.set(opid, source!);
       }
       // Never disclose an OTP into a nonempty field, including explicitly selected fills.
+      for (const field of nativePage(page).fields) if (credentialCustomSources(field).length && !sources.get(field.opid)?.startsWith("custom:")) sources.delete(field.opid);
       for (const field of page.fields) if (!field.empty && /^(?:012345|[0-5])$/.test(sources.get(field.opid) ?? "")) sources.delete(field.opid);
       const fields = page.fields.filter((field) => sources.has(field.opid));
       if (!script || !fields.length || fields.length !== sources.size || script.untrustedIframe) fail("no-fillable-fields");

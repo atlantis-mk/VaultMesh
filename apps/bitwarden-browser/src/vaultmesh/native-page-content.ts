@@ -3,18 +3,24 @@ import { sendSessionMessage } from "./runtime";
 import { FILL_AUTOMATIC, FILL_CANDIDATES, FILL_SELECT, FILL_CANCEL, NativeCandidatesSchema } from "./native-fill-contracts";
 import { EMAIL_SELECT, clearEmail, type EmailCandidate } from "./email-otp";
 import { SESSION_INVALIDATED } from "./contracts";
+import { isFillControl, type FillControl } from "./native-fill-contracts";
 
 /** Presentation/lifecycle only. Qualification, collection and fill stay in Bitwarden. */
 export class VaultMeshNativePageContent {
   private host?: HTMLDivElement;
   private root?: ShadowRoot;
-  private field?: HTMLInputElement;
+  private field?: FillControl;
   private target?: Awaited<ReturnType<VaultMeshNativeFillContent["createTarget"]>>;
   private revision = 0;
   private url = location.href;
   private attempted = new WeakSet<HTMLElement>();
   private scanning = false;
   private scanTimer?: ReturnType<typeof setTimeout>;
+  private offerTimer?: ReturnType<typeof setTimeout>;
+  private scanAgain = false;
+  private candidatesPending?: number;
+  private candidateLoad?: { revision: number; targetRef: string; pending: Promise<unknown> };
+  private stopped = false;
   private lifecycleTimer?: ReturnType<typeof setInterval>;
   private observer?: MutationObserver;
   private readonly owned = new WeakSet<Node>();
@@ -25,6 +31,7 @@ export class VaultMeshNativePageContent {
   constructor(private readonly content: VaultMeshNativeFillContent) {}
 
   start(): void {
+    this.stopped = false;
     chrome.runtime.onMessage.addListener(this.invalidated);
     document.addEventListener("focusin", this.onFocus, true);
     document.addEventListener("pointerdown", this.onOutside, true);
@@ -42,7 +49,12 @@ export class VaultMeshNativePageContent {
       if (this.target) {
         const field = this.field;
         this.close();
-        if (field?.isConnected && document.activeElement === field) void this.offer(field).catch(() => this.close());
+        if (field?.isConnected && document.activeElement === field) {
+          this.offerTimer = setTimeout(() => {
+            this.offerTimer = undefined;
+            if (field.isConnected && document.activeElement === field && !document.hidden) void this.offer(field).catch(() => this.close());
+          }, 75);
+        }
       }
       this.scheduleScan();
     });
@@ -75,14 +87,14 @@ export class VaultMeshNativePageContent {
   private readonly onFocus = (event: FocusEvent) => {
     const element = event.composedPath()[0];
     if (!event.isTrusted) return;
-    if (!(element instanceof HTMLInputElement)) {
+    if (!isFillControl(element)) {
       if (!event.composedPath().includes(this.host!)) this.close();
       return;
     }
     void this.offer(element).catch(() => this.close());
   };
 
-  async offer(element: HTMLInputElement): Promise<void> {
+  async offer(element: FillControl): Promise<void> {
     this.close();
     const revision = this.revision;
     const target = await this.content.createTarget(element);
@@ -102,21 +114,28 @@ export class VaultMeshNativePageContent {
     button.append(icon);
     button.addEventListener("click", (event) => { if (event.isTrusted) void this.showCandidates(); });
     this.root.append(button); document.documentElement.append(host); this.position();
+    // Candidate summaries are read-only and remain bound to this short-lived
+    // target. Start the broker round-trip while the user moves from focus to
+    // the icon, so clicking normally reuses an in-flight or completed request.
+    void this.loadCandidates(target, revision).catch((): undefined => undefined);
   }
 
   private async showCandidates(): Promise<void> {
     const target = this.target; const revision = this.revision;
     if (!target || !this.content.targetCurrent(target.targetRef)) { this.close(); return; }
+    if (this.candidatesPending === revision) return;
+    this.candidatesPending = revision;
+    this.showCandidateLoading();
     try {
-      const raw = await sendSessionMessage({ kind: FILL_CANDIDATES, targetRef: target.targetRef, context: target.context });
+      const raw = await this.loadCandidates(target, revision);
       const response = NativeCandidatesSchema.safeParse(raw);
       if (raw && typeof raw === "object" && "emailOtpCandidates" in raw) clearEmail({ candidates: raw.emailOtpCandidates });
       if (revision !== this.revision) { if (response.success) clearEmail({ candidates: response.data.emailOtpCandidates }); return; }
       if (!this.content.targetCurrent(target.targetRef)) { this.close(); return; }
-      if (!response.success || !response.data.candidates.length && !response.data.emailOtpCandidates?.length) { this.notice("请先在插件中解锁，或保存此网站的登录项目。"); return; }
+      if (!response.success || !response.data.candidates.length && !response.data.emailOtpCandidates?.length) { this.notice("请先在插件中解锁，或添加对应类型的项目。"); return; }
       this.emailCandidates = response.data.emailOtpCandidates ?? [];
-      this.root?.querySelector("button")?.remove();
-      const list = document.createElement("div"); list.className = "list"; list.setAttribute("aria-label", "VaultMesh 登录候选");
+      this.root?.querySelectorAll("button,.list,.notice").forEach((node) => node.remove());
+      const list = document.createElement("div"); list.className = "list"; list.setAttribute("aria-label", "VaultMesh 填充候选");
       for (const candidate of this.emailCandidates) {
         if (candidate.expiresAt * 1000 <= Date.now()) { candidate.code = ""; continue; }
         const button = document.createElement("button"); button.type = "button"; button.textContent = `${candidate.code} · ${candidate.sourceDomain}`;
@@ -153,6 +172,31 @@ export class VaultMeshNativePageContent {
       });
       this.root?.append(list); this.position(); list.querySelector("button")?.focus();
     } catch { if (revision === this.revision) this.close(); }
+    finally { if (this.candidatesPending === revision) this.candidatesPending = undefined; }
+  }
+
+  private loadCandidates(
+    target: NonNullable<VaultMeshNativePageContent["target"]>,
+    revision: number,
+  ): Promise<unknown> {
+    const existing = this.candidateLoad;
+    if (existing?.revision === revision && existing.targetRef === target.targetRef) return existing.pending;
+    const pending = sendSessionMessage({ kind: FILL_CANDIDATES, targetRef: target.targetRef, context: target.context })
+      .then((raw) => {
+        if (revision !== this.revision && raw && typeof raw === "object" && "emailOtpCandidates" in raw) {
+          clearEmail({ candidates: raw.emailOtpCandidates });
+        }
+        return raw;
+      });
+    this.candidateLoad = { revision, targetRef: target.targetRef, pending };
+    return pending;
+  }
+
+  private showCandidateLoading(): void {
+    this.root?.querySelectorAll("button,.list,.notice").forEach((node) => node.remove());
+    const list = document.createElement("div"); list.className = "list"; list.setAttribute("aria-label", "VaultMesh 填充候选");
+    const loading = document.createElement("button"); loading.type = "button"; loading.disabled = true; loading.textContent = "正在读取候选…";
+    list.append(loading); this.root?.append(list); this.position();
   }
 
   private notice(text: string): void {
@@ -175,34 +219,47 @@ export class VaultMeshNativePageContent {
   };
 
   private close(): void {
+    if (this.offerTimer) clearTimeout(this.offerTimer);
+    this.offerTimer = undefined;
     clearEmail({ candidates: this.emailCandidates }); this.emailCandidates = [];
+    this.candidateLoad = undefined;
     this.revision++;
     if (this.target) this.content.releaseTarget(this.target.targetRef);
     this.host?.remove(); this.host = undefined; this.root = undefined; this.target = null;
   }
 
   private scheduleScan(): void {
-    if (this.scanTimer) clearTimeout(this.scanTimer);
-    this.scanTimer = setTimeout(() => { void this.automatic(); }, 500);
+    if (this.stopped) return;
+    if (this.scanning) { this.scanAgain = true; return; }
+    if (this.scanTimer) return;
+    // Coalesce bursts without letting continuously mutating pages postpone work forever.
+    this.scanTimer = setTimeout(() => { this.scanTimer = undefined; void this.automatic(); }, 100);
   }
 
   private async automatic(): Promise<void> {
-    if (this.scanning || this.host || document.hidden) return;
+    if (this.stopped || this.scanning || this.host || document.hidden) return;
+    if (this.content.isCollecting()) { this.scheduleScan(); return; }
     this.scanning = true;
     try {
       const url = location.href;
+      const revision = this.revision;
       for (const element of await this.content.automaticTargets()) {
-        if (url !== location.href || this.host || document.hidden) return;
+        if (this.stopped || revision !== this.revision || url !== location.href || this.host || document.hidden) return;
+        if (await this.content.automaticTargetAttempted(element, this.attempted)) continue;
+        if (this.stopped || revision !== this.revision || url !== location.href || this.host || document.hidden) return;
         const target = await this.content.createTarget(element);
-        if (!target?.automatic || this.attempted.has(target.scope)) continue;
+        if (!target) continue;
+        if (this.stopped || revision !== this.revision || url !== location.href || this.host || document.hidden) { this.content.releaseTarget(target.targetRef); return; }
+        if (!target.automatic || this.attempted.has(target.scope)) { this.content.releaseTarget(target.targetRef); continue; }
         this.attempted.add(target.scope); // one attempt per local form/document; never retry a page write
         await sendSessionMessage({ kind: FILL_AUTOMATIC, targetRef: target.targetRef, context: target.context });
       }
     } catch { /* Locked, ambiguous and stale automatic requests fail closed. */ }
-    finally { this.scanning = false; }
+    finally { this.scanning = false; if (this.scanAgain) { this.scanAgain = false; this.scheduleScan(); } }
   }
 
   destroy(): void {
+    this.stopped = true; this.scanAgain = false;
     chrome.runtime.onMessage.removeListener(this.invalidated);
     this.close(); this.content.invalidate(); this.observer?.disconnect();
     if (this.scanTimer) clearTimeout(this.scanTimer);

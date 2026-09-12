@@ -1,6 +1,6 @@
 {
   "name": "@vaultmesh/ssh-command-parser",
-  "version": "0.0.9-review",
+  "version": "0.0.10-review",
   "description": "Shared SSH command parsing for VaultMesh",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",

@@ -12,6 +12,7 @@ import { VaultMeshPasskeyProxy } from "../vaultmesh/passkey-proxy";
 import { startPluginSecurity } from "../vaultmesh/plugin-security";
 import { QrAuthorization } from "../vaultmesh/qr-authorization";
 import { EmailWatch } from "../vaultmesh/email-watch";
+import { connectionCode } from "../vaultmesh/connection-diagnostics";
 
 async function codesDigest(codes: string[]): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(codes));
@@ -28,6 +29,7 @@ export class VaultMeshRpcBackground {
   private readonly cleanup = new Map<string, { tabId: number; expiresAt: number; digest: string; committed: boolean }>();
   private readonly mutations = new Map<string, number>();
   private mutationPending = false;
+  private unlockReadsPending = 0;
   private eventCursor?: number;
   private eventCheck?: Promise<void>;
   private readonly fill?: VaultMeshNativeFillBackground;
@@ -60,7 +62,7 @@ export class VaultMeshRpcBackground {
     this.editors.start();
     this.fill?.start();
     this.capture.start();
-    this.client.onDisconnected(() => {
+    this.client.onDisconnected((code) => {
       this.emailWatch.cancel();
       this.qr.cancel();
       void this.passkeys.detach();
@@ -69,7 +71,7 @@ export class VaultMeshRpcBackground {
       this.capture.cancel();
       this.generation++;
       this.eventCursor = undefined;
-      void sendSessionMessage({ kind: SESSION_INVALIDATED }).catch((): undefined => undefined);
+      void sendSessionMessage({ kind: SESSION_INVALIDATED, code: connectionCode(code) }).catch((): undefined => undefined);
     });
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!this.trusted(sender)) return false;
@@ -106,6 +108,7 @@ export class VaultMeshRpcBackground {
         return {
           kind: VAULTMESH_STATUS_MESSAGE,
           status: code === "unpaired" ? "unpaired" : code === "unlock-required" ? "locked" : "unavailable",
+          code: connectionCode(code),
         };
       }
     }
@@ -116,6 +119,7 @@ export class VaultMeshRpcBackground {
     }
     const generation = this.generation;
     let ownsMutation = false;
+    let ownsUnlockRead = false;
     try {
       if ("mutationId" in parsed.data) {
         if (parsed.data.sessionId !== this.sessionId) throw new VaultMeshRpcError("operation-expired", "连接已重新建立。");
@@ -124,9 +128,11 @@ export class VaultMeshRpcBackground {
         const expiry = Date.parse(parsed.data.expiresAt);
         if (expiry <= now || expiry > now + 60_000) throw new VaultMeshRpcError("operation-expired", "操作已过期。");
         if (this.mutations.has(parsed.data.mutationId)) throw new VaultMeshRpcError("duplicate-operation", "操作已处理。");
-        if (this.mutationPending || this.mutations.size >= 128) throw new VaultMeshRpcError("operation-busy", "请等待当前操作完成。");
+        const unlockRead = parsed.data.action === "security-tool" && ["pin.status", "biometric.status"].includes(parsed.data.command.operation);
+        if (this.mutationPending || (unlockRead ? this.unlockReadsPending >= 2 : this.unlockReadsPending > 0) || this.mutations.size >= 128) throw new VaultMeshRpcError("operation-busy", "请等待当前操作完成。");
         this.mutations.set(parsed.data.mutationId, expiry);
-        this.mutationPending = ownsMutation = true;
+        if (unlockRead) { this.unlockReadsPending++; ownsUnlockRead = true; }
+        else this.mutationPending = ownsMutation = true;
         await this.checkEvents();
         if (parsed.data.revision !== this.generation) throw new VaultMeshRpcError("operation-expired", "编辑会话已改变。");
       }
@@ -202,7 +208,7 @@ export class VaultMeshRpcBackground {
           if (!current()) { clearLoginSecrets(result); throw new VaultMeshRpcError("operation-expired", "文件对话框已失效。"); }
           break;
         }
-        case "cancel-fill": this.generation++; this.qr.cancel(); this.fill?.cancel(); break;
+        case "cancel-fill": this.generation++; this.qr.cancel(); this.fill?.cancel(); this.capture.cancel(); break;
         case "logins": result = await this.client.logins(); break;
         case "login-trash": result = await this.client.loginTrash(); await this.checkEvents(); break;
         case "login-history": result = await this.client.loginHistory(parsed.data.id); await this.checkEvents(); break;
@@ -229,6 +235,15 @@ export class VaultMeshRpcBackground {
           break;
         case "recovery-code-copy": result = await this.client.copyRecoveryCode(parsed.data.id, parsed.data.index, parsed.data.masterPassword); break;
         case "login-delete": await this.client.deleteLogin(parsed.data.id, () => generation === this.generation); break;
+        case "generated-value":
+          if (parsed.data.command === "copy") result = await this.client.copyGenerated(parsed.data.generated);
+          else {
+            if (!this.fill || !parsed.data.frame) throw new VaultMeshRpcError("invalid-request", "请选择目标页面。");
+            result = await this.fill.insertGenerated(parsed.data.generated, parsed.data.frame, async () => {
+              await this.checkEvents(); return generation === this.generation && (await this.client.status()).unlocked;
+            });
+          }
+          break;
         case "item-fill":
         case "login-fill":
           if (!this.fill) throw new VaultMeshRpcError("unsupported-operation", "填充引擎尚未就绪。");
@@ -260,12 +275,14 @@ export class VaultMeshRpcBackground {
       return { kind: SESSION_MESSAGE, ok: false, code: error instanceof VaultMeshRpcError ? error.code : "invalid-broker-response" };
     } finally {
       if (ownsMutation) this.mutationPending = false;
+      if (ownsUnlockRead) this.unlockReadsPending--;
       this.clearInput(parsed.data);
       this.clearInput(message);
     }
   }
 
   private clearInput(message: unknown): void {
+    if (message && typeof message === "object" && "generated" in message && message.generated && typeof message.generated === "object" && "value" in message.generated) message.generated.value = "";
     clearLoginSecrets(message);
     if (message && typeof message === "object" && "input" in message) clearLoginSecrets(message.input);
   }

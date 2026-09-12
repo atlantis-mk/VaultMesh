@@ -3,9 +3,11 @@ fn fill_values(
     kind: &str,
     detail: &Value,
     password: Option<&str>,
+    native_sources: Option<&[NativeItemSource]>,
 ) -> Result<FillValues, BrowserPlatformError> {
     let id = value_string(detail, "id")?;
     let mut result = FillValues::default();
+    let requested = |key: &str| native_sources.is_none_or(|entries| entries.iter().any(|entry| native_item_key(&entry.source) == Some(key)));
     match kind {
         "login" => {
             put(&mut result, "username", detail.get("username"));
@@ -98,6 +100,8 @@ fn fill_values(
                 .get("kind")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
+            if !requested("secret") || native_sources.is_some_and(|entries| !entries.iter().any(|entry|
+                entry.source.strip_prefix("secret:") == result.secret_kind.as_deref())) { return Ok(result); }
             let secret = runtime
                 .protected_value(
                     VAULTMESH_ITEM_KIND_SECRET,
@@ -109,6 +113,7 @@ fn fill_values(
             result.values.insert("secret".into(), secret.to_string());
         }
         "ssh" => {
+            put(&mut result, "title", detail.get("title"));
             for key in ["host", "username"] {
                 put(&mut result, key, detail.get(key));
             }
@@ -137,7 +142,7 @@ fn fill_values(
                     VAULTMESH_PROTECTED_FIELD_SSH_KEY_PASSPHRASE,
                 ),
             ] {
-                if detail
+                if requested(key) && detail
                     .get(available)
                     .and_then(Value::as_bool)
                     .unwrap_or(false)

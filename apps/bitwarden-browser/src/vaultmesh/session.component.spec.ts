@@ -30,6 +30,53 @@ describe("CT-ITEM-001 popup edit lifecycle", () => {
   });
   afterEach(() => { component.ngOnDestroy(); jest.useRealTimers(); });
 
+  it("CT-BROWSER-001 bounds large-vault projection while searching the entire summary list", () => {
+    const logins = Array.from({ length: 521 }, (_, index) => ({ id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, title: `Synthetic ${index}`, username: "synthetic", url: null, hasPassword: true, hasTotpSecret: false, hasRecoveryCodes: false, autofillOnPageLoad: false, masterPasswordReprompt: false }));
+    states.next({ ...states.value, logins });
+    expect(component["rows"]()).toHaveLength(25);
+    component["setLoginQuery"]("Synthetic 520");
+    expect(component["rows"]().map(row => row.name)).toEqual(["Synthetic 520"]);
+    component["setLoginQuery"]("");
+    component["changeLoginPage"](1);
+    expect(component["rows"]()[0].id).toBe(logins[25].id);
+    for (let page = 0; page < 30; page++) component["changeLoginPage"](1);
+    expect(component["rows"]()).toHaveLength(21);
+    expect(component["rows"]().at(-1)?.id).toBe(logins[520].id);
+    states.next({ ...states.value, logins: logins.slice(0, 2) });
+    expect(component["rows"]()).toHaveLength(2);
+    states.next({ ...states.value, status: "locked", logins: [] });
+    expect(component["rows"]()).toEqual([]);
+    expect(component["loginPage"]()).toBe(0);
+  });
+
+  it("CT-BROWSER-001 opens summary-only view and clears it when authorization is lost", () => {
+    states.next({ ...states.value, logins: [{ id, title: "Example", username: "alice", url: null,
+      hasPassword: true, hasTotpSecret: false, hasRecoveryCodes: false,
+      autofillOnPageLoad: false, masterPasswordReprompt: false }] });
+    component["viewLogin"](id);
+    expect(component["viewedLogin"]()?.title).toBe("Example");
+    expect(service.editLogin).not.toHaveBeenCalled();
+    expect(component["hasDetail"]()).toBe(true);
+    states.next({ ...states.value, status: "locked", logins: [] });
+    expect(component["viewedLoginId"]()).toBeNull();
+    expect(component["viewedLogin"]()).toBeNull();
+  });
+
+  it("CT-AUTOFILL-001 fills a selected login directly and keeps reprompt behind confirmation", async () => {
+    states.next({ ...states.value, logins: [{ id, title: "Example", username: "alice", url: null,
+      hasPassword: true, hasTotpSecret: false, hasRecoveryCodes: false,
+      autofillOnPageLoad: false, masterPasswordReprompt: false }] });
+    await component["selectLogin"](id);
+    expect(service.fillLogin).toHaveBeenCalledWith(id);
+    expect(component["notice"]()).toContain("已填入 2 个字段");
+
+    service.fillLogin.mockClear();
+    states.next({ ...states.value, logins: [{ ...states.value.logins[0], masterPasswordReprompt: true }] });
+    await component["selectLogin"](id);
+    expect(service.fillLogin).not.toHaveBeenCalled();
+    expect(component["fillTarget"]()?.id).toBe(id);
+  });
+
   it("CT-AUTOFILL-001 requires explicit fill confirmation and clears reprompt input before waiting", async () => {
     states.next({ ...states.value, logins: [{ id, title: "Example", username: "alice", url: null, hasPassword: true,
       hasTotpSecret: false, hasRecoveryCodes: false, masterPasswordReprompt: true, autofillOnPageLoad: false }] });

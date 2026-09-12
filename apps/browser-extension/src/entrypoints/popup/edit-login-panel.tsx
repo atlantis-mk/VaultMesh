@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeftIcon, CameraIcon, CopyIcon, EyeIcon, EyeOffIcon, FileUpIcon, KeyRoundIcon, RefreshCwIcon, SaveIcon, Trash2Icon } from "lucide-react";
 
 import { ToastMessage } from "@/components/ToastMessage";
@@ -29,6 +29,8 @@ const EMPTY_FORM: LoginForm = {
   title: "", username: "", password: "", url: "", notes: "", folder: "", favorite: false,
   additionalUrls: "", customFields: "", autofillOnPageLoad: true, masterPasswordReprompt: false, totpSecret: "", recoveryCodes: "",
 };
+const EDIT_SESSION_LIFETIME_MS = 5 * 60_000;
+const NATIVE_FILE_DIALOG_GRACE_MS = 45_000;
 
 type RecoveryAction = { kind: "view" } | { kind: "copy"; index: number };
 
@@ -39,6 +41,8 @@ export function EditLoginPanel({ id, onCancel, onSaved, onPasskeysChanged, onSca
   onPasskeysChanged: () => void | Promise<void>;
   onScanTotp: () => Promise<TotpQrCode | null>;
 }) {
+  const onCancelRef = useRef(onCancel);
+  const nativeFileDialogUntil = useRef(0);
   const [form, setForm] = useState<LoginForm>(EMPTY_FORM);
   const [hasTotpSecret, setHasTotpSecret] = useState(false);
   const [clearTotpSecret, setClearTotpSecret] = useState(false);
@@ -60,6 +64,30 @@ export function EditLoginPanel({ id, onCancel, onSaved, onPasskeysChanged, onSca
   const [recoveryAccessBusy, setRecoveryAccessBusy] = useState(false);
   const [recoveryAccessError, setRecoveryAccessError] = useState<string | null>(null);
   const [recoveryAccessNotice, setRecoveryAccessNotice] = useState<string | null>(null);
+  onCancelRef.current = onCancel;
+
+  function expireEditor() {
+    setForm(EMPTY_FORM); setRecognizedTotp(null); setRevealedRecoveryCodes([]); setRecoveryAction(null);
+    setRecoveryMasterPassword(""); setRecoveryAccessError(null); setRecoveryAccessNotice(null); setImportNotice(null);
+    onCancelRef.current();
+  }
+
+  useEffect(() => {
+    let nativeDialogExpiry: ReturnType<typeof setTimeout> | null = null;
+    const hidden = () => {
+      if (!document.hidden) return;
+      const remainingGrace = nativeFileDialogUntil.current - Date.now();
+      if (remainingGrace > 0) {
+        if (nativeDialogExpiry) clearTimeout(nativeDialogExpiry);
+        nativeDialogExpiry = setTimeout(() => { if (document.hidden) expireEditor(); }, remainingGrace);
+      } else {
+        expireEditor();
+      }
+    };
+    const timer = setTimeout(expireEditor, EDIT_SESSION_LIFETIME_MS);
+    document.addEventListener("visibilitychange", hidden);
+    return () => { clearTimeout(timer); if (nativeDialogExpiry) clearTimeout(nativeDialogExpiry); document.removeEventListener("visibilitychange", hidden); };
+  }, [id]);
 
   useEffect(() => {
     let active = true;
@@ -203,6 +231,7 @@ export function EditLoginPanel({ id, onCancel, onSaved, onPasskeysChanged, onSca
     if (importingRecoveryCodes) return;
     closeRecoveryAccess();
     setImportingRecoveryCodes(true);
+    nativeFileDialogUntil.current = Date.now() + NATIVE_FILE_DIALOG_GRACE_MS;
     setError(null);
     setImportNotice(null);
     try {
@@ -223,7 +252,9 @@ export function EditLoginPanel({ id, onCancel, onSaved, onPasskeysChanged, onSca
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "无法导入恢复码文件。");
     } finally {
+      nativeFileDialogUntil.current = 0;
       setImportingRecoveryCodes(false);
+      if (document.hidden) expireEditor();
     }
   }
 

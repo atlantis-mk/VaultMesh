@@ -69,7 +69,7 @@ pnpm typecheck
 | `CT-TAURI-TRAY-THEME-001` | Windows light/dark/unknown 主题选择、黑白托盘资源尺寸/解码、macOS Retina 模板资源保持测试 |
 | `CT-DESKTOP-STARTUP-*` | Tauri Rust autostart owner、固定参数、初始化标记、隐藏窗口配置、主窗口关闭销毁 WebView 与托盘重建、typed adapter 与设置 UI contract tests |
 | `CT-UPDATE-001` | Rust-owned updater/no-renderer-capability、release-only HTTPS config、macOS/Windows 原生“检查更新…”菜单、主动/自动检查互斥、主动检查无更新/失败反馈、用户确认、安装前 lock/exit cleanup、Windows NSIS 覆盖复制前 Native Host 注销/停止与安装后恢复注册，以及标准 GitHub-hosted `macos-15` ARM64、`macos-15-intel` x86_64、`windows-2025` x64 原生目标/host 架构绑定、精确 Rust toolchain、按 OS/arch/target 隔离且忽略 workspace-only 版本变化的 dependency-only Cargo cache、workspace release object/编译期 credential 保存前清理、矩阵 `fail-fast: false`、上游失败时 publisher 明确失败并通过同 run “Re-run failed jobs”复用成功 artifact、发布 workflow 无 `self-hosted` 标签、manifest 的 SemVer/platform/signature/不可变 URL/三平台完整性与 latest-last publish contract tests；Windows target experimental package 必须只发布 immutable objects、保持 test channel 不变且不计入 Windows AT |
-| `CT-UPDATE-REVIEW-001` | `0.0.1-review` fresh-install baseline 与当前 `0.0.9-review` build 的 workspace/Rust/Tauri/extension 版本一致性；Review workflow 固定使用 `channels/review/latest.json`，保留完整发布的三目标、签名、immutable、latest-last、精确 toolchain、dependency-only Cargo cache、workspace object 清理与失败任务同 run 恢复约束，并为 Windows同时生成 NSIS/MSI；Chrome/Firefox ZIP 必须进入同版本不可变 R2 路径并通过公网内容校验，R2 成功后只创建不含 Git Tag 的 GitHub Draft Prerelease并上传两个 DMG、Windows NSIS/MSI 与两个 ZIP；任一 prerequisite 失败时 Draft job 明确失败并可随失败任务重跑；阶段性 manifest 只引用已发布的 signed immutable artifact、首次从 `.1` 创建且后续严格递增，并允许在相同 current version 下只追加一个缺失平台，同时保持顶层字段、既有平台和 test channel 不变；阶段性清单和 Draft Prerelease 均不得计为完整正式发布或平台 AT |
+| `CT-UPDATE-REVIEW-001` | `0.0.1-review` fresh-install baseline 与当前 `0.0.10-review` build 的 workspace/Rust/Tauri/extension 版本一致性；Review workflow 固定使用 `channels/review/latest.json`，保留完整发布的三目标、签名、immutable、latest-last、精确 toolchain、dependency-only Cargo cache、workspace object 清理与失败任务同 run 恢复约束，并为 Windows同时生成 NSIS/MSI；Chrome/Firefox ZIP 必须进入同版本不可变 R2 路径并通过公网内容校验，R2 成功后只创建不含 Git Tag 的 GitHub Draft Prerelease并上传两个 DMG、Windows NSIS/MSI 与两个 ZIP；任一 prerequisite 失败时 Draft job 明确失败并可随失败任务重跑；阶段性 manifest 只引用已发布的 signed immutable artifact、首次从 `.1` 创建且后续严格递增，并允许在相同 current version 下只追加一个缺失平台，同时保持顶层字段、既有平台和 test channel 不变；阶段性清单和 Draft Prerelease 均不得计为完整正式发布或平台 AT |
 | `CT-OSS-001` | 历史证据：`scripts/open-source-metadata.test.mjs` 保留原 AGPLv3-or-later 标准正文、首次公开 Work 封存记录和精确秘密扫描例外；该 ID 不再代表当前版本的许可元数据 |
 | `CT-LICENSE-001` | `scripts/source-license-metadata.test.mjs` 验证 PolyForm Noncommercial 1.0.0 标准正文、Rust/pnpm SPDX、source-available/非商业表述、商业授权入口、历史 AGPL 权利与第三方权利边界一致，并保持 workspace package `private: true` |
 | `CT-HISTORY-001` | `scripts/repository-history-policy.test.mjs` 验证当前 Git refs 不再包含已知 AGPL 发布提交、`main` 根快照使用 PolyForm Noncommercial，并保留当前许可证元数据 |
@@ -144,7 +144,19 @@ pnpm typecheck
 
 ### GATE-4 Browser
 
+- 当前 WXT 原插件的 `CT-BROWSER-001/003` 必须覆盖至少 500 条摘要的 25 条分页、跨页搜索与页码收敛，Broker 权威 Login/Secret/SSH 建议及无字段上下文时 card/identity 不误标，桌面锁定/撤销/停止后的 popup 全量瞬态清理，以及生成结果/历史 60 秒与隐藏清理和桌面受控复制。`CT-ITEM-001/002/003/004/005` 与 `CT-RECOVERY-001` 必须覆盖按实际存在值生成复制菜单、单条删除的可恢复/永久语义、四类安全恢复摘要和类型/目标绑定；编辑草稿必须覆盖隐藏、5 分钟期限、迟到详情及恢复码文件框 45 秒例外。
+- `CT-AUTOFILL-001` 必须验证多字段表单按 scope 单次自动目标采集、已尝试 scope 不重新采集、100 毫秒 mutation 调度不饥饿、collector 忙与销毁、并发 focus/capture、重复候选点击以及 profile/DOM 并行后的失效拒绝。构建后运行 `npm --prefix apps/bitwarden-browser run test:content-build`，验证实际压缩 content 的无值采集、有效 assignment 写入和失效 assignment 拒绝；`CT-BROWSER-002` 同时验证 Rust 轻量授权检查前后锁定语义不变。
+- `CT-BROWSER-001` / `CT-SEC-002` 必须验证无变化轮询只读状态且复用当前摘要，版本/连接/数量变化、旧协议、手动刷新、锁定与销毁后重新读取；验证两项解锁状态并发、在途事件检查合并、写操作互斥、防重放、过期及迟到清理。构建页面必须验证加载反馈即时显示且不存在人为延迟样式；性能对比仅记录耗时、请求数、产物大小，不记录真实条目或秘密。
+- `CT-SEC-002` / `CT-BROWSER-001` 必须覆盖解锁页无快捷方式、仅 PIN、仅生物识别、两者均可用、未启用/不可用/PIN 锁定、状态读取失败/超时及迟到响应；验证默认优先级、切换清空、6 位 PIN 单次提交、失败次数刷新、生物识别取消、主密码回退与隐藏/销毁清理。系统指纹弹窗仍须真机验收。
+- `CT-BROWSER-001` 必须覆盖连接即时反馈、重复点击、权限/状态无回调超时、后台无响应、Native Host 安全错误分类、断连与迟到状态竞争；诊断不得回显原始错误或改变 mutation 重试语义。
+- 初始化回归必须覆盖状态成功而列表无响应的超时，以及连续刷新与轮询复用同一轮读取；授权失效后的新轮次不能被旧轮次覆盖。
+- `CT-BROWSER-001` 必须以至少 500 条虚构摘要验证分页渲染上限、末页可达、跨页搜索、列表缩短与锁定清理；浏览器构建后运行 `npm --prefix apps/bitwarden-browser run test:popup-build`，验证产物不会一次性创建全量条目的操作控件。
+- 原生页面恢复必须验证真实构建中的底部导航、页头、紧凑条目/菜单、摘要查看不读秘密、显式编辑及离页清理、生成器/设置/保险库往返；普通及独立窗口路由不得改变精确文档 URL 或持久化 popup workspace。其他类型列表同样验证 25 条上限及跨页搜索；不得重新引入上游账号/云服务启动入口。
+- `CT-BROWSER-001` 的 PopupPage 与构建产物回归必须覆盖首次异步插入筛选区、移除、再次插入及 loading 切换；未触发任何滚动事件前，有内容可见、无内容不占位。构建产物同时核对空区域收起样式已生成；目标浏览器补验首次打开的实际布局。
+- `CT-ITEM-003/005`、`CT-AUTOFILL-001/002` 必须覆盖原生 SSH 公钥/标题及特有凭据 custom-field 匹配、无关字段与 Login 误捕获排除、HTTPS/空字段/Secret 子类型/Passkey/二次验证、部分更新秘密保留及单次确认；必须运行实际 core/Broker assignment 测试，不能只用传输 mock 证明授权成立。
+
 - `CT-AUTOFILL-001/002` 与 `CT-ITEM-002/004` 覆盖原生 card/identity 计划、字段限定格式化/select、主密码、捕获部分更新、歧义拒绝和取消/重放；`CT-BROWSER-003` 覆盖生成器插入及桌面受控复制的目标/授权/期限和清理。
+- `CT-AUTOFILL-001` 必须验证页内图标出现即为当前短期目标预取候选，点击复用同一在途请求并立即显示加载态；失焦、导航、只读变化、目标过期和销毁必须丢弃结果且清除迟到 OTP，不得跨目标复用。
 - `CT-BROWSER-001` 必须验证实验副本的可调用会话/工具入口不包含 Vault 备份/恢复、批量文件导入或 SSH 扫描导入。按 Scope Matrix 留在桌面的工作流不再作为该副本迁移完成的验收缺口；既有恢复码编辑辅助与桌面/原插件兼容测试保留。
 - 实验副本新增类型与工具必须覆盖 `CT-ITEM-002/003/004/005` 的完整编辑元数据、未读秘密保留、类型限定复制、trash/history 与永久删除区别；`CT-SEC-002` 和 `CT-BROWSER-003` 覆盖独立安全偏好、PIN/生物识别与四模式生成参数。`CT-PASSKEY-001` 覆盖原生事件入口、并存冲突、取消/锁定及 Login 归属删除；Firefox 仍无 proxy。
 - `CT-AUTHENTICATOR-001` 覆盖 QR 可见性、受支持 profile、frame 单次校验、候选选择/覆盖确认、迟到清理与不自动保存；`CT-EMAIL-002/003` 覆盖真实原生 planner/executor 的 4–8 位与分格 OTP、非空字段、candidate 过期/导航、无 code audit 和 90 秒有界监听。`CT-VAULT-001/002` 覆盖创建防覆盖、轮换确认、密码输入清理及不重放未知结果。

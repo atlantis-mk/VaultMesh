@@ -1,9 +1,11 @@
 import { z } from "zod";
+import { CONNECTION_CODES } from "./connection-diagnostics";
 import { LoginSaveSchema } from "./login-contracts";
 import { LoginRecoveryCommandSchema } from "./recovery-contracts";
 import { ManagedCommandSchema } from "./managed-items";
 import { SecurityCommandSchema } from "./security-tools";
 import { PasskeyManagementSchema } from "./passkey-management";
+import { GeneratedValueSchema } from "./vendor/browser-generated-value";
 
 // These are projections of existing VaultMesh RPC results, not new broker operations.
 export const VaultMeshStatusSchema = z.object({
@@ -34,7 +36,9 @@ export const SESSION_INVALIDATED = "vaultmesh.browser-session-invalidated" as co
 export const FillFrameSchema = z.object({ frameId: z.number().int().nonnegative(), url: z.string().url().max(8192) }).strict();
 export type FillFrame = z.infer<typeof FillFrameSchema>;
 export const SessionMessageSchema = z.discriminatedUnion("action", [
-  z.object({ kind: z.literal(SESSION_MESSAGE), action: z.literal("item-fill"), itemKind: z.enum(["card", "identity"]), id: z.string().uuid(), masterPassword: z.string().min(8).max(1024).optional(), frame: FillFrameSchema,
+  z.object({ kind: z.literal(SESSION_MESSAGE), action: z.literal("generated-value"), command: z.enum(["copy", "insert"]), generated: GeneratedValueSchema, frame: FillFrameSchema.optional(),
+    mutationId: z.string().uuid(), expiresAt: z.string().datetime(), sessionId: z.string().uuid(), revision: z.number().int().nonnegative() }).strict(),
+  z.object({ kind: z.literal(SESSION_MESSAGE), action: z.literal("item-fill"), itemKind: z.enum(["card", "identity", "ssh", "secret"]), id: z.string().uuid(), masterPassword: z.string().min(8).max(1024).optional(), frame: FillFrameSchema,
     mutationId: z.string().uuid(), expiresAt: z.string().datetime(), sessionId: z.string().uuid(), revision: z.number().int().nonnegative() }).strict(),
   z.object({ kind: z.literal(SESSION_MESSAGE), action: z.literal("email-candidates") }).strict(),
   z.object({ kind: z.literal(SESSION_MESSAGE), action: z.literal("email-fill"), candidateId: z.uuid(), tabId: z.number().int().nonnegative(), url: z.string().url().max(8192),
@@ -83,7 +87,7 @@ export const StatusResponseSchema = z.discriminatedUnion("status", [
   z.object({ kind: z.literal(VAULTMESH_STATUS_MESSAGE), status: z.literal("ready"), vault: VaultMeshStatusSchema.refine((v) => v.unlocked && v.hasVault), revision: z.number().int().nonnegative().optional(), sessionId: z.string().uuid().optional() }),
   z.object({ kind: z.literal(VAULTMESH_STATUS_MESSAGE), status: z.literal("locked"), vault: VaultMeshStatusSchema.refine((v) => !v.unlocked).optional(), revision: z.number().int().nonnegative().optional(), sessionId: z.string().uuid().optional() }),
   z.object({ kind: z.literal(VAULTMESH_STATUS_MESSAGE), status: z.literal("unpaired") }),
-  z.object({ kind: z.literal(VAULTMESH_STATUS_MESSAGE), status: z.literal("unavailable") }),
+  z.object({ kind: z.literal(VAULTMESH_STATUS_MESSAGE), status: z.literal("unavailable"), code: z.enum(CONNECTION_CODES).optional() }),
 ]);
 
 export const SessionResponseSchema = z.discriminatedUnion("ok", [

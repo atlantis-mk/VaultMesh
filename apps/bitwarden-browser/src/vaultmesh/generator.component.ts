@@ -1,11 +1,12 @@
 import { ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, Input, OnDestroy, OnInit, inject, signal } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { FormsModule } from "@angular/forms";
-import { ButtonModule, FormFieldModule } from "@bitwarden/components";
+import { ButtonModule, FormFieldModule, CardComponent, ColorPasswordModule, IconButtonModule, ToggleGroupModule, CheckboxModule, FormControlModule } from "@bitwarden/components";
 import { VaultMeshBrowserRpcService } from "../platform/services/vaultmesh-browser-rpc.service";
 import { DEFAULT_GENERATOR_PREFERENCES, GeneratorPreferencesSchema, loadGeneratorPreferences, saveGeneratorPreferences } from "./generator-preferences";
 import { generateCredential } from "./credential-generator";
-@Component({ selector: "vaultmesh-generator", imports: [FormsModule, ButtonModule, FormFieldModule], templateUrl: "./generator.component.html", changeDetection: ChangeDetectionStrategy.OnPush })
+import type { FillFrame } from "./contracts";
+@Component({ selector: "vaultmesh-generator", imports: [FormsModule, ButtonModule, FormFieldModule, CardComponent, ColorPasswordModule, IconButtonModule, ToggleGroupModule, CheckboxModule, FormControlModule], templateUrl: "./generator.component.html", changeDetection: ChangeDetectionStrategy.OnPush })
 export class VaultMeshGeneratorComponent implements OnInit, OnDestroy {
   @Input() independent = false;
   protected preferences = GeneratorPreferencesSchema.parse(DEFAULT_GENERATOR_PREFERENCES);
@@ -13,6 +14,14 @@ export class VaultMeshGeneratorComponent implements OnInit, OnDestroy {
   protected readonly notice = signal("");
   protected readonly busy = signal(false);
   protected readonly loading = signal(true);
+  protected readonly frames = signal<FillFrame[]>([]);
+  protected setMode(mode: unknown): void {
+    if (this.busy() || this.loading()) return;
+    if (mode === "password" || mode === "passphrase" || mode === "username" || mode === "uuid") {
+      this.clear(); this.preferences.mode = mode;
+    }
+  }
+  protected selected: FillFrame | null = null;
   private readonly session = inject(VaultMeshBrowserRpcService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly changeDetector = inject(ChangeDetectorRef);
@@ -50,6 +59,24 @@ export class VaultMeshGeneratorComponent implements OnInit, OnDestroy {
     } catch { if (generation === this.generation) this.notice.set("生成失败，未保留结果。"); }
     finally { generated = ""; if (generation === this.generation) this.busy.set(false); }
   }
-  protected clear(): void { this.generation++; this.value.set(""); this.busy.set(false); if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
+  protected async prepareInsert(): Promise<void> {
+    if (!this.value() || this.busy()) return;
+    const generation = this.generation;
+    const result = await this.session.fillContexts();
+    if (generation === this.generation && result.ok) this.frames.set(result.value);
+  }
+  protected async use(command: "copy" | "insert"): Promise<void> {
+    if (!this.value() || this.busy() || command === "insert" && !this.selected) return;
+    const generation = this.generation; this.busy.set(true);
+    const generated = { mode: this.preferences.mode, value: this.value() };
+    this.value.set(""); // consume before dispatch, never retry an uncertain result
+    try {
+      const result = await this.session.generatedValue(command, generated, this.selected ?? undefined);
+      if (generation !== this.generation) return;
+      this.notice.set(result.ok ? command === "copy" ? "桌面端已复制，将按安全设置清理剪贴板。" : `已插入 ${"filled" in result.value ? result.value.filled : 0} 个字段。`
+        : "操作未确认。请检查目标字段或剪贴板，不会自动重试。");
+    } finally { generated.value = ""; if (generation === this.generation) { this.busy.set(false); this.selected = null; this.frames.set([]); } }
+  }
+  protected clear(): void { this.generation++; this.value.set(""); const pending = this.busy(); this.busy.set(false); if (pending) this.session.cancelManaged(); this.selected = null; this.frames.set([]); if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
   ngOnDestroy(): void { this.clear(); document.removeEventListener("visibilitychange", this.hide); window.removeEventListener("blur", this.blur); window.removeEventListener("pagehide", this.leave); }
 }

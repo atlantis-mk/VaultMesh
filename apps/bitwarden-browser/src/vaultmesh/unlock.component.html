@@ -1,0 +1,36 @@
+<bit-card class="tw-w-full">
+  <div class="tw-flex tw-flex-col tw-gap-3" aria-label="解锁插件">
+    <span class="tw-grid tw-size-12 tw-place-items-center tw-rounded-xl tw-bg-background-alt"><i class="bwi bwi-lock bwi-lg" aria-hidden="true"></i></span>
+    <h2 class="tw-text-lg tw-font-semibold tw-m-0">解锁 VaultMesh 插件</h2>
+    @if (loading()) {
+      <p role="status" class="tw-text-muted">正在读取可用解锁方式…</p>
+    } @else {
+      @if (pin()?.locked) { <p class="tw-text-muted">插件 PIN 已锁定，请使用其他解锁方式。</p> }
+      @switch (method()) {
+        @case ('pin') {
+          <p class="tw-text-muted">输入 6 位插件 PIN 后自动解锁，还可尝试 {{ pin()?.remainingAttempts }} 次。</p>
+          <bit-form-field><bit-label>6 位插件 PIN</bit-label>
+            <input bitInput type="password" inputmode="numeric" name="pluginUnlockPin" aria-label="6 位插件 PIN" autocomplete="off" maxlength="6" pattern="[0-9]{6}" class="tw-text-center tw-text-xl tw-tracking-[0.75em]" [ngModel]="credential()" (ngModelChange)="inputCredential($event)" [disabled]="disabled()" />
+          </bit-form-field>
+        }
+        @case ('biometric') {
+          <p class="tw-text-muted">使用已为此插件启用的指纹验证解锁。</p>
+          <button bitButton buttonType="primary" type="button" [disabled]="disabled()" (click)="unlock()">{{ working() ? '正在等待系统验证…' : '使用指纹解锁' }}</button>
+        }
+        @case ('password') {
+          <form (ngSubmit)="unlock()">
+            <bit-form-field><bit-label>主密码</bit-label>
+              <input bitInput type="password" name="masterPassword" autocomplete="off" minlength="8" maxlength="1024" required [ngModel]="credential()" (ngModelChange)="inputCredential($event)" [disabled]="disabled()" />
+            </bit-form-field>
+            <button bitButton buttonType="primary" type="submit" class="tw-w-full" [disabled]="disabled() || credential().length < 8">{{ working() ? '正在安全验证…' : '使用主密码解锁插件' }}</button>
+          </form>
+        }
+      }
+      @if (working() && method() === 'pin') { <p role="status">正在安全验证…</p> }
+      @if (method() !== 'password') { <button bitButton buttonType="secondary" type="button" [disabled]="disabled()" (click)="choose('password')">改用主密码</button> }
+      @if (pinAvailable() && method() !== 'pin') { <button bitButton buttonType="secondary" type="button" [disabled]="disabled()" (click)="choose('pin')">改用 PIN</button> }
+      @if (biometricAvailable() && method() !== 'biometric') { <button bitButton buttonType="secondary" type="button" [disabled]="disabled()" (click)="choose('biometric')">改用指纹解锁</button> }
+    }
+    @if (notice()) { <p role="status" class="tw-text-muted">{{ notice() }}</p> }
+  </div>
+</bit-card>

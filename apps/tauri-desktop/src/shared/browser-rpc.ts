@@ -117,6 +117,7 @@ export const BrowserRpcOperationSchema = z.enum([
   'imports.commit',
   'imports.cancel',
   'password.generate',
+  'browser.generated.copy',
   'cards.list',
   'identities.list',
   'ssh.list',

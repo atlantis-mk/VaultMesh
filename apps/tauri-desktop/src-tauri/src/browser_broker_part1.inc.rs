@@ -148,6 +148,7 @@ pub const TAURI_BROWSER_SLICE_OPERATIONS: &[&str] = &[
     "imports.commit",
     "imports.cancel",
     "password.generate",
+    "browser.generated.copy",
     "password.health",
 ];
 
@@ -507,7 +508,7 @@ impl BrowserBrokerCore {
                 "该插件操作不被允许。",
             );
         }
-        if self.runtime.status().unlocked
+        if self.runtime.is_unlocked()
             && let Err(error) = self.runtime.refresh_from_disk()
         {
             return runtime_failure(envelope_request_id, error);
@@ -518,7 +519,7 @@ impl BrowserBrokerCore {
             self.confirmations.clear();
             self.record_event("vault-changed", now_millis);
         }
-        if requires_unlock(&request.operation) && !self.runtime.status().unlocked {
+        if requires_unlock(&request.operation) && !self.runtime.is_unlocked() {
             return rpc_failure(
                 envelope_request_id,
                 "unlock-required",
@@ -777,7 +778,7 @@ impl BrowserBrokerCore {
                 "该操作不支持浏览器确认。",
             );
         }
-        if requires_unlock(operation) && !self.runtime.status().unlocked {
+        if requires_unlock(operation) && !self.runtime.is_unlocked() {
             return rpc_failure(
                 request_id,
                 "unlock-required",

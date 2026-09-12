@@ -49,6 +49,7 @@ import {
   getAutofillAvailability,
   getAutofillCandidates,
   getEmailOtpCandidates,
+  getHttpPageUrl,
   getHttpOrigin,
   isTrustedExtensionPage,
   startAutomaticFillForTab,
@@ -213,6 +214,32 @@ export default defineBackground(() => {
       if (!isTrustedExtensionPage(sender)) return { status: "empty" as const };
       const cached = popupWorkspaceCache.read();
       return cached ? { status: "ready" as const, ...cached } : { status: "empty" as const };
+    }
+    if (parsed.data.kind === "vaultmesh.popup-suggestions.get") {
+      if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const, candidateIds: [] };
+      const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+      const topOrigin = getHttpOrigin(tab?.url);
+      const pageUrl = getHttpPageUrl(tab?.url);
+      if (!topOrigin || !pageUrl) return { status: "unsupported-page" as const, candidateIds: [] };
+      const results = await Promise.all(
+        // Card and identity candidates are field-contextual and the popup has
+        // no originating field. Only ask for target-bound kinds here; card and
+        // identity stay available in the complete list without being falsely
+        // presented as current-page suggestions.
+        (["login", "secret", "ssh"] as const).map((fieldKind) =>
+          getAutofillCandidates(topOrigin, fieldKind, pageUrl, "unknown"),
+        ),
+      );
+      if (results.some((result) => result.status !== "ready")) {
+        return {
+          status: results.some((result) => result.status === "locked") ? "locked" as const : "unavailable" as const,
+          candidateIds: [],
+        };
+      }
+      return {
+        status: "ready" as const,
+        candidateIds: [...new Set(results.flatMap((result) => result.candidates.map((candidate) => candidate.id)))],
+      };
     }
     if (parsed.data.kind === "vaultmesh.save-capture-popup.get") {
       if (!isTrustedExtensionPage(sender)) return { status: "none" as const };

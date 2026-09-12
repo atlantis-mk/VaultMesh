@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-for (const name of ['autofill-field-policy.json', 'browser-native-item-plan.ts', 'browser-native-login-plan.ts', 'browser-native-login-profile.ts', 'browser-recovery-file.ts']) {
+for (const name of ['autofill-field-policy.json', 'browser-generated-value.ts', 'browser-native-item-plan.ts', 'browser-native-login-plan.ts', 'browser-native-login-profile.ts', 'browser-recovery-file.ts']) {
   test(`isolated fork projection matches shared owner: ${name}`, () => {
     assert.equal(readFileSync(new URL(`../src/vaultmesh/vendor/${name}`, import.meta.url), 'utf8'),
       readFileSync(new URL(`../../tauri-desktop/src/shared/${name}`, import.meta.url), 'utf8'));

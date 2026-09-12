@@ -12,7 +12,7 @@ export class VaultMeshNativeCaptureBackground {
   private generation = 0;
   private saving = false;
   private activeSave?: { tabId: number; frameId: number };
-  private readonly offers = new Map<string, { nonce: string; expires: number; tabId: number; frameId: number; url: string; ids: Set<string>; itemKind?: "card" | "identity" }>();
+  private readonly offers = new Map<string, { nonce: string; expires: number; tabId: number; frameId: number; url: string; ids: Set<string>; itemKind?: "card" | "identity" | "ssh" | "secret" }>();
   constructor(private readonly client: VaultMeshRpcClient, private readonly current: () => Promise<boolean>) {}
 
   cancel(): void { this.generation++; this.offers.clear(); }
@@ -52,6 +52,7 @@ export class VaultMeshNativeCaptureBackground {
       if (request.kind === CAPTURE_STATUS) return true;
       for (const [id, offer] of this.offers) if (offer.expires <= Date.now()) this.offers.delete(id);
       if (request.kind === CAPTURE_OPTIONS) {
+        if ((request.itemKind === "ssh" || request.itemKind === "secret") && new URL(sender.url).protocol !== "https:") return null;
         if (this.offers.has(request.captureId) || this.offers.size >= 32) return null;
         const rows = request.itemKind ? await this.client.managedItem({ verb: "list", kind: request.itemKind }, () => generation === this.generation) : null;
         const result = request.itemKind ? { candidates: (Array.isArray(rows) ? rows : []).slice(0, 200).map((row) => ({ id: row.id!, title: row.title, subtitle: "" })) } : await this.client.candidates(sender.url, "login");
@@ -71,6 +72,7 @@ export class VaultMeshNativeCaptureBackground {
         const detail = request.itemId ? await this.client.managedItem({ verb: "detail", kind: request.itemKind, id: request.itemId }, () => generation === this.generation) : undefined;
         managed = new ManagedDraft(request.itemKind, detail as Record<string, unknown> | undefined);
         if (!request.itemId) managed.data.title = new URL(sender.url).hostname;
+        if (!request.itemId && request.itemKind === "secret") managed.data.website = new URL(sender.url).origin;
         applyCapturedItem(managed, request.values);
         if (!await this.current() || !await this.frameCurrent(sender) || generation !== this.generation || offer.expires <= Date.now()) return null;
         const input = managed.toInput();

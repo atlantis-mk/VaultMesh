@@ -38,6 +38,8 @@ origin/tab/frame/document/handle 重新验证并生成单次 assignment；不得
 
 ## 后果
 
+- 用户继续要求补齐 SSH/Secret 后，封闭计划可以扩展到这两类既有 Browser Required 能力。上游只原生拥有 SSH 公钥/标题，不具有 VaultMesh 服务 Secret 类型，因此采用原生 custom-field 精确匹配承载明确的适配来源，而不是新增全页面启发式或把 Secret 当 Login。HTTPS、空字段、显式选择、类型重验、二次验证和逐来源解密保持桌面控制；Passkey 私钥不属于此例外。具体规则由 Browser 专项规格拥有。
+
 - 经用户明确要求，原生无值计划扩展到 card/identity。Rust 只为已绑定字段返回该来源的值；content 可在该字段范围内复用原生格式转换（有效期、国家/地区、select），不得用该值重新规划其他字段。生成器结果可以通过 fresh-gesture 有界操作交给桌面剪贴板，或按当前文档的原生角色写入空的新密码/用户名字段；不保存历史、不自动提交。
 
 - Bitwarden 实验副本可以用原生识别和脚本生成器先生成不含秘密的 Login 字段计划，再通过既有

@@ -139,6 +139,7 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   'imports.commit': mutation(true),
   'imports.cancel': mutation(),
   'password.generate': copy,
+  'browser.generated.copy': copy,
   'password.health': metadata(),
 };
 

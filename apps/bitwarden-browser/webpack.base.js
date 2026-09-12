@@ -345,7 +345,7 @@ module.exports.buildConfig = function buildConfig(params) {
       minimize: ENV !== "development",
       minimizer: [
         new TerserPlugin({
-          exclude: [/content\/.*/, /notification\/.*/, /overlay\/.*/],
+          exclude: [/content\/(?!vaultmesh-native-fill\.js$).*/, /notification\/.*/, /overlay\/.*/],
           terserOptions: {
             // Replicate Angular CLI behaviour
             compress: {

@@ -1,6 +1,6 @@
 {
   "name": "@vaultmesh/tauri-desktop",
-  "version": "0.0.9-review",
+  "version": "0.0.10-review",
   "description": "VaultMesh Tauri 2 desktop client",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",

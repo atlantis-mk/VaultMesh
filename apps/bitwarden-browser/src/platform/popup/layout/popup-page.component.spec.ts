@@ -10,6 +10,9 @@ import { PopupPageComponent } from "./popup-page.component";
   template: `
     <popup-page [loading]="loading()">
       <span data-testid="content">Page content</span>
+      @if (showAboveScroll()) {
+        <div slot="above-scroll-area">Item type filter</div>
+      }
       @if (showFloatingAction()) {
         <button slot="floating-action" type="button" data-testid="floating-action">Add</button>
       }
@@ -21,6 +24,7 @@ import { PopupPageComponent } from "./popup-page.component";
 class TestHostComponent {
   readonly loading = signal(false);
   readonly showFloatingAction = signal(true);
+  readonly showAboveScroll = signal(false);
 }
 
 describe("PopupPageComponent", () => {
@@ -53,6 +57,37 @@ describe("PopupPageComponent", () => {
 
   it("projects content into the floating action slot", () => {
     expect(floatingAction()).not.toBeNull();
+  });
+
+  it("CT-BROWSER-001 shows asynchronously projected filters without a scroll event", () => {
+    host.showAboveScroll.set(true);
+    fixture.detectChanges();
+    const wrapper: HTMLElement = fixture.nativeElement.querySelector('[slot="above-scroll-area"]').parentElement;
+    expect(wrapper.classList).not.toContain("tw-invisible");
+    expect(wrapper.classList).not.toContain("tw-hidden");
+    expect(wrapper.classList).not.toContain("!tw-p-0");
+
+    host.showAboveScroll.set(false);
+    fixture.detectChanges();
+    expect(wrapper.matches(":not(:has(>*))")).toBe(true);
+    expect(wrapper.classList).toContain("[&:not(:has(>*))]:tw-hidden");
+
+    host.showAboveScroll.set(true);
+    fixture.detectChanges();
+    expect(wrapper.matches(":not(:has(>*))")).toBe(false);
+    expect(wrapper.classList).not.toContain("tw-invisible");
+  });
+
+  it("CT-BROWSER-001 collapses filters during loading and restores them without scrolling", () => {
+    host.showAboveScroll.set(true);
+    host.loading.set(true);
+    fixture.detectChanges();
+    const wrapper: HTMLElement = fixture.nativeElement.querySelector('[slot="above-scroll-area"]').parentElement;
+    expect(wrapper.classList).toContain("tw-hidden");
+    host.loading.set(false);
+    fixture.detectChanges();
+    expect(wrapper.classList).not.toContain("tw-hidden");
+    expect(wrapper.classList).not.toContain("tw-invisible");
   });
 
   /**

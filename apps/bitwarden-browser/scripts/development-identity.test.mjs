@@ -29,7 +29,8 @@ test("runtime entrypoints do not bootstrap cloud/account/Vault services", async 
   assert.ok(!background.includes("new MainBackground"));
   assert.ok(background.includes("new AutofillScriptGenerator()"));
   assert.ok(!popup.includes("bootstrapModule(AppModule"));
-  assert.ok(popup.includes("bootstrapApplication(VaultMeshSessionComponent"));
+  assert.ok(popup.includes("bootstrapApplication(VaultMeshPopupComponent"));
+  assert.ok(popup.includes("useClass: PopupLocationStrategy"));
 });
 for (const platform of ["darwin", "win32"]) test(`CT-BROWSER-001 ${platform} development host plan never broadens existing registration`, () => {
   const plan = nativeHostPlan({ platform, userHome: platform === "darwin" ? "/Users/synthetic" : "C:\\Users\\synthetic", appData: "C:\\Users\\synthetic\\AppData\\Roaming", temporaryDirectory: "/tmp", nativeHostPath: platform === "darwin" ? "/workspace/target/debug/vaultmesh-bitwarden-dev-host" : "C:\\workspace\\target\\debug\\vaultmesh-bitwarden-dev-host.exe" });

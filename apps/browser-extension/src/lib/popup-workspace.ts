@@ -36,6 +36,11 @@ const popupWorkspaceCacheResponseSchema = z.discriminatedUnion("status", [
   }),
 ]);
 
+const popupSuggestionsResponseSchema = z.object({
+  status: z.enum(["ready", "locked", "unavailable", "unsupported-page"]),
+  candidateIds: z.array(z.string().uuid()).max(600),
+});
+
 const defaultDependencies: PopupWorkspaceDependencies = {
   getStatus: getDesktopStatus,
   getSnapshot: getWorkspaceSnapshot,
@@ -97,6 +102,22 @@ export async function loadCachedPopupWorkspace(
   };
 }
 
+export async function loadPopupSuggestionIds(
+  getSuggestions: () => Promise<unknown> = () => browser.runtime.sendMessage({ kind: "vaultmesh.popup-suggestions.get" }),
+): Promise<Set<string> | null> {
+  const parsed = popupSuggestionsResponseSchema.safeParse(await getSuggestions().catch(() => null));
+  return parsed.success && parsed.data.status === "ready" ? new Set(parsed.data.candidateIds) : null;
+}
+
 export function shouldShowDesktopConnection(state: DesktopState, loading: boolean): boolean {
   return !loading && state !== "ready" && state !== "locked";
+}
+
+export function popupSessionInvalidation(
+  status: { unlocked: boolean },
+  events: Array<{ type: "vault-locked" | "pairing-revoked" | "operation-expired" | "desktop-shutdown" }>,
+): Extract<DesktopState, "locked" | "unavailable"> | null {
+  if (!status.unlocked || events.some((event) => event.type === "vault-locked")) return "locked";
+  if (events.some((event) => event.type === "pairing-revoked" || event.type === "desktop-shutdown")) return "unavailable";
+  return null;
 }

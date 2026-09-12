@@ -15,6 +15,14 @@ function fakeConnection(response: unknown): FakeConnection {
 }
 
 describe("VaultMeshRpcClient", () => {
+  it("preserves only known transport diagnostics for status reads", async () => {
+    const connection = fakeConnection(null);
+    const client = new VaultMeshRpcClient(connection as never);
+    connection.request.mockRejectedValueOnce(new Error("native-host-not-found"));
+    await expect(client.status()).rejects.toMatchObject({ code: "native-host-not-found" });
+    connection.request.mockRejectedValueOnce(new Error("private-path-and-secret"));
+    await expect(client.status()).rejects.toMatchObject({ code: "desktop-unavailable" });
+  });
   it("uses a fresh gesture for each unlock/lock and drops the password after sending", async () => {
     const connection = fakeConnection(null);
     const snapshots: any[] = [];

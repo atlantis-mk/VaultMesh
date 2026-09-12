@@ -261,6 +261,7 @@ export const PageInformationSaveResponseSchema = z.object({
 
 export const PopupMessageSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("vaultmesh.popup-workspace-cache.get") }),
+  z.object({ kind: z.literal("vaultmesh.popup-suggestions.get") }),
   z.object({ kind: z.literal("vaultmesh.save-capture-popup.get") }),
   z.object({
     kind: z.literal("vaultmesh.save-capture-popup.decision"),

@@ -1,44 +1,66 @@
 <section aria-label="凭据生成器">
-  <h2>凭据生成器</h2>
+  <bit-toggle-group fullWidth class="tw-mb-4" [selected]="preferences.mode" (selectedChange)="setMode($event)" label="生成类型">
+    <bit-toggle value="password">密码</bit-toggle>
+    <bit-toggle value="passphrase">口令短语</bit-toggle>
+    <bit-toggle value="username">用户名</bit-toggle>
+    <bit-toggle value="uuid">UUID</bit-toggle>
+  </bit-toggle-group>
+  <bit-card class="tw-flex tw-justify-between tw-gap-2 tw-mb-4">
+    <div class="tw-grow tw-flex tw-items-center tw-min-w-0 tw-break-all">
+      @if (value()) { <bit-color-password class="tw-font-mono" [password]="value()" [allowCopy]="false"></bit-color-password> }
+      @else { <span class="tw-text-muted">{{ loading() ? '读取参数…' : '点击生成新凭据' }}</span> }
+    </div>
+    <div class="tw-flex tw-items-center tw-gap-1">
+      <button bitIconButton="bwi-generate" buttonType="primaryGhost" label="生成" type="button" [disabled]="loading() || busy()" (click)="generate()"></button>
+      <button bitIconButton="bwi-clone" buttonType="primaryGhost" label="桌面受控复制" type="button" [disabled]="!value() || busy()" (click)="use('copy')"></button>
+    </div>
+  </bit-card>
+  <bit-card>
   <form (ngSubmit)="generate()" autocomplete="off">
-    <fieldset [disabled]="loading() || busy()">
-    <label>生成类型 <select name="generatorMode" [(ngModel)]="preferences.mode" (ngModelChange)="clear()"><option value="password">密码</option><option value="passphrase">口令短语</option><option value="username">用户名</option><option value="uuid">UUID</option></select></label>
+    <fieldset class="tw-border-0 tw-p-0 tw-m-0" [disabled]="loading() || busy()">
     @switch (preferences.mode) {
       @case ('password') {
         <bit-form-field><bit-label>长度（8–128）</bit-label><input bitInput type="number" name="passwordLength" [(ngModel)]="preferences.password.length" min="8" max="128" /></bit-form-field>
-        <label class="tw-block"><input type="checkbox" name="uppercase" [(ngModel)]="preferences.password.uppercase" /> 大写</label>
-        <label class="tw-block"><input type="checkbox" name="lowercase" [(ngModel)]="preferences.password.lowercase" /> 小写</label>
-        <label class="tw-block"><input type="checkbox" name="numbers" [(ngModel)]="preferences.password.numbers" /> 数字</label>
-        <label class="tw-block"><input type="checkbox" name="symbols" [(ngModel)]="preferences.password.symbols" /> 符号</label>
-        <label class="tw-block"><input type="checkbox" name="avoidAmbiguous" [(ngModel)]="preferences.password.avoidAmbiguous" /> 排除易混淆字符</label>
+        <bit-form-control><input bitCheckbox type="checkbox" name="uppercase" [(ngModel)]="preferences.password.uppercase" /><bit-label>大写</bit-label></bit-form-control>
+        <bit-form-control><input bitCheckbox type="checkbox" name="lowercase" [(ngModel)]="preferences.password.lowercase" /><bit-label>小写</bit-label></bit-form-control>
+        <bit-form-control><input bitCheckbox type="checkbox" name="numbers" [(ngModel)]="preferences.password.numbers" /><bit-label>数字</bit-label></bit-form-control>
+        <bit-form-control><input bitCheckbox type="checkbox" name="symbols" [(ngModel)]="preferences.password.symbols" /><bit-label>符号</bit-label></bit-form-control>
+        <bit-form-control><input bitCheckbox type="checkbox" name="avoidAmbiguous" [(ngModel)]="preferences.password.avoidAmbiguous" /><bit-label>排除易混淆字符</bit-label></bit-form-control>
         <bit-form-field><bit-label>最少数字（0–8）</bit-label><input bitInput type="number" name="minimumNumbers" [(ngModel)]="preferences.password.minimumNumbers" min="0" max="8" /></bit-form-field>
         <bit-form-field><bit-label>最少符号（0–8）</bit-label><input bitInput type="number" name="minimumSymbols" [(ngModel)]="preferences.password.minimumSymbols" min="0" max="8" /></bit-form-field>
       }
       @case ('passphrase') {
         <bit-form-field><bit-label>词数（3–8）</bit-label><input bitInput type="number" name="wordCount" [(ngModel)]="preferences.passphrase.wordCount" min="3" max="8" /></bit-form-field>
         <label>分隔符 <select name="separator" [(ngModel)]="preferences.passphrase.separator">@for (separator of ['-', '.', '_', ' ']; track separator) { <option [value]="separator">{{ separator === ' ' ? '空格' : separator }}</option> }</select></label>
-        <label class="tw-block"><input type="checkbox" name="capitalizeWords" [(ngModel)]="preferences.passphrase.capitalize" /> 首字母大写</label>
-        <label class="tw-block"><input type="checkbox" name="phraseNumber" [(ngModel)]="preferences.passphrase.includeNumber" /> 包含数字</label>
+        <bit-form-control><input bitCheckbox type="checkbox" name="capitalizeWords" [(ngModel)]="preferences.passphrase.capitalize" /><bit-label>首字母大写</bit-label></bit-form-control>
+        <bit-form-control><input bitCheckbox type="checkbox" name="phraseNumber" [(ngModel)]="preferences.passphrase.includeNumber" /><bit-label>包含数字</bit-label></bit-form-control>
       }
       @case ('username') {
         <bit-form-field><bit-label>长度（8–24）</bit-label><input bitInput type="number" name="usernameLength" [(ngModel)]="preferences.username.length" min="8" max="24" /></bit-form-field>
         <bit-form-field><bit-label>前缀（最多 8 位字母、数字、下划线或短横线）</bit-label><input bitInput name="usernamePrefix" [(ngModel)]="preferences.username.prefix" maxlength="8" /></bit-form-field>
         <label>风格 <select name="usernameStyle" [(ngModel)]="preferences.username.style"><option value="readable">可读单词</option><option value="random">随机字符</option></select></label>
-        <label class="tw-block"><input type="checkbox" name="usernameNumber" [(ngModel)]="preferences.username.includeNumber" /> 包含数字</label>
+        <bit-form-control><input bitCheckbox type="checkbox" name="usernameNumber" [(ngModel)]="preferences.username.includeNumber" /><bit-label>包含数字</bit-label></bit-form-control>
       }
       @case ('uuid') {
-        <label class="tw-block"><input type="checkbox" name="uuidHyphens" [(ngModel)]="preferences.uuid.hyphens" /> 保留短横线</label>
-        <label class="tw-block"><input type="checkbox" name="uuidUppercase" [(ngModel)]="preferences.uuid.uppercase" /> 大写</label>
-        <label class="tw-block"><input type="checkbox" name="uuidBraces" [(ngModel)]="preferences.uuid.braces" /> 花括号</label>
+        <bit-form-control><input bitCheckbox type="checkbox" name="uuidHyphens" [(ngModel)]="preferences.uuid.hyphens" /><bit-label>保留短横线</bit-label></bit-form-control>
+        <bit-form-control><input bitCheckbox type="checkbox" name="uuidUppercase" [(ngModel)]="preferences.uuid.uppercase" /><bit-label>大写</bit-label></bit-form-control>
+        <bit-form-control><input bitCheckbox type="checkbox" name="uuidBraces" [(ngModel)]="preferences.uuid.braces" /><bit-label>花括号</bit-label></bit-form-control>
       }
     }
     <button bitButton buttonType="primary" type="submit" [disabled]="busy()">生成</button>
     </fieldset>
   </form>
+  </bit-card>
   @if (notice()) { <p role="status">{{ notice() }}</p> }
   @if (value()) {
     <bit-form-field><bit-label>临时生成结果</bit-label><input bitInput #generatedResult readonly [value]="value()" autocomplete="off" [spellcheck]="false" /></bit-form-field>
-    <button bitButton buttonType="secondary" type="button" (click)="generatedResult.select()">选中后手动复制</button>
+    <button bitButton buttonType="secondary" type="button" (click)="use('copy')" [disabled]="busy()">桌面受控复制</button>
+    <button bitButton buttonType="secondary" type="button" (click)="prepareInsert()" [disabled]="busy()">选择插入页面</button>
+    @if (frames().length) {
+      <p>插入到打开插件前聚焦的空字段；密码仅限新密码/确认框。目标引用 60 秒内有效。</p>
+      <label>确认目标来源 <select name="generatorTarget" [(ngModel)]="selected"><option [ngValue]="null">请选择</option>@for (frame of frames(); track frame.frameId) { <option [ngValue]="frame">{{ frame.url }}</option> }</select></label>
+      <button bitButton buttonType="secondary" type="button" [disabled]="!selected || busy()" (click)="use('insert')">确认插入</button>
+    }
     <button bitButton buttonType="secondary" type="button" (click)="clear()">清除</button>
   }
 </section>

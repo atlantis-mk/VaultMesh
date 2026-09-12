@@ -1,3 +1,4 @@
+import { nativeConnectionCode, type ConnectionCode } from "./connection-diagnostics";
 // VaultMesh native host identity is fixed by the desktop/browser contract.
 // Do not inherit Bitwarden's `com.8bit.bitwarden` host or an environment value.
 const NATIVE_HOST_NAME = "com.vaultmesh.bitwarden.dev";
@@ -35,7 +36,8 @@ export class PersistentNativeConnection {
   #stableTimer: ReturnType<typeof setTimeout> | null = null;
   #reconnectAttempt = 0;
   #running = false;
-  #disconnectListeners = new Set<() => void>();
+  #lastFailure: ConnectionCode = "desktop-unavailable";
+  #disconnectListeners = new Set<(code: ConnectionCode) => void>();
 
   constructor(
     private readonly connect: () => NativePort = () => chrome.runtime.connectNative(NATIVE_HOST_NAME),
@@ -58,7 +60,7 @@ export class PersistentNativeConnection {
       this.#pending.set(message.requestId, { resolve, reject, timeout });
 
       if (!port) {
-        this.#settle(message.requestId, undefined, new Error("desktop-unavailable"));
+        this.#settle(message.requestId, undefined, new Error(this.#lastFailure));
         return;
       }
 
@@ -77,7 +79,7 @@ export class PersistentNativeConnection {
     this.#ensurePort();
   }
 
-  onDisconnected(listener: () => void): () => void {
+  onDisconnected(listener: (code: ConnectionCode) => void): () => void {
     this.#disconnectListeners.add(listener);
     return () => this.#disconnectListeners.delete(listener);
   }
@@ -100,18 +102,20 @@ export class PersistentNativeConnection {
     if (!this.#running || this.#port) return;
     try {
       const port = this.connect();
+      this.#lastFailure = "desktop-unavailable";
       this.#port = port;
       port.onMessage.addListener((response) => this.#handleMessage(port, response));
       port.onDisconnect.addListener(() => {
         // Consume the browser error without logging native-host details.
-        void chrome.runtime.lastError;
-        this.#handleDisconnect(port);
+        const code = nativeConnectionCode(chrome.runtime.lastError?.message);
+        this.#handleDisconnect(port, code);
       });
       this.#stableTimer = setTimeout(() => {
         if (port === this.#port) this.#reconnectAttempt = 0;
         this.#stableTimer = null;
       }, STABLE_CONNECTION_MS);
-    } catch {
+    } catch (error) {
+      this.#lastFailure = nativeConnectionCode(error instanceof Error ? error.message : undefined);
       this.#scheduleReconnect();
     }
   }
@@ -149,14 +153,15 @@ export class PersistentNativeConnection {
     }
   }
 
-  #handleDisconnect(port: NativePort | null): void {
+  #handleDisconnect(port: NativePort | null, code: ConnectionCode = "desktop-unavailable"): void {
     if (port !== this.#port) return;
     if (this.#stableTimer) clearTimeout(this.#stableTimer);
     this.#stableTimer = null;
     this.#port = null;
-    for (const listener of this.#disconnectListeners) listener();
+    this.#lastFailure = code;
+    for (const listener of this.#disconnectListeners) listener(code);
     for (const requestId of [...this.#pending.keys()]) {
-      this.#settle(requestId, undefined, new Error("desktop-unavailable"));
+      this.#settle(requestId, undefined, new Error(code));
     }
     this.#scheduleReconnect();
   }

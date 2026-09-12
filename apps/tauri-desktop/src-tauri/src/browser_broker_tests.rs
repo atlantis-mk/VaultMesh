@@ -5,6 +5,61 @@ const NOW: i64 = 1_800_000_000_000;
 const PASSWORD: &str = "browser lifecycle test password";
 
 #[test]
+fn native_managed_assignments_use_real_core_reprompt_and_replay_checks() {
+    let (root, _path, mut broker, secret) = setup("native-managed-plans");
+    assert_eq!(call(&mut broker, &secret, "vault.unlock", json!({"masterPassword":PASSWORD,"userGestureId":Uuid::new_v4()}), Uuid::new_v4())["ok"], true);
+    let key = ssh_key::PrivateKey::random(&mut rand_core::OsRng, ssh_key::Algorithm::Ed25519).expect("synthetic key");
+    let public_key = key.public_key().to_openssh().expect("synthetic public encoding");
+    let private_key = key.to_openssh(ssh_key::LineEnding::LF).expect("synthetic private encoding");
+    let key_item = json!({"title":"Synthetic SSH Key","recordKind":"key","host":null,"port":22,"username":"","password":null,"publicKey":public_key,"privateKey":private_key.as_str(),"keyPassphrase":null,"notes":null,"folder":null,"favorite":false,"masterPasswordReprompt":true});
+    for (kind, operation, item, source, expected) in [
+        ("card", "cards.add", json!({"title":"Synthetic Card","cardholderName":"Synthetic","cardNumber":"4111111111111111","expirationMonth":9,"expirationYear":2031,"securityCode":"123","pin":null,"notes":null,"folder":null,"favorite":false,"issuer":null,"network":"Visa","billingAddress":null,"masterPasswordReprompt":false}), "card:number", "4111111111111111"),
+        ("identity", "identities.add", json!({"title":"Synthetic Identity","firstName":"Synthetic","middleName":null,"lastName":"Name","birthDate":null,"organization":null,"department":null,"jobTitle":null,"website":null,"notes":null,"folder":null,"favorite":false,"emails":[],"phones":[],"addresses":[]}), "identity:fullName", "Synthetic Name"),
+        ("ssh", "ssh.add", json!({"title":"Synthetic SSH","recordKind":"account","host":"example.test","port":22,"username":"synthetic","password":"synthetic-ssh-password","publicKey":null,"privateKey":null,"keyPassphrase":null,"notes":null,"folder":null,"favorite":false,"masterPasswordReprompt":true}), "ssh:password", "synthetic-ssh-password"),
+        ("ssh", "ssh.add", key_item.clone(), "ssh:publicKey", public_key.as_str()),
+        ("ssh", "ssh.add", key_item.clone(), "ssh:privateKey", private_key.as_str()),
+        ("secret", "secrets.add", json!({"title":"Synthetic API key","kind":"api-key","secret":"synthetic-api-key","provider":null,"account":null,"environment":null,"scopes":["read"],"expiresAt":null,"website":"https://example.com","notes":null,"folder":null,"favorite":false,"masterPasswordReprompt":true}), "secret:api-key", "synthetic-api-key"),
+        ("secret", "secrets.add", json!({"title":"Synthetic protected Passkey record","kind":"authenticator-key","secret":"synthetic-internal-record","provider":null,"account":null,"environment":null,"scopes":["vaultmesh:passkey:v1"],"expiresAt":null,"website":"https://example.com","notes":null,"folder":null,"favorite":false,"masterPasswordReprompt":false}), "secret:authenticator-key", "")
+    ] {
+        let mut add = item; add["userGestureId"] = json!(Uuid::new_v4());
+        let added = call(&mut broker, &secret, operation, add, Uuid::new_v4());
+        assert_eq!(added["ok"], true, "{operation}: {}", added.get("error").unwrap_or(&Value::Null));
+        let handle = Uuid::new_v4();
+        let mut input = json!({"mode":"selection","userGestureId":Uuid::new_v4(),"nativeItemPlan":[{"handle":handle,"source":source}],
+            "discovery":{"version":1,"requestId":Uuid::new_v4(),"issuedAt":"2027-01-15T08:00:00.000Z","expiresAt":"2027-01-15T08:00:30.000Z",
+                "tabId":1,"topOrigin":"https://example.com","targetOrigin":"https://example.com","targetPageUrl":"https://example.com/checkout",
+                "selectedItem":{"kind":kind,"id":added["result"]["id"],"title":"Synthetic"},
+                "frames":[{"frameId":0,"documentId":Uuid::new_v4(),"frameOrigin":"https://example.com","fields":[{"handle":handle,"control":"input","inputType":"text","isEmpty":true,"autocomplete":[],"name":"","id":"","label":"","placeholder":"","context":"unknown"}]}]}});
+        if expected.is_empty() {
+            assert_eq!(added["result"]["isPasskey"], true);
+            assert_eq!(call(&mut broker, &secret, "browser.autofill.execute", input, Uuid::new_v4())["ok"], false);
+            let candidates = call(&mut broker, &secret, "browser.autofill.candidates",
+                json!({"topOrigin":"https://example.com","pageUrl":"https://example.com","fieldKind":"secret","pageContext":"developer-secret"}), Uuid::new_v4());
+            assert_eq!(candidates["ok"], true);
+            assert!(candidates["result"]["candidates"].as_array().unwrap().iter().all(|candidate| candidate["id"] != added["result"]["id"]));
+            continue;
+        }
+        if kind != "identity" {
+            assert_eq!(call(&mut broker, &secret, "browser.autofill.execute", input.clone(), Uuid::new_v4())["error"]["code"], "re-prompt-required");
+            input["discovery"]["requestId"] = json!(Uuid::new_v4()); input["masterPassword"] = json!("wrong-synthetic-password");
+            assert_eq!(call(&mut broker, &secret, "browser.autofill.execute", input.clone(), Uuid::new_v4())["ok"], false);
+            input["discovery"]["requestId"] = json!(Uuid::new_v4()); input["masterPassword"] = json!(PASSWORD);
+        }
+        let response = call(&mut broker, &secret, "browser.autofill.execute", input.clone(), Uuid::new_v4());
+        assert_eq!(response["ok"], true);
+        assert!(response["result"]["frames"][0]["assignments"] == json!([{"handle":handle,"value":expected,"overwrite":false}]), "exact single-source assignment");
+        if kind == "secret" {
+            let mut wrong_kind = input.clone(); wrong_kind["discovery"]["requestId"] = json!(Uuid::new_v4());
+            wrong_kind["nativeItemPlan"][0]["source"] = json!("secret:client-secret");
+            let response = call(&mut broker, &secret, "browser.autofill.execute", wrong_kind, Uuid::new_v4());
+            assert_eq!(response["ok"], false); // no assignment for a different Secret subtype
+        }
+        assert_eq!(call(&mut broker, &secret, "browser.autofill.execute", input, Uuid::new_v4())["ok"], false);
+    }
+    drop(broker); fs::remove_dir_all(root).expect("cleanup synthetic vault");
+}
+
+#[test]
 fn parallel_browser_identities_have_independent_authentication_and_unlock_owners() {
     let (root, path, mut existing, existing_secret) = setup("parallel-identities");
     let dev_secret = [0x6b; 32];
@@ -21,6 +76,21 @@ fn parallel_browser_identities_have_independent_authentication_and_unlock_owners
     assert_eq!(call(&mut development, &dev_secret, "items.list", json!({}), Uuid::new_v4())["error"]["code"], "unlock-required");
     drop(development); drop(existing);
     fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn authorization_fast_check_matches_status_without_constructing_item_summaries() {
+    let (root, _path, mut broker, secret) = setup("authorization-fast-check");
+    assert!(!broker.runtime.is_unlocked());
+    assert_eq!(broker.runtime.is_unlocked(), broker.runtime.status().unlocked);
+    assert_eq!(call(&mut broker, &secret, "vault.unlock", json!({ "masterPassword": PASSWORD, "userGestureId": Uuid::new_v4() }), Uuid::new_v4())["ok"], true);
+    assert!(broker.runtime.is_unlocked());
+    assert_eq!(broker.runtime.is_unlocked(), broker.runtime.status().unlocked);
+    broker.lock_for_system();
+    assert!(!broker.runtime.is_unlocked());
+    assert_eq!(call(&mut broker, &secret, "items.list", json!({}), Uuid::new_v4())["error"]["code"], "unlock-required");
+    drop(broker);
+    fs::remove_dir_all(root).expect("cleanup synthetic vault");
 }
 
 #[test]
@@ -464,8 +534,8 @@ fn operation_policy_is_exhaustive_and_confirmation_tokens_are_single_use() {
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(TAURI_BROWSER_SLICE_OPERATIONS.len(), 112);
-    assert_eq!(operations.len(), 112);
+    assert_eq!(TAURI_BROWSER_SLICE_OPERATIONS.len(), 113);
+    assert_eq!(operations.len(), 113);
     for operation in TAURI_BROWSER_SLICE_OPERATIONS {
         let owners = [
             is_broker_operation(operation),
@@ -481,6 +551,8 @@ fn operation_policy_is_exhaustive_and_confirmation_tokens_are_single_use() {
     assert!(requires_unlock("items.list"));
     assert!(!requires_gesture("cards.detail"));
     assert!(requires_gesture("cards.add"));
+    assert!(requires_unlock("browser.generated.copy"));
+    assert!(requires_gesture("browser.generated.copy"));
     assert!(requires_confirmation("items.delete"));
     assert!(!requires_confirmation("items.update"));
 

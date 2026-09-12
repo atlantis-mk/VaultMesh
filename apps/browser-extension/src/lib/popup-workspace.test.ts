@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { WorkspaceSnapshot } from "./desktop-rpc";
-import { loadCachedPopupWorkspace, loadPopupWorkspace, shouldShowDesktopConnection } from "./popup-workspace";
+import { loadCachedPopupWorkspace, loadPopupSuggestionIds, loadPopupWorkspace, popupSessionInvalidation, shouldShowDesktopConnection } from "./popup-workspace";
 
 const emptyWorkspace: WorkspaceSnapshot = {
   status: { unlocked: true, hasVault: true, itemCount: 0 },
@@ -61,5 +61,30 @@ describe("popup workspace loading", () => {
     expect(result).toEqual({ state: "locked", hasVault: true });
     expect(getSnapshot).not.toHaveBeenCalled();
     expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  it("accepts only a complete authoritative popup suggestion response", async () => {
+    const first = crypto.randomUUID();
+    const second = crypto.randomUUID();
+    await expect(loadPopupSuggestionIds(vi.fn().mockResolvedValue({
+      status: "ready",
+      candidateIds: [first, second, first],
+    }))).resolves.toEqual(new Set([first, second]));
+    await expect(loadPopupSuggestionIds(vi.fn().mockResolvedValue({
+      status: "unavailable",
+      candidateIds: [first],
+    }))).resolves.toBeNull();
+    await expect(loadPopupSuggestionIds(vi.fn().mockResolvedValue({
+      status: "ready",
+      candidateIds: ["not-an-id"],
+    }))).resolves.toBeNull();
+  });
+
+  it("invalidates the popup when desktop authority is locked, revoked, or stopped", () => {
+    expect(popupSessionInvalidation({ unlocked: false }, [])).toBe("locked");
+    expect(popupSessionInvalidation({ unlocked: true }, [{ type: "vault-locked" }])).toBe("locked");
+    expect(popupSessionInvalidation({ unlocked: true }, [{ type: "pairing-revoked" }])).toBe("unavailable");
+    expect(popupSessionInvalidation({ unlocked: true }, [{ type: "desktop-shutdown" }])).toBe("unavailable");
+    expect(popupSessionInvalidation({ unlocked: true }, [{ type: "operation-expired" }])).toBeNull();
   });
 });

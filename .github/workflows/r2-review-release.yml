@@ -6,7 +6,7 @@ on:
       version:
         description: "Review SemVer without a leading v (must start at 0.0.1-review)"
         required: true
-        default: "0.0.9-review"
+        default: "0.0.10-review"
         type: string
       notes:
         description: "Short reviewer-facing release notes"

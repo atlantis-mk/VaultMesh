@@ -49,6 +49,7 @@ describe("browser form discovery protocol", () => {
     const card = { kind: "card", id: crypto.randomUUID(), title: "Work card" };
     const identity = { kind: "identity", id: crypto.randomUUID(), title: "Ada" };
     expect(PopupMessageSchema.safeParse({ kind: "vaultmesh.popup-workspace-cache.get" }).success).toBe(true);
+    expect(PopupMessageSchema.safeParse({ kind: "vaultmesh.popup-suggestions.get" }).success).toBe(true);
     expect(PopupMessageSchema.safeParse({ kind: "vaultmesh.fill-confirmation.get" }).success).toBe(true);
     expect(PopupMessageSchema.safeParse({ kind: "vaultmesh.save-capture-popup.get" }).success).toBe(true);
     expect(PopupMessageSchema.safeParse({ kind: "vaultmesh.save-capture-popup.decision", captureId: crypto.randomUUID(), decision: "save" }).success).toBe(true);

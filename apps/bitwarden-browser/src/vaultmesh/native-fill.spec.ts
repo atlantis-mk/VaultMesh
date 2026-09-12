@@ -70,6 +70,34 @@ describe("CT-AUTOFILL-001 native Login adapter", () => {
   });
   afterEach(() => { content.invalidate(); background.cancel(); jest.restoreAllMocks(); });
 
+  it("overlaps explicit profile reads with value-less DOM collection", async () => {
+    let reply!: (value: unknown) => void;
+    client.loginProfile.mockImplementationOnce(() => new Promise(resolve => { reply = resolve; }));
+    const collect = jest.spyOn(content, "collect");
+    const pending = background.fill(id, undefined, async () => true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(client.loginProfile).toHaveBeenCalledTimes(1);
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(client.nativeLoginFill).not.toHaveBeenCalled();
+    reply({ id, customFields: [] });
+    expect(await pending).toMatchObject({ filled: 2 });
+  });
+  it.each(["navigation", "cancellation", "profile failure"])("discards overlapped collection after %s", async reason => {
+    let reply!: (value: unknown) => void;
+    let reject!: (error: Error) => void;
+    client.loginProfile.mockImplementationOnce(() => new Promise((resolve, fail) => { reply = resolve; reject = fail; }));
+    const pending = background.fill(id, undefined, async () => true);
+    const rejected = expect(pending).rejects.toThrow();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    if (reason === "navigation") history.replaceState({}, "", "/different-document");
+    if (reason === "cancellation") background.cancel();
+    if (reason === "profile failure") reject(new Error("synthetic-read-failure"));
+    else reply({ id, customFields: [] });
+    await rejected;
+    expect(client.nativeLoginFill).not.toHaveBeenCalled();
+    expect(document.querySelector<HTMLInputElement>('[name="password"]')!.value).toBe("");
+  });
+
   it.each(["A1b2", "12ab56", "a1234Z78"])("CT-EMAIL-003 uses native OTP planning and execution for %s without audit or nonempty-field overwrites", async (code) => {
     document.body.innerHTML = '<form><input name="otp" autocomplete="one-time-code"><input name="otp2" autocomplete="one-time-code" value="existing"><input name="search" value="query"></form>';
     client.emailCandidates.mockImplementation(async () => ({ candidates: [{ id, code, sourceDomain: "mail.example.test", receivedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 60 }] }));
@@ -135,6 +163,7 @@ describe("CT-AUTOFILL-001 native Login adapter", () => {
     expect(target?.automatic).toBe(true);
     expect(await pageMessage({ kind: FILL_AUTOMATIC, targetRef: target!.targetRef, context: target!.context })).toMatchObject({ filled: 1 });
     expect(wire.mode).toBe("automatic"); expect(wire.userGestureId).toBeUndefined();
+    expect(client.loginProfile).not.toHaveBeenCalled();
     expect(wire.discovery.frames[0].fields.every((field: any) => field.isEmpty && field.context === "login")).toBe(true);
     expect(document.querySelector<HTMLInputElement>('[name="username"]')!.value).toBe("synthetic-user");
   });

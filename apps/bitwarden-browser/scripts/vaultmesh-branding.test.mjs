@@ -78,9 +78,9 @@ test("CT-BROWSER-PACKAGE-001 popup and inline paths use bundled VaultMesh artwor
   for (const path of ["src/popup/index.ejs", "src/autofill/notification/bar.html", "src/sidepanel-disabled.html"]) assert.match(read(path), /<title>VaultMesh<\/title>/);
 });
 
-test("CT-BROWSER-PACKAGE-001 upstream license and protocol identities are not rewritten as branding", () => {
+test("CT-BROWSER-PACKAGE-001 keeps upstream licenses and the separately approved development identity", () => {
   assert.match(read("LICENSE.txt"), /Bitwarden License/);
   assert.match(read("LICENSE_GPL.txt"), /GNU GENERAL PUBLIC LICENSE/);
-  assert.equal(json("src/manifest.json").__firefox__browser_specific_settings.gecko.id, "{446900e4-71c2-419f-a6a7-df9c091e268b}");
-  assert.match(read("VAULTMESH-FORK.md"), /not.*install/i);
+  assert.equal(json("src/manifest.json").__firefox__browser_specific_settings.gecko.id, json("development-identity.json").firefoxId);
+  assert.match(read("VAULTMESH-FORK.md"), /not a production replacement/);
 });

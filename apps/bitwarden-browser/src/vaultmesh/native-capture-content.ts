@@ -1,6 +1,7 @@
 import { InlineMenuFieldQualificationService } from "../autofill/services/inline-menu-field-qualification.service";
 import { VaultMeshNativeFillContent, type CaptureField } from "./native-fill-content";
 import { createVaultMeshUuid } from "./uuid";
+import { credentialCustomSources } from "./native-item-planner";
 import { sendSessionMessage } from "./runtime";
 import { CAPTURE_OPTIONS, CAPTURE_SAVE, CAPTURE_STATUS, CaptureOptionsSchema, clearCapture } from "./native-capture-contracts";
 
@@ -52,7 +53,7 @@ export class VaultMeshNativeCaptureContent {
     this.refreshing = true;
     const url = location.href;
     try {
-      const fields = await this.content.captureFields();
+      const fields = (await this.content.captureFields()).filter((field) => !credentialCustomSources(field.field).length);
       if (url !== location.href) return;
       if (fields.length) this.fields = fields;
       for (const field of fields) {

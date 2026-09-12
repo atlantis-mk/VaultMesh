@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeftIcon, ClipboardPasteIcon, CreditCardIcon, FileKeyIcon, KeyRoundIcon, RefreshCwIcon, SaveIcon, TerminalIcon, UserRoundIcon } from "lucide-react";
 import { parseSshCommand } from "@vaultmesh/ssh-command-parser";
 
@@ -23,6 +23,7 @@ export const ADD_ITEM_OPTIONS = [
 
 type Values = Record<string, string | boolean>;
 const NO_CARD_NETWORK = "__no_card_network__";
+const EDIT_SESSION_LIFETIME_MS = 5 * 60_000;
 
 const defaults: Record<AddItemKind, Values> = {
   login: { title: "", username: "", password: "", url: "", totpSecret: "", additionalUrls: "", customFields: "", notes: "", folder: "", favorite: false, autofillOnPageLoad: true, masterPasswordReprompt: false },
@@ -33,6 +34,7 @@ const defaults: Record<AddItemKind, Values> = {
 };
 
 export function AddItemPanel({ kind, editId, onCancel, onSaved }: { kind: AddItemKind; editId?: string; onCancel: () => void; onSaved: () => void | Promise<void> }) {
+  const onCancelRef = useRef(onCancel);
   const [values, setValues] = useState<Values>(() => ({ ...defaults[kind] }));
   const [loading, setLoading] = useState(Boolean(editId));
   const [busy, setBusy] = useState(false);
@@ -42,6 +44,18 @@ export function AddItemPanel({ kind, editId, onCancel, onSaved }: { kind: AddIte
   const option = ADD_ITEM_OPTIONS.find((item) => item.kind === kind)!;
   const editing = Boolean(editId);
   const set = (key: string, value: string | boolean) => setValues((current) => ({ ...current, [key]: value }));
+  onCancelRef.current = onCancel;
+
+  useEffect(() => {
+    const expire = () => {
+      setValues({ ...defaults[kind] }); setError(null); setNotice(null);
+      onCancelRef.current();
+    };
+    const hidden = () => { if (document.hidden) expire(); };
+    const timer = setTimeout(expire, EDIT_SESSION_LIFETIME_MS);
+    document.addEventListener("visibilitychange", hidden);
+    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", hidden); };
+  }, [editId, kind]);
 
   useEffect(() => {
     if (!editId || kind === "login") return;

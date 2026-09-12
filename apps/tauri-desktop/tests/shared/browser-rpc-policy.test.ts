@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { NativeLoginPlanSchema } from '../../src/shared/browser-native-login-plan';
+import { NativeItemPlanSchema } from '../../src/shared/browser-native-item-plan';
+import { GeneratedValueSchema } from '../../src/shared/browser-generated-value';
 import { BrowserRecoveryFileInputSchema, PreparedBrowserRecoveryFileSchema } from '../../src/shared/browser-recovery-file';
 
 import { BROWSER_RPC_VERSION, BrowserRpcOperationSchema, type BrowserRpcRequest } from '../../src/shared/browser-rpc';
@@ -15,6 +17,16 @@ function request(operation: BrowserRpcRequest['operation'], input: Record<string
 }
 
 describe('browser RPC command authorization', () => {
+  it('CT-AUTOFILL-001/CT-BROWSER-003 closes item sources and requires gestures for generated copying', () => {
+    expect(NativeItemPlanSchema.safeParse([{ handle: crypto.randomUUID(), source: 'card:number' }]).success).toBe(true);
+    for (const source of ['card:pin', 'password', 'identity:secret']) expect(NativeItemPlanSchema.safeParse([{ handle: crypto.randomUUID(), source }]).success).toBe(false);
+    expect(authorizeBrowserRpc(request('browser.autofill.execute', { nativeItemPlan: [], mode: 'automatic' }), true)).toMatchObject({ authorized: false, code: 'invalid-request' });
+    expect(authorizeBrowserRpc(request('browser.generated.copy'), false).authorized).toBe(false);
+    expect(authorizeBrowserRpc(request('browser.generated.copy'), true).authorized).toBe(false);
+    expect(authorizeBrowserRpc(request('browser.generated.copy', { userGestureId: crypto.randomUUID() }), true).authorized).toBe(true);
+    expect(GeneratedValueSchema.safeParse({ mode: 'password', value: 'synthetic' }).success).toBe(true);
+    for (const value of ['', 'a'.repeat(1025), 'a\nb']) expect(GeneratedValueSchema.safeParse({ mode: 'password', value }).success).toBe(false);
+  });
   it('CT-RECOVERY-CODES-001 keeps both file phases on the same unlock/gesture/confirmation policy', () => {
     expect(BROWSER_RPC_POLICIES['items.recovery-codes.import-file']).toEqual({ capability: 'system-dialog', requiresUnlock: true, requiresGesture: true, requiresConfirmation: true });
     for (const input of [{}, { phase: 'prepare' }, { phase: 'finish', cleanupId: '33333333-3333-4333-8333-333333333333' }]) {

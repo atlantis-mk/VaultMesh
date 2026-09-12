@@ -124,6 +124,7 @@ impl BrowserFillService {
                         .or_else(|| summary.get("organization").and_then(Value::as_str)).unwrap_or(""),
                 }),
                 "secret" => {
+                    if summary.get("isPasskey").and_then(Value::as_bool).unwrap_or(false) { continue; }
                     if input.page_context != "developer-secret"
                         && !summary
                             .get("website")
@@ -245,7 +246,10 @@ impl BrowserFillService {
             }
         }
 
-        if selected.kind == "card" {
+        if selected.kind == "secret" && detail.get("isPasskey").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(invalid("Passkey 不能通过普通 Secret 填充。"));
+        }
+        if selected.kind == "card" || request.native_item_plan.is_some() && detail.get("masterPasswordReprompt").and_then(Value::as_bool).unwrap_or(false) {
             let password = request
                 .master_password
                 .as_deref()
@@ -260,6 +264,7 @@ impl BrowserFillService {
             &selected.kind,
             &detail,
             request.master_password.as_deref(),
+            request.native_item_plan.as_deref(),
         )?;
         let actual_title = detail
             .get("title")
@@ -649,11 +654,11 @@ fn parse_execute(
     if let Some(plan) = &request.native_item_plan {
         let kind = discovery.selected_item.as_ref().map(|item| item.kind.as_str()).unwrap_or("");
         if request.native_login_plan.is_some() || request.mode != "selection" || request._user_gesture_id.is_none()
-            || !matches!(kind, "card" | "identity") || discovery.frames.len() != 1
+            || !matches!(kind, "card" | "identity" | "ssh" | "secret") || discovery.frames.len() != 1
             || plan.is_empty() || plan.len() > 300 || plan.len() != field_count
             || (discovery.top_origin != discovery.target_origin && request.confirmed_target_origin.as_deref() != Some(discovery.target_origin.as_str()))
             || request.confirmed_target_origin.as_ref().is_some_and(|origin| origin != &discovery.target_origin)
-            || (kind == "card" && page.scheme() != "https")
+            || (kind != "identity" && page.scheme() != "https")
         { return Err(invalid("原生项目计划需要单 frame 显式选择与来源确认。")); }
         let mut planned = HashSet::new();
         for entry in plan {
@@ -681,12 +686,27 @@ fn native_item_key(source: &str) -> Option<&'static str> {
         "identity:address2" => "addressLine2", "identity:fullAddress" => "fullAddress",
         "identity:postalCode" => "postalCode", "identity:city" => "city",
         "identity:state" => "region", "identity:country" => "country",
-        "identity:phone" => "phone", "identity:company" => "organization", _ => return None,
+        "identity:phone" => "phone", "identity:company" => "organization",
+        "ssh:title" => "title", "ssh:host" => "host", "ssh:port" => "port", "ssh:username" => "username",
+        "ssh:password" => "password", "ssh:publicKey" => "publicKey", "ssh:privateKey" => "privateKey",
+        "ssh:keyPassphrase" => "keyPassphrase", "secret:account" => "account", "secret:provider" => "provider",
+        "secret:api-key" | "secret:access-token" | "secret:authenticator-key" | "secret:client-secret"
+        | "secret:webhook-secret" | "secret:database-credential" | "secret:recovery-codes" | "secret:certificate"
+        | "secret:software-license" | "secret:identity-document" | "secret:secure-note" | "secret:crypto-wallet"
+        | "secret:other" => "secret", _ => return None,
     })
 }
 
 fn valid_native_item_source(kind: &str, field: &DiscoveredField, source: &str) -> bool {
     let metadata = format!("{} {} {} {} {}", field.label, field.name, field.id, field.placeholder, field.autocomplete.join(" "));
+    if matches!(kind, "ssh" | "secret") {
+        return source.starts_with(&format!("{kind}:")) && native_item_key(source).is_some() && field.is_empty
+            && !excluded_fill_field(&metadata)
+            && !field.autocomplete.iter().any(|v| matches!(v.as_str(), "new-password" | "one-time-code"))
+            && (field.control == "textarea" || field.control == "input"
+                && (matches!(field.input_type.as_deref(), Some("text" | "password" | "email" | "tel"))
+                    || source == "ssh:port" && field.input_type.as_deref() == Some("number")));
+    }
     source.starts_with(&format!("{kind}:")) && native_item_key(source).is_some() && field.is_empty
         && !excluded_fill_field(&metadata)
         && !field.autocomplete.iter().any(|v| matches!(v.as_str(), "new-password" | "current-password" | "one-time-code"))
@@ -695,6 +715,8 @@ fn valid_native_item_source(kind: &str, field: &DiscoveredField, source: &str) -
 }
 
 fn native_item_value(values: &FillValues, source: &str) -> Option<String> {
+    if native_item_key(source) == Some("secret") && values.secret_kind.as_deref() != source.strip_prefix("secret:") { return None; }
+    if source == "identity:country" { return values.values.get("country").or_else(|| values.values.get("countryName")).cloned(); }
     native_item_key(source).and_then(|key| values.values.get(key)).cloned()
 }
 

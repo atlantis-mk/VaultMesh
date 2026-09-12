@@ -1,6 +1,6 @@
 <section [attr.aria-label]="definitions[kind].label">
   <header class="tw-flex tw-flex-wrap tw-gap-2 tw-mb-3">
-    <h2>{{ definitions[kind].label }}</h2>
+    <h2 class="tw-text-sm tw-font-semibold tw-grow">{{ definitions[kind].label }}</h2>
     <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="load()">列表</button>
     <button bitButton buttonType="primary" type="button" [disabled]="busy()" (click)="create()">新建{{ definitions[kind].label }}</button>
     @if (kind !== 'secret') { <button bitButton buttonType="secondary" type="button" [disabled]="busy()" (click)="load('trash')">回收站</button> }
@@ -56,28 +56,43 @@
       <button bitButton buttonType="secondary" type="button" (click)="cancel()">取消</button>
     </form>
   } @else if (fillTarget(); as target) {
-    @if ((kind === 'card' || kind === 'identity') && target.id) { <vaultmesh-item-fill [kind]="kind" [id]="target.id" [title]="target.title" [independent]="independent" /> }
+    @if (target.id) { <vaultmesh-item-fill [kind]="kind" [id]="target.id" [title]="target.title" [reprompt]="target['masterPasswordReprompt'] === true" [independent]="independent" /> }
     <button type="button" (click)="cancel()">取消并返回</button>
   } @else if (!busy()) {
-    <bit-form-field><bit-label>搜索{{ definitions[kind].label }}</bit-label><input bitInput name="managedSearch" type="search" [(ngModel)]="query" autocomplete="off" /></bit-form-field>
-    @for (row of filtered(); track row.id || row.trashId || row.revisionId) {
-      <article class="tw-my-4">
-        <h3>{{ row.title }}</h3>
-        <p class="tw-text-muted">{{ text(row, 'maskedNumber') || text(row, 'displayName') || text(row, 'host') || text(row, 'provider') }} {{ date(row) }}</p>
-        <div class="tw-flex tw-flex-wrap tw-gap-2">
-          @if (mode === 'list') {
-            @if (kind === 'card' || kind === 'identity') { <button bitButton buttonType="secondary" type="button" (click)="fillTarget.set(row)">填充</button> }
-            <button bitButton buttonType="secondary" type="button" (click)="edit(row)">编辑</button>
-            <button bitButton buttonType="danger" type="button" (click)="askDelete(row)">删除</button>
-            @if (kind !== 'secret') { <button bitButton buttonType="secondary" type="button" (click)="load('history', row.id)">历史</button> }
-            @for (field of copyFields(row); track field) { <button bitButton buttonType="secondary" type="button" (click)="askCopy(row, field)">复制{{ copyLabel(field) }}</button> }
-          } @else if (mode === 'trash') {
-            <button bitButton buttonType="secondary" type="button" (click)="askRecovery('restore-trash', row)">恢复</button>
-            <button bitButton buttonType="danger" type="button" (click)="askRecovery('purge', row)">永久删除</button>
-          } @else { <button bitButton buttonType="secondary" type="button" (click)="askRecovery('restore-history', row)">恢复完整版本</button> }
-        </div>
-      </article>
+    <bit-form-field><bit-label>搜索{{ definitions[kind].label }}</bit-label><input bitInput name="managedSearch" type="search" [ngModel]="query" (ngModelChange)="setQuery($event)" autocomplete="off" /></bit-form-field>
+    <bit-item-group>
+    @for (row of visibleRows(); track row.id || row.trashId || row.revisionId) {
+      <bit-item>
+        <button bit-item-content type="button" (click)="mode === 'list' ? edit(row) : askRecovery(mode === 'trash' ? 'restore-trash' : 'restore-history', row)">
+          <i slot="start" class="bwi" [class.bwi-credit-card]="kind === 'card'" [class.bwi-id-card]="kind === 'identity'" [class.bwi-key]="kind === 'ssh' || kind === 'secret'" aria-hidden="true"></i>
+          {{ row.title }}
+          <span slot="secondary">{{ text(row, 'maskedNumber') || text(row, 'displayName') || text(row, 'host') || text(row, 'provider') }} {{ date(row) }}</span>
+        </button>
+        <ng-container slot="end">
+          <bit-item-action><button bitIconButton="bwi-ellipsis-v" size="small" [label]="'更多选项 ' + row.title" type="button" [bitMenuTriggerFor]="rowMenu"></button></bit-item-action>
+          <bit-menu #rowMenu>
+            @if (mode === 'list') {
+              <button bitMenuItem type="button" (click)="fillTarget.set(row)">填充</button>
+              <button bitMenuItem type="button" (click)="edit(row)">编辑</button>
+              @for (field of copyFields(row); track field) { <button bitMenuItem type="button" (click)="askCopy(row, field)">复制{{ copyLabel(field) }}</button> }
+              @if (kind !== 'secret') { <button bitMenuItem type="button" (click)="load('history', row.id)">历史</button> }
+              <button bitMenuItem type="button" (click)="askDelete(row)">删除</button>
+            } @else if (mode === 'trash') {
+              <button bitMenuItem type="button" (click)="askRecovery('restore-trash', row)">恢复</button>
+              <button bitMenuItem type="button" (click)="askRecovery('purge', row)">永久删除</button>
+            } @else { <button bitMenuItem type="button" (click)="askRecovery('restore-history', row)">恢复完整版本</button> }
+          </bit-menu>
+        </ng-container>
+      </bit-item>
     } @empty { <p>暂无条目，或会话已失效。可点击列表重新读取。</p> }
+    </bit-item-group>
+    @if (pageCount() > 1) {
+      <nav aria-label="条目列表分页" class="tw-flex tw-items-center tw-justify-between tw-mt-3">
+        <button bitButton buttonType="secondary" type="button" [disabled]="currentPage() === 0" (click)="changePage(-1)">上一页</button>
+        <span>{{ currentPage() + 1 }} / {{ pageCount() }}</span>
+        <button bitButton buttonType="secondary" type="button" [disabled]="currentPage() + 1 >= pageCount()" (click)="changePage(1)">下一页</button>
+      </nav>
+    }
     @if (mode !== 'list' && rows().length) { <button bitButton buttonType="danger" type="button" (click)="askRecovery(mode === 'trash' ? 'empty-trash' : 'clear-history')">{{ mode === 'trash' ? '清空此类回收站' : '清空此条目历史' }}</button> }
   }
 </section>

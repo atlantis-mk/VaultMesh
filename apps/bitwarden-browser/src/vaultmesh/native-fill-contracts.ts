@@ -38,8 +38,8 @@ export const CollectedPageSchema = z.object({
 export type CollectedPage = z.infer<typeof CollectedPageSchema>;
 export type FieldMetadata = z.infer<typeof FieldMetadataSchema>;
 export const NativeCandidateSchema = z.object({
-  id: z.string().uuid(), kind: z.literal("login"), title: z.string().max(1024), subtitle: z.string().max(2048),
-  matchScope: z.string().max(64), autofillOnPageLoad: z.boolean(), masterPasswordReprompt: z.boolean(),
+  id: z.string().uuid(), kind: z.enum(["login", "card", "identity", "ssh", "secret"]), title: z.string().max(1024), subtitle: z.string().max(2048),
+  matchScope: z.string().max(64).default(""), autofillOnPageLoad: z.boolean().default(false), masterPasswordReprompt: z.boolean().default(false),
 }).strict();
 export const NativeCandidatesSchema = z.object({ candidates: z.array(NativeCandidateSchema).max(200), emailOtpCandidates: z.array(EmailCandidateSchema).max(20).optional() }).strict();
 export type NativeCandidate = z.infer<typeof NativeCandidateSchema>;
@@ -47,7 +47,7 @@ export type NativeCandidate = z.infer<typeof NativeCandidateSchema>;
 export const AssignmentSchema = z.object({
   kind: z.literal("vaultmesh.approved-fill"), requestId: z.string().uuid(),
   tabId: z.number().int().nonnegative(), topOrigin: z.string().url(), expiresAt: z.string().datetime(),
-  selectedItem: z.object({ kind: z.enum(["login", "card", "identity"]), id: z.string().uuid(), title: z.string().max(1_024) }).strict(),
+  selectedItem: z.object({ kind: z.enum(["login", "card", "identity", "ssh", "secret"]), id: z.string().uuid(), title: z.string().max(1_024) }).strict(),
   frames: z.array(z.object({
     frameId: z.number().int().nonnegative(), documentId: z.string().uuid(), frameOrigin: z.string().url(),
     assignments: z.array(z.object({ handle: z.string().uuid(), value: z.string().min(1).max(40_000), overwrite: z.boolean() }).strict()).min(1).max(300),

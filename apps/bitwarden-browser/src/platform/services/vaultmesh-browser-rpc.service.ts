@@ -1,4 +1,5 @@
 import { Injectable, OnDestroy } from "@angular/core";
+import { connectionMessage } from "../../vaultmesh/connection-diagnostics";
 import { z } from "zod";
 import { ManagedCommandSchema, parseManagedResult, managedMutation, type ManagedCommand, type ManagedResult } from "../../vaultmesh/managed-items";
 import { SECURITY_TOOLS, SecurityCommandSchema, type SecurityCommand } from "../../vaultmesh/security-tools";
@@ -29,6 +30,7 @@ export type SessionState = {
   error: string | null;
   revision?: number;
   sessionId?: string;
+  loadingStage?: "permission" | "status" | "logins";
 };
 const emptyState = (): SessionState => ({ status: "loading", vault: null, logins: [], busy: false, error: null });
 
@@ -46,10 +48,13 @@ export class VaultMeshBrowserRpcService implements OnDestroy {
   private fileDialogPending = false;
   private dialogStatusPending = false;
   private managedPending = false;
+  private connecting = false;
+  private refreshPending?: Promise<void>;
   private readonly invalidate = (message: unknown, sender: chrome.runtime.MessageSender) => {
     if (sender.id === chrome.runtime.id && !sender.tab &&
         message && typeof message === "object" && "kind" in message && message.kind === SESSION_INVALIDATED) {
       this.clear("unavailable");
+      this.stateSubject.next({ ...this.stateSubject.value, error: connectionMessage("code" in message ? message.code : undefined) });
     }
     return false;
   };
@@ -63,7 +68,7 @@ export class VaultMeshBrowserRpcService implements OnDestroy {
 
   private async poll(lifecycle: number): Promise<void> {
     if (!this.running || lifecycle !== this.lifecycle) return;
-    if (!this.stateSubject.value.busy) await this.refresh();
+    if (!this.stateSubject.value.busy) await this.refresh(false, false);
     else if (this.fileDialogPending && !this.dialogStatusPending) void this.checkDialogAuthorization(lifecycle);
     if (this.running && lifecycle === this.lifecycle) {
       this.timer = setTimeout(() => void this.poll(lifecycle), 3_000);
@@ -82,16 +87,34 @@ export class VaultMeshBrowserRpcService implements OnDestroy {
   }
 
   async connect(): Promise<void> {
+    if (this.connecting || this.refreshPending || this.stateSubject.value.busy) return;
+    this.connecting = true;
     const lifecycle = this.lifecycle;
+    this.generation++;
+    this.stateSubject.next({ ...emptyState(), busy: true, loadingStage: "permission" });
     // Request immediately in the click stack: browsers require a user gesture.
-    const granted = await requestNativePermission();
-    if (lifecycle !== this.lifecycle) return;
-    if (granted) await this.refresh();
-    else this.stateSubject.next({ ...this.stateSubject.value, error: "请允许连接桌面应用后重试。" });
+    try {
+      const granted = await requestNativePermission();
+      if (lifecycle !== this.lifecycle) return;
+      if (granted) {
+        this.stateSubject.next({ ...emptyState(), loadingStage: "status" });
+        await this.refresh(true);
+      } else this.stateSubject.next({ ...emptyState(), status: "unavailable", error: "未获得连接权限或等待已超时，请允许连接桌面应用后重试。" });
+    } catch (error) { if (lifecycle === this.lifecycle) this.fail(error); }
+    finally { this.connecting = false; }
   }
 
-  async refresh(): Promise<void> {
-    if (this.stateSubject.value.busy) return;
+  refresh(fromConnect = false, forceList = true): Promise<void> {
+    if (this.refreshPending) return this.refreshPending;
+    if (this.stateSubject.value.busy || this.connecting && !fromConnect) return Promise.resolve();
+    const pending = this.loadSnapshot(forceList).finally(() => {
+      if (this.refreshPending === pending) this.refreshPending = undefined;
+    });
+    this.refreshPending = pending;
+    return pending;
+  }
+
+  private async loadSnapshot(forceList: boolean): Promise<void> {
     const generation = ++this.generation;
     try {
       const response = StatusResponseSchema.parse(await sendSessionMessage({ kind: VAULTMESH_STATUS_MESSAGE }));
@@ -100,8 +123,18 @@ export class VaultMeshBrowserRpcService implements OnDestroy {
       const revision = "revision" in response ? response.revision : undefined;
       const sessionId = "sessionId" in response ? response.sessionId : undefined;
       if (response.status !== "ready") {
-        this.stateSubject.next({ status: response.status, vault, logins: [], busy: false, error: null, revision, sessionId });
+        this.stateSubject.next({ status: response.status, vault, logins: [], busy: false,
+          error: response.status === "unavailable" ? connectionMessage(response.code) : null, revision, sessionId });
         return;
+      }
+      const previous = this.stateSubject.value;
+      // Reuse only the visible page's summary snapshot after a fresh authorization
+      // and event check. Manual refreshes/mutations and legacy replies always read.
+      if (!forceList && previous.status === "ready" && sessionId !== undefined && revision !== undefined
+        && sessionId === previous.sessionId && revision === previous.revision
+        && vault?.itemCount === previous.vault?.itemCount) return;
+      if (this.stateSubject.value.status === "loading") {
+        this.stateSubject.next({ ...this.stateSubject.value, loadingStage: "logins" });
       }
       const logins = LoginSummariesSchema.parse(await this.action({ kind: SESSION_MESSAGE, action: "logins" }));
       if (generation !== this.generation) return;
@@ -145,7 +178,7 @@ export class VaultMeshBrowserRpcService implements OnDestroy {
   }
 
   cancelManaged(): void {
-    if (this.managedPending) {
+    if (this.managedPending || this.fillPending) {
       void sendSessionMessage({ kind: SESSION_MESSAGE, action: "cancel-fill" }).catch((): undefined => undefined);
       this.clear("unavailable");
     }
@@ -185,6 +218,32 @@ export class VaultMeshBrowserRpcService implements OnDestroy {
       return await this.itemAction({ kind: SESSION_MESSAGE, action: "security-tool", command: parsed.data, ...this.mutationIdentity() },
         (raw) => definition.result.parse(raw), definition.mutation, !definition.unlocked);
     } finally { this.managedPending = false; clearLoginSecrets(parsed.data); clearLoginSecrets(command); }
+  }
+
+  /** Two exact read-only operations, one busy lifecycle; no credentials or cached authorization. */
+  async readUnlockMethods(): Promise<ItemActionResult<unknown>[]> {
+    if (this.managedPending || this.stateSubject.value.busy || this.stateSubject.value.status !== "locked") {
+      return [{ ok: false, code: "operation-busy" }, { ok: false, code: "operation-busy" }];
+    }
+    this.managedPending = true;
+    const generation = ++this.generation;
+    this.stateSubject.next({ ...this.stateSubject.value, busy: true, error: null });
+    try {
+      return await Promise.all((["pin.status", "biometric.status"] as const).map(async (operation): Promise<ItemActionResult<unknown>> => {
+        try {
+          const raw = await this.action({ kind: SESSION_MESSAGE, action: "security-tool", command: { operation, input: {} }, ...this.mutationIdentity() });
+          if (generation !== this.generation) return { ok: false, code: "operation-expired" };
+          return { ok: true, value: SECURITY_TOOLS[operation].result.parse(raw) };
+        } catch (error) {
+          const code = error instanceof Error ? error.message : "invalid-broker-response";
+          if (generation === this.generation && !["operation-failed", "operation-busy", "operation-expired"].includes(code)) this.fail(error);
+          return { ok: false, code: "operation-failed" };
+        }
+      }));
+    } finally {
+      this.managedPending = false;
+      if (generation === this.generation) this.stateSubject.next({ ...this.stateSubject.value, busy: false });
+    }
   }
 
   async saveLogin(input: LoginSave, cleanupId?: string): Promise<ItemActionResult<LoginSummary>> {
@@ -289,11 +348,18 @@ export class VaultMeshBrowserRpcService implements OnDestroy {
     } finally { this.fillPending = false; if ("masterPassword" in message) message.masterPassword = ""; }
   }
 
-  async fillItem(itemKind: "card" | "identity", id: string, frame: FillFrame, masterPassword?: string): Promise<ItemActionResult<{ filled: number; auditRecorded: boolean }>> {
+  async fillItem(itemKind: "card" | "identity" | "ssh" | "secret", id: string, frame: FillFrame, masterPassword?: string): Promise<ItemActionResult<{ filled: number; auditRecorded: boolean }>> {
     const message = { kind: SESSION_MESSAGE, action: "item-fill", itemKind, id, frame, masterPassword, ...this.mutationIdentity() };
     this.fillPending = true;
     try { return await this.itemAction(message, (value) => z.object({ filled: z.number().int().min(0).max(300), auditRecorded: z.boolean() }).strict().parse(value), true); }
     finally { this.fillPending = false; message.masterPassword = ""; }
+  }
+
+  async generatedValue(command: "copy" | "insert", generated: { mode: "password" | "passphrase" | "username" | "uuid"; value: string }, frame?: FillFrame) {
+    const message = { kind: SESSION_MESSAGE, action: "generated-value", command, generated: { ...generated }, ...(frame ? { frame } : {}), ...this.mutationIdentity() };
+    this.fillPending = true;
+    try { return await this.itemAction(message, (value) => command === "copy" ? z.object({ clearsAt: z.number().int().nonnegative() }).strict().parse(value) : z.object({ filled: z.number().int().min(0).max(3) }).strict().parse(value), true); }
+    finally { message.generated.value = ""; this.fillPending = false; }
   }
 
   private mutationIdentity() {
@@ -365,12 +431,15 @@ export class VaultMeshBrowserRpcService implements OnDestroy {
     const status = code === "unlock-required" ? "locked" : code === "unpaired" ? "unpaired" : "unavailable";
     this.stateSubject.next({
       status, vault: null, logins: [], busy: false,
-      error: code === "unlock-required" ? "请重新解锁插件。" : "操作未完成，请检查桌面端连接或主密码后重试。",
+      error: code === "unlock-required" ? "请重新解锁插件。" : connectionMessage(code),
     });
   }
 
   private clear(status: VaultMeshPopupStatus): void {
     this.generation++;
+    // Invalidating authorization permits a fresh read; the old read's generation
+    // still prevents it from publishing a late status or login list.
+    this.refreshPending = undefined;
     this.stateSubject.next({ ...emptyState(), status });
   }
 

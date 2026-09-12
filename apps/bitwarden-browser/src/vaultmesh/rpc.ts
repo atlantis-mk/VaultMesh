@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { connectionCode, type ConnectionCode } from "./connection-diagnostics";
 import { ManagedCommandSchema, managedRequest, managedMutation, managedConfirmation, parseManagedResult, type ManagedCommand } from "./managed-items";
 import { PasskeyProxyRequestSchema } from "./vendor/model-contracts";
 import { SECURITY_TOOLS, SecurityCommandSchema, type SecurityCommand } from "./security-tools";
@@ -259,19 +260,26 @@ export class VaultMeshRpcClient {
     finally { clearAssignment(raw); }
   }
 
+  async copyGenerated(generated: { mode: string; value: string }) {
+    const input = { ...generated, userGestureId: createVaultMeshUuid() };
+    try { return z.object({ clearsAt: z.number().int().nonnegative() }).strict().parse(await this.request("browser.generated.copy", input)); }
+    finally { input.value = ""; }
+  }
+
   async loginProfile(id: string) {
     const result = NativeLoginProfileSchema.parse(await this.request("browser.autofill.profile", { id }));
     if (result.id !== id) throw new VaultMeshRpcError("invalid-broker-response", "填充目标不匹配。");
     return result;
   }
 
-  async candidates(pageUrl: string, context: "login" | "otp") {
+  async candidates(pageUrl: string, context: "login" | "otp" | "card" | "identity" | "ssh" | "secret") {
     return NativeCandidatesSchema.parse(await this.request("browser.autofill.candidates", {
-      topOrigin: new URL(pageUrl).origin, pageUrl, fieldKind: "login", pageContext: context,
+      topOrigin: new URL(pageUrl).origin, pageUrl, fieldKind: context === "login" || context === "otp" ? "login" : context,
+      pageContext: context === "secret" ? "developer-secret" : context === "ssh" ? "ssh-console" : context === "card" || context === "identity" ? "unknown" : context,
     }));
   }
 
-  async recordFill(input: { itemKind: "login" | "card" | "identity"; itemId: string; itemTitle: string; origin: string; fieldCount: number }): Promise<void> {
+  async recordFill(input: { itemKind: "login" | "card" | "identity" | "ssh" | "secret"; itemId: string; itemTitle: string; origin: string; fieldCount: number }): Promise<void> {
     await this.request("browser.fill.record", input);
   }
 
@@ -360,7 +368,7 @@ export class VaultMeshRpcClient {
     if (status.unlocked) throw new VaultMeshRpcError("invalid-broker-response", "锁定状态未确认。");
   }
 
-  onDisconnected(listener: () => void): () => void {
+  onDisconnected(listener: (code: ConnectionCode) => void): () => void {
     return this.connection.onDisconnected(listener);
   }
 
@@ -379,9 +387,9 @@ export class VaultMeshRpcClient {
     let response: unknown;
     try {
       response = await this.connection.request(request);
-    } catch {
+    } catch (error) {
       throw new VaultMeshRpcError(
-        ["items.add", "items.update", "items.delete"].includes(operation) ? "execution-unknown" : "desktop-unavailable",
+        ["items.add", "items.update", "items.delete"].includes(operation) ? "execution-unknown" : connectionCode(error instanceof Error ? error.message : undefined),
         "无法确认桌面端响应。",
       );
     } finally {

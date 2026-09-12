@@ -1,5 +1,89 @@
 use super::*;
 
+#[test]
+fn native_item_plans_bind_kind_empty_control_and_explicit_single_frame() {
+    let now = DateTime::parse_from_rfc3339("2027-01-15T08:00:01.000Z").unwrap().timestamp_millis();
+    let mut original = native_plan_fixture();
+    let plan = original.as_object_mut().unwrap().remove("nativeLoginPlan").unwrap();
+    original["nativeItemPlan"] = plan;
+    original["nativeItemPlan"][0]["source"] = json!("card:number");
+    original["discovery"]["selectedItem"]["kind"] = json!("card");
+    original["discovery"]["frames"][0]["fields"][0]["inputType"] = json!("text");
+    assert!(parse_execute(original.as_object().unwrap(), now).is_ok());
+    for (pointer, value) in [
+        ("/mode", json!("automatic")), ("/userGestureId", Value::Null),
+        ("/nativeItemPlan", Value::Null), ("/nativeItemPlan", json!([])),
+        ("/nativeItemPlan/0/source", json!("identity:firstName")),
+        ("/nativeItemPlan/0/source", json!("card:pin")),
+        ("/nativeItemPlan/0/handle", json!(Uuid::new_v4())),
+        ("/discovery/frames/0/fields/0/isEmpty", json!(false)),
+        ("/discovery/frames/0/fields/0/name", json!("couponCode")),
+        ("/discovery/frames/0/fields/0/inputType", json!("password")),
+        ("/discovery/selectedItem/kind", json!("login")),
+        ("/discovery/topOrigin", json!("https://other.test")),
+    ] {
+        let mut bad = original.clone(); *bad.pointer_mut(pointer).unwrap() = value;
+        assert!(parse_execute(bad.as_object().unwrap(), now).is_err(), "{pointer}");
+    }
+    let mut extra = original.clone(); extra["nativeLoginPlan"] = json!([]);
+    assert!(parse_execute(extra.as_object().unwrap(), now).is_err());
+    let mut value = original.clone(); value["discovery"]["frames"][0]["fields"][0]["value"] = json!("not-discovery");
+    assert!(parse_execute(value.as_object().unwrap(), now).is_err());
+    original["discovery"]["selectedItem"]["kind"] = json!("identity"); original["nativeItemPlan"][0]["source"] = json!("identity:country");
+    original["discovery"]["frames"][0]["fields"][0]["control"] = json!("select");
+    original["discovery"]["frames"][0]["fields"][0]["inputType"] = json!("select-one");
+    assert!(parse_execute(original.as_object().unwrap(), now).is_ok());
+    original["discovery"]["topOrigin"] = json!("https://other.test"); original["confirmedTargetOrigin"] = json!("https://example.test");
+    assert!(parse_execute(original.as_object().unwrap(), now).is_ok());
+}
+
+#[test]
+fn native_item_source_projection_cannot_select_other_secrets() {
+    let mut values = FillValues::default();
+    values.values.insert("cardNumber".into(), "4111111111111111".into());
+    values.values.insert("pin".into(), "not-a-fill-source".into());
+    assert_eq!(native_item_value(&values, "card:number"), Some("4111111111111111".into()));
+    assert_eq!(native_item_value(&values, "card:pin"), None);
+    values.values.insert("secret".into(), "synthetic-only".into());
+    values.secret_kind = Some("api-key".into());
+    assert_eq!(native_item_value(&values, "secret:api-key"), Some("synthetic-only".into()));
+    assert_eq!(native_item_value(&values, "secret:client-secret"), None);
+    assert_eq!(native_item_value(&values, "secret:passkey"), None);
+    identity_values(&mut values, &json!({"firstName":"Synthetic", "lastName":"Name", "addresses":[{"addressLine1":"Line One","addressLine2":"Line Two","countryCode":"US"}]}));
+    assert_eq!(native_item_value(&values, "identity:fullAddress"), Some("Line One, Line Two".into()));
+    assert_eq!(native_item_value(&values, "identity:fullName"), Some("Synthetic Name".into()));
+}
+
+#[test]
+fn native_credential_sources_require_explicit_https_empty_text_targets() {
+    let now = DateTime::parse_from_rfc3339("2027-01-15T08:00:01.000Z").unwrap().timestamp_millis();
+    for (kind, source) in [("ssh", "ssh:privateKey"), ("secret", "secret:api-key")] {
+        let mut original = native_plan_fixture();
+        let plan = original.as_object_mut().unwrap().remove("nativeLoginPlan").unwrap();
+        original["nativeItemPlan"] = plan;
+        original["nativeItemPlan"][0]["source"] = json!(source);
+        original["discovery"]["selectedItem"]["kind"] = json!(kind);
+        assert!(parse_execute(original.as_object().unwrap(), now).is_ok());
+        for (pointer, value) in [
+            ("/mode", json!("automatic")), ("/nativeItemPlan/0/source", json!("ssh:unsupported")),
+            ("/userGestureId", Value::Null), ("/discovery/frames/0/fields/0/isEmpty", json!(false)),
+            ("/discovery/frames/0/fields/0/autocomplete", json!(["new-password"])),
+            ("/discovery/frames/0/fields/0/autocomplete", json!(["one-time-code"])),
+            ("/discovery/frames/0/fields/0/name", json!("couponCode")),
+            ("/discovery/frames/0/fields/0/inputType", json!("number")),
+            ("/discovery/frames/0/fields/0/control", json!("select")),
+        ] {
+            let mut bad = original.clone(); *bad.pointer_mut(pointer).unwrap() = value;
+            assert!(parse_execute(bad.as_object().unwrap(), now).is_err(), "{pointer}");
+        }
+        let mut http = original.clone();
+        for pointer in ["/discovery/topOrigin", "/discovery/targetOrigin", "/discovery/targetPageUrl", "/discovery/frames/0/frameOrigin"] {
+            *http.pointer_mut(pointer).unwrap() = json!("http://example.test");
+        }
+        assert!(parse_execute(http.as_object().unwrap(), now).is_err());
+    }
+}
+
 fn native_plan_fixture() -> Value {
     let handle = Uuid::new_v4();
     json!({

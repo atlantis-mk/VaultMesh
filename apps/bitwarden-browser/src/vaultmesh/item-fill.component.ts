@@ -11,15 +11,16 @@ import type { FillFrame } from "./contracts";
       <option [ngValue]="null">请选择并确认实际目标来源</option>
       @for (frame of frames(); track frame.frameId) { <option [ngValue]="frame">{{ frame.url }}</option> }
     </select></label>
-    @if (kind === 'card') { <label>当前主密码 <input name="fillMasterPassword" type="password" [(ngModel)]="password" autocomplete="off" minlength="8" maxlength="1024" /></label> }
-    <button type="submit" [disabled]="busy() || !selected || (kind === 'card' && password.length < 8)">确认填充</button>
+    @if (kind === 'card' || reprompt) { <label>当前主密码 <input name="fillMasterPassword" type="password" [(ngModel)]="password" autocomplete="off" minlength="8" maxlength="1024" /></label> }
+    <button type="submit" [disabled]="busy() || !selected || ((kind === 'card' || reprompt) && password.length < 8)">确认填充</button>
     <p role="status">{{ notice() }}</p>
   </form>` })
 export class VaultMeshItemFillComponent implements OnInit, OnDestroy {
-  @Input({ required: true }) kind!: "card" | "identity";
+  @Input({ required: true }) kind!: "card" | "identity" | "ssh" | "secret";
   @Input({ required: true }) id!: string;
   @Input() title = "";
   @Input() independent = false;
+  @Input() reprompt = false;
   protected readonly frames = signal<FillFrame[]>([]);
   protected readonly notice = signal("");
   protected readonly busy = signal(false);
@@ -52,6 +53,6 @@ export class VaultMeshItemFillComponent implements OnInit, OnDestroy {
     this.busy.set(false); this.selected = null;
     this.notice.set(result.ok ? `已填入 ${result.value.filled} 个字段。` : "填充未确认，请检查页面、主密码或连接；不会自动重试。");
   }
-  private clear(): void { this.revision++; this.password = ""; this.selected = null; this.frames.set([]); if (this.busy()) this.session.cancelManaged(); this.busy.set(false); }
+  private clear(): void { this.revision++; this.password = ""; this.selected = null; this.frames.set([]); const pending = this.busy(); this.busy.set(false); if (pending) this.session.cancelManaged(); }
   ngOnDestroy(): void { this.clear(); if (this.timer) clearTimeout(this.timer); document.removeEventListener("visibilitychange", this.hide); window.removeEventListener("blur", this.blur); }
 }

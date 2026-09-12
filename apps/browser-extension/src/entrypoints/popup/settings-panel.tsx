@@ -1,26 +1,27 @@
 import { useEffect, useState } from "react";
-import { ArrowLeftIcon, ChevronRightIcon, HistoryIcon, LockKeyholeIcon, SettingsIcon, ShieldCheckIcon, type LucideIcon } from "lucide-react";
+import { ArchiveRestoreIcon, ArrowLeftIcon, ChevronRightIcon, HistoryIcon, LockKeyholeIcon, RefreshCwIcon, SettingsIcon, ShieldCheckIcon, type LucideIcon } from "lucide-react";
 
 import { ToastMessage, type ToastVariant } from "@/components/ToastMessage";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { confirmedDesktopRpc, desktopRpc, type FillEvent } from "@/lib/desktop-rpc";
+import { confirmedDesktopRpc, desktopRpc, getPasswordHealth, getUnlockHistory, type FillEvent, type PasswordHealth, type UnlockEvent } from "@/lib/desktop-rpc";
 import {
   loadPluginSecurityPolicy,
   savePluginSecurityPolicy,
   type PluginSecurityPolicy,
 } from "@/lib/plugin-security-policy";
+import { RecoveryPanel, type RecoveryTarget } from "./recovery-panel";
 
 type PinStatus = { enabled: boolean; locked: boolean; failureLimit: number; remainingAttempts: number };
 type BiometricStatus = { available: boolean; enabled: boolean };
 type DesktopSecuritySettings = { lockOnBlur: boolean; idleTimeoutMs: number; lockOnSleep: boolean; clipboardClearTimeoutMs: number; copySshPasswordOnLaunch: boolean };
-type SettingsSection = "menu" | "pin" | "security" | "device" | "history";
+type SettingsSection = "menu" | "pin" | "security" | "device" | "history" | "recovery";
 
 const fieldClass = "h-9 rounded-md border border-input bg-background px-3 text-sm";
 
-export function SettingsPanel({ fillHistory, onNotice, onLocked }: { fillHistory: FillEvent[]; onNotice: (message: string, variant?: ToastVariant) => void; onLocked: () => void }) {
+export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged, onNotice, onLocked }: { fillHistory: FillEvent[]; recoveryTargets: RecoveryTarget[]; onRecoveryChanged: () => void | Promise<void>; onNotice: (message: string, variant?: ToastVariant) => void; onLocked: () => void }) {
   const [pinStatus, setPinStatus] = useState<PinStatus | null>(null);
   const [pin, setPin] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -31,6 +32,9 @@ export function SettingsPanel({ fillHistory, onNotice, onLocked }: { fillHistory
   const [desktopSettings, setDesktopSettings] = useState<DesktopSecuritySettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [section, setSection] = useState<SettingsSection>("menu");
+  const [health, setHealth] = useState<PasswordHealth | null>(null);
+  const [unlockHistory, setUnlockHistory] = useState<UnlockEvent[]>([]);
+  const [auditBusy, setAuditBusy] = useState(false);
 
   async function load() {
     try {
@@ -94,6 +98,24 @@ export function SettingsPanel({ fillHistory, onNotice, onLocked }: { fillHistory
     }, "插件安全策略已更新。", false);
   }
 
+  async function loadSecuritySummary() {
+    if (auditBusy) return;
+    setAuditBusy(true);
+    try {
+      const [nextHealth, nextUnlockHistory] = await Promise.all([getPasswordHealth(), getUnlockHistory()]);
+      setHealth(nextHealth);
+      setUnlockHistory(nextUnlockHistory.slice(0, 10));
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "无法读取安全摘要。", "error");
+    } finally {
+      setAuditBusy(false);
+    }
+  }
+
+  if (section === "recovery") {
+    return <RecoveryPanel targets={recoveryTargets} onBack={() => setSection("menu")} onChanged={onRecoveryChanged} />;
+  }
+
   return (
     <ScrollArea className="-mr-3 min-h-0 flex-1">
       <div className="flex flex-col gap-3 pr-4">
@@ -102,6 +124,7 @@ export function SettingsPanel({ fillHistory, onNotice, onLocked }: { fillHistory
         <SettingsMenuItem icon={ShieldCheckIcon} title="插件 PIN 解锁" description={pinStatus?.enabled ? pinStatus.locked ? "已锁定" : "已启用" : "未启用"} onClick={() => setSection("pin")} />
         <SettingsMenuItem icon={SettingsIcon} title="安全策略" description="浏览器重启、锁屏与空闲锁定" onClick={() => setSection("security")} />
         <SettingsMenuItem icon={LockKeyholeIcon} title="设备验证与配对" description={`${biometric?.enabled ? "生物识别已启用" : "生物识别未启用"} · ${paired ? "已配对" : "未配对"}`} onClick={() => setSection("device")} />
+        <SettingsMenuItem icon={ArchiveRestoreIcon} title="回收站与历史" description="恢复或清理登录、支付卡、身份和 SSH" onClick={() => setSection("recovery")} />
         <SettingsMenuItem icon={HistoryIcon} title="最近填充记录" description={`${fillHistory.length} 条记录`} onClick={() => setSection("history")} />
       </> : <>
       <Button className="w-fit" size="sm" variant="ghost" onClick={() => setSection("menu")}><ArrowLeftIcon size={14} />返回设置</Button>
@@ -156,8 +179,10 @@ export function SettingsPanel({ fillHistory, onNotice, onLocked }: { fillHistory
       {section === "history" ? (
       <Card>
         <CardContent className="flex flex-col gap-3">
-          <div><h2 className="text-sm font-semibold">最近填充记录</h2><p className="text-xs text-muted-foreground">不记录填充值。</p></div>
+          <div className="flex items-start gap-2"><div className="min-w-0 flex-1"><h2 className="text-sm font-semibold">安全与使用记录</h2><p className="text-xs text-muted-foreground">不记录填充值。</p></div><Button aria-label="刷新安全摘要" size="icon-sm" variant="ghost" disabled={auditBusy} onClick={() => void loadSecuritySummary()}><RefreshCwIcon className={auditBusy ? "animate-spin" : ""} /></Button></div>
+          {health ? <div className="grid grid-cols-4 gap-2 rounded-lg bg-muted p-2 text-center text-xs"><span><strong className="block text-base">{health.score}</strong>评分</span><span><strong className="block text-base">{health.weakItemIds.length}</strong>弱密码</span><span><strong className="block text-base">{health.reusedItemIds.length}</strong>重复</span><span><strong className="block text-base">{health.oldItemIds.length}</strong>过旧</span></div> : <Button variant="outline" disabled={auditBusy} onClick={() => void loadSecuritySummary()}>读取密码健康和解锁记录</Button>}
           {fillHistory.length === 0 ? <ToastMessage id="empty-fill-history" message="暂无填充记录。" variant="info" /> : <div className="flex flex-col divide-y">{fillHistory.map((event) => <div key={event.eventId} className="flex items-start justify-between gap-3 py-2"><div className="min-w-0"><p className="truncate text-sm font-medium">{event.itemTitle}</p><p className="truncate text-xs text-muted-foreground">{event.origin}</p></div><div className="shrink-0 text-right"><p className="text-xs">{event.fieldCount} 个字段</p><p className="text-xs text-muted-foreground">{formatTime(event.occurredAt)}</p></div></div>)}</div>}
+          {unlockHistory.length > 0 ? <div className="border-t pt-2"><h3 className="mb-1 text-xs font-semibold">最近解锁</h3>{unlockHistory.map((event) => <p key={event.eventId} className="text-xs text-muted-foreground">{formatTime(event.occurredAt)} · {unlockSourceLabel(event.source)}</p>)}</div> : null}
         </CardContent>
       </Card>
       ) : null}
@@ -180,4 +205,8 @@ function SettingsMenuItem({ icon: Icon, title, description, onClick }: { icon: L
 function formatTime(occurredAt: number): string {
   const milliseconds = occurredAt < 10_000_000_000 ? occurredAt * 1_000 : occurredAt;
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(milliseconds);
+}
+
+function unlockSourceLabel(source: UnlockEvent["source"]): string {
+  return ({ desktop: "桌面主密码", "desktop-pin": "桌面 PIN", "extension-master-password": "插件主密码", "extension-biometric": "插件生物识别", "extension-pin": "插件 PIN" } as const)[source];
 }

@@ -5,10 +5,21 @@ The downloaded source declared version `2026.9.0`; the archive does not establis
 a verified Git commit. Upstream copyrights and GPL notices remain in place.
 This directory is not a production replacement or a release declaration.
 
+For realistic popup startup performance, use `npm run build:prod:chrome` (or
+`npm run build:prod:firefox`) and reload `build/` in the extension manager.
+These commands optimize JavaScript, but retain the independent development
+extension identity and Native Host; they do not declare a product release.
+Unminified `build:chrome` / watch builds remain available for debugging.
+
 ## Runtime boundary
 
-The popup bootstraps a standalone VaultMesh Angular session using Bitwarden form
-controls. The background starts only the original script generator and VaultMesh
+The popup bootstraps a standalone Angular shell using the original Bitwarden tab
+template, page/header, compact item/menu and generator presentation components.
+Vault, generator and settings have separate routes; the VaultMesh controller owns
+only remote state and privileged workflows. Routes stay in memory and never change
+the independent editor's exact authorized document URL. Navigation clears drafts
+and search; list pages render at most 25 summaries, with full-collection search.
+The background starts only the original script generator and VaultMesh
 RPC. Upstream account, SDK Vault, cloud sync, analytics, FIDO2 and notification
 entrypoints are not bootstrapped or injected by this build.
 
@@ -26,7 +37,15 @@ Implemented adapter paths:
 - PIN and biometric quick unlock/settings, desktop security settings, independent
   browser security preferences, pairing revocation, health and audit summaries.
 - Password/passphrase/username/UUID generation with persisted parameters only;
-  generated values expire after 60 seconds. Current result copying is manual selection.
+  generated values expire after 60 seconds. Explicit copying uses the desktop's
+  expiring clipboard; insertion binds the recently focused original field, native
+  new-password/username roles, empty targets, authorization and document lifetime.
+- Card/identity native value-less planning, qualified inline selection and explicit
+  popup frame confirmation. Cards always re-prompt; the original generator formats
+  expiry/select/country/state values only for the individually approved field.
+- Card/identity Save/Ignore capture with explicit type selection for mixed forms,
+  one-use frame/URL offers, and partial updates preserving unread card secrets and
+  complete identity collections. Submission is not treated as server success.
 - Explicit visible-page TOTP QR scan, direct content-to-popup response, candidate
   selection/overwrite confirmation and draft-only update. No QR UI is injected into pages.
 - Global email OTP candidates in popup and native-qualified inline menus, 4–8
@@ -139,16 +158,20 @@ and policy; parity tests prevent a second schema owner.
 
 ## Remaining migration and acceptance
 
-This is not yet the complete in-scope browser workflow surface. Card/identity/SSH/Secret
-native fill, non-Login capture and generator insertion/privileged-copy workflows remain.
-These are not hidden behind working-looking buttons.
+SSH/Secret fill and capture are connected alongside card/identity and generator
+insertion/copy. SSH public-key/title uses the original upstream branch; VaultMesh-only
+credential roles use its exact custom-field matcher and closed typed source plans.
+Only explicit HTTPS empty-field assignments are allowed; no generic key/password
+fallback, automatic credential disclosure or ordinary Secret access to Passkeys.
+This does not establish complete website parity: real-site and platform acceptance
+remain deferred by the user.
 Vault backup/restore, bulk file import and SSH scan/import are desktop-only for this
 migration, per the user's scope decision; they are not remaining extension work.
 Do not add popup/RPC entrypoints or new native-dialog lifecycle exceptions for them.
 Existing desktop/original-extension compatibility contracts and the separately
 approved recovery-code editor helper are retained.
-The current native plan contract authorizes only Login fields; complete non-Login
-planning needs a reviewed contract/ADR extension including selects and formatting.
+Native plans authorize Login plus closed card/identity/SSH/Secret sources;
+new sources require the desktop-owned contract, never a WXT matching fallback.
 The approved hidden-editor draft exception covers only recovery-code file dialogs;
 the desktop-only workflows do not require extending that exception.
 The new file dialog/editor-window flow still needs target-browser/native-dialog acceptance.
