@@ -230,7 +230,11 @@ desktop、browser、不同 pairing identity 或不同 Vault 已解锁均不能�
 scope、执行 Agent runtime unlock、取消或锁定；不得
 approve pairing、resolve action permission、读取 Vault detail 或调用主 renderer dispatcher。主密码、PIN、
 biometric result 与 Vault Key 不得进入 MCP tool schema、Agent IPC、shim stdin/stdout、日志或 audit。Agent
-quick-unlock record 与 OS credential namespace 必须独立于 desktop/browser。
+quick-unlock record 与 OS credential namespace 必须独立于 desktop/browser。桌面端用户启用 Touch ID 时，Rust
+privileged runtime 必须在同一次本地确认后同步 provision 独立 Agent biometric record；禁用、改密、Vault switch/restore
+或 factor drift 必须同时失效。每个新 unlock request 检测到有效 Agent biometric record 后必须自动尝试一次 Touch ID，
+不得因状态刷新或失败重复弹出；失败或取消后窗口必须显示明确错误并保留主密码 fallback，主密码表单必须支持 Enter
+和按钮提交。
 
 锁定状态下，`initialize`、`tools/list` 与 `vaultmesh_request_local_ui` 可以工作；账号
 目录及全部 Vault action 必须返回 typed `mcp-locked` 并唤起 Agent unlock window。MCP 不提供 session 状态查询、

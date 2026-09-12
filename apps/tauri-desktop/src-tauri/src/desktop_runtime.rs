@@ -51,6 +51,32 @@ where
     .map_err(|_| "Touch ID 快速解锁操作未能完成。".to_owned())?
 }
 
+pub(super) async fn with_agent_biometric<T, F>(
+    state: &RuntimeState,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&BiometricQuickUnlockService) -> Result<T, String> + Send + 'static,
+{
+    let biometric = Arc::clone(&state.agent_biometric);
+    tauri::async_runtime::spawn_blocking(move || {
+        let biometric = biometric
+            .lock()
+            .map_err(|_| "Agent Touch ID 快速解锁暂时不可用。".to_owned())?;
+        operation(&biometric)
+    })
+    .await
+    .map_err(|_| "Agent Touch ID 快速解锁操作未能完成。".to_owned())?
+}
+
+pub(super) async fn disable_biometrics(state: &RuntimeState) -> Result<BiometricStatus, String> {
+    let agent_result = with_agent_biometric(state, |biometric| biometric.disable()).await;
+    let desktop_result = with_biometric(state, |biometric| biometric.disable()).await;
+    agent_result?;
+    desktop_result
+}
+
 pub(super) fn validate_request(request: &DesktopRequest) -> Result<(), String> {
     if request.operation.is_empty() || request.operation.len() > 128 || !request.input.is_object() {
         return Err("请求参数无效。".into());
@@ -347,7 +373,20 @@ pub(super) async fn reconcile_quick_unlock_after_master_unlock(
     with_biometric(state, move |biometric| {
         biometric.disable_if_for_different_vault(&vault_path)
     })
-    .await
+    .await?;
+    let (vault_path, vault_key) = with_runtime(state, |runtime| runtime.quick_unlock_material())
+        .await
+        .map_err(|_| "请先使用主密码解锁保险库。".to_owned())?;
+    if with_biometric(state, |biometric| Ok(biometric.is_enabled())).await? {
+        with_agent_biometric(state, move |biometric| {
+            biometric
+                .provision(vault_path, vault_key.as_slice())
+                .map(|_| ())
+        })
+        .await
+    } else {
+        with_agent_biometric(state, |biometric| biometric.disable().map(|_| ())).await
+    }
 }
 
 pub(super) async fn restore_vault(
@@ -383,7 +422,7 @@ pub(super) async fn restore_vault(
     })
     .await?;
     with_pin(state, |pin| pin.disable()).await?;
-    with_biometric(state, |biometric| biometric.disable().map(|_| ())).await?;
+    disable_biometrics(state).await?;
     Ok(result)
 }
 

@@ -58,6 +58,8 @@ state；credential 缺失或 record 损坏必须 fail closed，不得静默轮�
   best-effort hint。
 - 平台 adapter 可以使用窄 Swift/Objective-C/Win32 调用，但不得复制 core 业务或持久化 secret 到
   非 OS-protected storage。
+- macOS 桌面 Touch ID 已启用时，锁定解锁页必须在状态就绪后自动发起一次系统认证；取消或失败后
+  保留手动 Touch ID 和主密码/PIN fallback，并以页面生命周期 guard 防止重渲染重复提示。
 - Rust desktop runtime 独占 macOS/Windows 登录项注册与查询；登录项只能传入固定
   `--autostart` 参数。首次默认注册使用 app-data 内的非秘密初始化标记区分用户后续显式关闭，
   renderer 不获得 autostart 插件 capability，也不能提供可执行文件路径或启动参数。

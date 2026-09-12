@@ -72,11 +72,18 @@ pub(super) fn agent_unlock_status(
         .map_err(|_| "Agent PIN 状态暂时不可用。".to_owned())?;
     agent_pin.disable_if_for_different_vault(&selected_vault_path)?;
     let pin = agent_pin.status();
+    let agent_biometric = state
+        .agent_biometric
+        .lock()
+        .map_err(|_| "Agent Touch ID 状态暂时不可用。".to_owned())?;
+    agent_biometric.disable_if_for_different_vault(&selected_vault_path)?;
+    let biometric = agent_biometric.status();
     Ok(json!({
         "now": now,
         "request": request,
         "access": access,
-        "pin": pin
+        "pin": pin,
+        "biometric": biometric
     }))
 }
 
@@ -209,6 +216,37 @@ pub(super) fn agent_unlock_pin(
 }
 
 #[tauri::command]
+pub(super) async fn agent_unlock_biometric(
+    window: WebviewWindow,
+    state: State<'_, RuntimeState>,
+) -> Result<Value, String> {
+    require_unlock_window(&window)?;
+    let displayed = current_request(&state)?;
+    prune_expired_agent_access(&state, unix_millis())?;
+    let credential = with_agent_biometric(&state, |biometric| biometric.unlock()).await?;
+    let selected_vault_path = state
+        .runtime
+        .lock()
+        .map_err(|_| "保险库运行时暂时不可用。".to_owned())?
+        .current_path()
+        .canonicalize()
+        .map_err(|_| "无法定位当前保险库。".to_owned())?;
+    if credential.0 != selected_vault_path {
+        return Err("Agent Touch ID 不属于当前保险库，请使用主密码解锁。".to_owned());
+    }
+    state.agent_vault_access.unlock_with_quick_key(
+        displayed.client_id,
+        credential.0,
+        credential.1.as_slice(),
+    )?;
+    if let Err(error) = finish_unlock(&state, &displayed) {
+        state.agent_vault_access.lock_client(displayed.client_id);
+        return Err(error);
+    }
+    Ok(json!({ "unlocked": true }))
+}
+
+#[tauri::command]
 pub(super) fn agent_unlock_cancel(
     window: WebviewWindow,
     state: State<'_, RuntimeState>,
@@ -317,6 +355,7 @@ mod tests {
                 "allow-agent-unlock-set-scope",
                 "allow-agent-unlock-password",
                 "allow-agent-unlock-pin",
+                "allow-agent-unlock-biometric",
                 "allow-agent-unlock-cancel"
             ])
         );

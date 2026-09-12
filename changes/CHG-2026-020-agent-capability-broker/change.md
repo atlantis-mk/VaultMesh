@@ -20,6 +20,13 @@ UI 裁决 exact/action-class/capability 范围的一次、连接期、持久允�
 
 ## 预期行为
 
+### 2026-09-09 维护者增量：MCP Touch ID 优先解锁与主密码反馈
+
+维护者要求桌面端启用 Touch ID 时同步 provision 使用独立 record/OS credential namespace 的 Agent Touch ID
+凭据。每个新的 MCP unlock request 默认自动尝试一次 Touch ID；失败或取消后不得因刷新重复触发，窗口必须显示
+明确错误，并保留支持 Enter 与按钮提交的主密码表单。该增量不复用 desktop/browser session，不改变 Agent lease、
+scope、timeout 或 MCP/IPC factor 隔离。
+
 ### 2026-07-29 维护者增量：专属 OpenSSH 主机别名
 
 维护者要求 Agent 可以为 exact SSH 账号一次性生成服务器专属 ED25519 key、安装公钥并写入本机
@@ -214,12 +221,23 @@ reserved scope 只保留 renderer-hidden、fail-closed 读取，禁止因移除 
 | `AGENT-019` | `REQ-AGENT-003`、`NFR-COMPAT-001` | Historical：Vault 统一写入 format 3，并曾保留一次性 development format 1 迁移 | `CT-AGENT-ACCOUNT-001`、`CT-COMPAT-001` | Superseded by `AGENT-020`；单一 writer 结果继续有效 |
 | `AGENT-020` | `REQ-AGENT-003`、`NFR-COMPAT-001` | format 3 成为唯一 create/write/read 格式；删除所有旧格式 reader、迁移、专用备份、quick-unlock 特判与 fixture | `CT-AGENT-ACCOUNT-001`、`CT-COMPAT-001` | Pass（Core/FFI 严格 reader 与全非当前版本 pre-KDF refusal 通过；完整 Gate 证据见下） |
 | `AGENT-021` | `REQ-AGENT-004`、`NFR-AGENT-001` | R3 exact-only OpenSSH host setup：软件内加密 SSH key/binding、只读 alias 卡片/编辑表单、专属 ED25519 key、远端安装/验证、pending recovery、无 manifest、managed alias/config 与 no-secret response | `CT-AGENT-PROTOCOL-001`、`CT-AGENT-SSH-001`、`CT-AGENT-SECRET-001`、`AT-AGENT-SSH-001` | Implementing（registry/ActionPlan、Vault 原子写/重启恢复、安全 alias 投影、卡片/编辑页、本地 owner-only create-new、无 manifest、alias/config/symlink/target drift、pending reuse 与无 key/path response 自动化 Pass；真实服务器 packaged `ssh <alias>` AT 待完成） |
+| `AGENT-022` | `REQ-AGENT-001` | 独立 Agent Touch ID provision/失效、每 request 单次自动提示、错误反馈与主密码 Enter/按钮 fallback | `CT-AGENT-UNLOCK-001`、`AT-AGENT-UNLOCK-001` | Implementing（自动化 Pass；packaged Touch ID AT 待执行） |
 
 依赖顺序固定为：`AGENT-000 → 001 → 002 → 003 → 004 → 005`。HTTP 可以在 SSH non-PTY
 稳定后并行；PTY 必须晚于 SSH non-PTY，managed web 必须晚于 HTTP/output policy；客户端 E2E 和
 平台 Gate 最后执行。任何阶段失败不得以 mock、TODO、静态成功响应或降低测试代替。
 
 ### 实施证据
+
+- `AGENT-022` MCP Touch ID 优先解锁（2026-09-09）：新增独立 `agent-biometric-unlock.json` 与
+  `com.vaultmesh.desktop.agent-biometric` OS credential namespace；桌面 Touch ID enable/成功 unlock 或主密码
+  unlock 会在 Rust privileged runtime 内幂等 provision，disable、create、restore、改密与 Vault drift 同步失效。
+  `agent-unlock` capability 新增唯一 biometric command，renderer 对每个 `unlockRef` 自动调用一次；失败显示内联
+  alert，并保留主密码 form 的 Enter/按钮路径。RED 证据为新增两条 renderer test 分别因无 biometric invoke、无
+  alert 失败；GREEN 为 desktop Vitest 30 files / 142 tests、TypeScript typecheck、Rust focused capability test 与
+  已编译 Tauri Rust test binary 243 passed / 1 ignored。直接 `cargo test -p vaultmesh-tauri-desktop` 的静态库归档因
+  主机仅余约 660 MiB 报 `No space left on device`；真实 packaged Touch ID `AT-AGENT-UNLOCK-001` 待执行，Work 保持
+  Implementing。
 
 > 2026-07-27 及更早的条目记录当时已被 `ADR-0012` 取代的实现证据，不代表当前兼容面；当前结果以
 > `AGENT-020`、`AGENT-021` 和下方清理证据为准。

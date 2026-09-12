@@ -2,11 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { REGEXP_ONLY_DIGITS } from 'input-otp';
-import { LockKeyholeIcon } from 'lucide-react';
-import { useEffect, useState, type FormEvent } from 'react';
+import { FingerprintIcon, LockKeyholeIcon } from 'lucide-react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import { ErrorBanner } from './renderer/src/components/ErrorBanner';
 import { PasswordField } from './renderer/src/components/PasswordField';
 import { Alert, AlertDescription, AlertTitle } from './renderer/src/components/ui/alert';
 import { Badge } from './renderer/src/components/ui/badge';
@@ -36,6 +35,7 @@ interface UnlockStatus {
     settings: { unlockScope: 'connection' | 'client' };
   };
   pin: { enabled: boolean; locked: boolean; remainingAttempts: number };
+  biometric: { available: boolean; enabled: boolean; kind: 'touchId' | null };
 }
 
 function message(reason: unknown): string {
@@ -47,13 +47,15 @@ function message(reason: unknown): string {
 export function AgentUnlockWindow() {
   const [status, setStatus] = useState<UnlockStatus | null>(null);
   const [credential, setCredential] = useState('');
-  const [masterPassword, setMasterPassword] = useState(false);
+  const [usePin, setUsePin] = useState(false);
   const [busy, setBusy] = useState(false);
   const [expired, setExpired] = useState(false);
   const [error, setError] = useState('');
   const [scopeBusy, setScopeBusy] = useState(false);
   const [deadline, setDeadline] = useState(0);
   const [remaining, setRemaining] = useState(AGENT_UNLOCK_WAIT_MILLIS);
+  const biometricAttempt = useRef('');
+  const factorRequest = useRef('');
 
   const refresh = async (): Promise<void> => {
     const next = await invoke<UnlockStatus>('agent_unlock_status');
@@ -103,24 +105,23 @@ export function AgentUnlockWindow() {
     return () => window.clearInterval(timer);
   }, [deadline]);
 
-  const pinPreferred = Boolean(status?.pin.enabled && !status.pin.locked && !masterPassword);
+  const pinPreferred = Boolean(status?.pin.enabled && !status.pin.locked && usePin);
   const seconds = Math.max(0, Math.ceil(remaining / 1_000));
   const progress = Math.max(0, Math.min(100, remaining / AGENT_UNLOCK_WAIT_MILLIS * 100));
 
-  const unlock = async (value: string): Promise<void> => {
+  const unlock = async (command: 'agent_unlock_password' | 'agent_unlock_pin' | 'agent_unlock_biometric', input?: Record<string, string>): Promise<void> => {
     if (busy) return;
     setBusy(true);
     setError('');
     try {
-      if (pinPreferred) await invoke('agent_unlock_pin', { pin: value });
-      else await invoke('agent_unlock_password', { password: value });
+      if (input) await invoke(command, input);
+      else await invoke(command);
       setCredential('');
       setBusy(false);
       const next = await invoke<UnlockStatus>('agent_unlock_status');
       if (next.request) {
         setStatus(next);
         setExpired(false);
-        setMasterPassword(false);
       } else {
         await getCurrentWindow().hide();
       }
@@ -132,9 +133,23 @@ export function AgentUnlockWindow() {
     }
   };
 
+  useEffect(() => {
+    const unlockRef = status?.request?.unlockRef;
+    if (!unlockRef || factorRequest.current === unlockRef) return;
+    factorRequest.current = unlockRef;
+    setUsePin(Boolean(status.pin.enabled && !status.pin.locked && !status.biometric.enabled));
+  }, [status?.request?.unlockRef, status?.pin.enabled, status?.pin.locked, status?.biometric.enabled]);
+
+  useEffect(() => {
+    const unlockRef = status?.request?.unlockRef;
+    if (!unlockRef || !status.biometric.enabled || biometricAttempt.current === unlockRef) return;
+    biometricAttempt.current = unlockRef;
+    void unlock('agent_unlock_biometric');
+  }, [status?.request?.unlockRef, status?.biometric.enabled]);
+
   const submit = (event: FormEvent): void => {
     event.preventDefault();
-    if (!pinPreferred) void unlock(credential);
+    if (!pinPreferred) void unlock('agent_unlock_password', { password: credential });
   };
 
   const cancel = async (): Promise<void> => {
@@ -199,7 +214,7 @@ export function AgentUnlockWindow() {
       <section className="min-h-0 flex-1 overflow-y-auto px-5 pb-4">
         <form id="agent-unlock-form" onSubmit={submit}>
           <FieldGroup>
-            <ErrorBanner message={error} />
+            {error ? <Alert variant="destructive" role="alert"><AlertTitle>解锁失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
             <div className="flex items-center justify-between gap-4 rounded-md border p-3">
               <div className="grid gap-1">
                 <FieldLabel htmlFor="agent-unlock-shared-scope">同一客户端只解锁一次</FieldLabel>
@@ -210,7 +225,7 @@ export function AgentUnlockWindow() {
             {!status.access.hasVault ? <Alert variant="destructive"><AlertTitle>尚未创建保险库</AlertTitle><AlertDescription>请先在 VaultMesh 主窗口创建保险库。</AlertDescription></Alert> : pinPreferred ? (
               <Field>
                 <FieldLabel className="justify-center text-center" htmlFor="agent-unlock-pin">Agent 专用 PIN</FieldLabel>
-                <InputOTP id="agent-unlock-pin" value={credential} maxLength={6} pattern={REGEXP_ONLY_DIGITS} autoComplete="off" pushPasswordManagerStrategy="none" autoFocus disabled={busy} containerClassName="justify-center" onChange={setCredential} onComplete={(value) => void unlock(value)}>
+                <InputOTP id="agent-unlock-pin" value={credential} maxLength={6} pattern={REGEXP_ONLY_DIGITS} autoComplete="off" pushPasswordManagerStrategy="none" autoFocus disabled={busy} containerClassName="justify-center" onChange={setCredential} onComplete={(value) => void unlock('agent_unlock_pin', { pin: value })}>
                   <InputOTPGroup><InputOTPSlot index={0} mask /><InputOTPSlot index={1} mask /><InputOTPSlot index={2} mask /></InputOTPGroup>
                   <InputOTPSeparator />
                   <InputOTPGroup><InputOTPSlot index={3} mask /><InputOTPSlot index={4} mask /><InputOTPSlot index={5} mask /></InputOTPGroup>
@@ -222,7 +237,8 @@ export function AgentUnlockWindow() {
       </section>
       <footer className="flex flex-wrap justify-between gap-2 border-t bg-muted/50 p-3">
         <Button variant="outline" disabled={busy} onClick={() => void cancel()}>取消</Button>
-        {status.access.hasVault && status.pin.enabled ? <Button variant="ghost" disabled={busy || status.pin.locked} onClick={() => { setCredential(''); setMasterPassword(pinPreferred); }}>{pinPreferred ? '改用主密码' : '改用 Agent PIN'}</Button> : null}
+        {status.access.hasVault && status.pin.enabled ? <Button variant="ghost" disabled={busy || status.pin.locked} onClick={() => { setCredential(''); setUsePin(!pinPreferred); }}>{pinPreferred ? '改用主密码' : '改用 Agent PIN'}</Button> : null}
+        {status.access.hasVault && status.biometric.enabled ? <Button variant="secondary" type="button" disabled={busy} onClick={() => void unlock('agent_unlock_biometric')}><FingerprintIcon data-icon="inline-start" />使用 Touch ID</Button> : null}
         {status.access.hasVault && !pinPreferred ? <Button type="submit" form="agent-unlock-form" disabled={busy || credential.length < 8}>{busy ? <Spinner data-icon="inline-start" /> : null}{busy ? '正在解锁…' : '解锁 MCP'}</Button> : null}
       </footer>
     </main>

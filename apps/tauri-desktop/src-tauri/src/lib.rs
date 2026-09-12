@@ -138,12 +138,12 @@ use agent_ssh_runtime::{
 use agent_ssh_sessions::AgentSshSessionStore;
 use agent_tool_executor::{AgentToolContext, execute_agent_tool};
 use agent_unlock_window::{
-    DisplayedAgentUnlock, agent_unlock_cancel, agent_unlock_password, agent_unlock_pin,
-    agent_unlock_set_scope, agent_unlock_status,
+    DisplayedAgentUnlock, agent_unlock_biometric, agent_unlock_cancel, agent_unlock_password,
+    agent_unlock_pin, agent_unlock_set_scope, agent_unlock_status,
 };
 use agent_vault_access::{AgentAccessSettings, AgentUnlockScope, AgentVaultAccess};
 pub use app_setup::run;
-use biometric_service::BiometricQuickUnlockService;
+use biometric_service::{BiometricQuickUnlockService, BiometricStatus};
 use browser_pairing::BrowserPairingService;
 use browser_platform::TauriBrowserPlatform;
 use desktop_api_request::*;
@@ -205,6 +205,7 @@ struct RuntimeState {
     runtime: Arc<Mutex<DesktopRuntime>>,
     agent_vault_access: AgentVaultAccess,
     agent_pin: Arc<Mutex<PinQuickUnlockService>>,
+    agent_biometric: Arc<Mutex<BiometricQuickUnlockService>>,
     agent_broker: Arc<Mutex<AgentBrokerCore>>,
     agent_pairing_window_request: Arc<Mutex<Option<String>>>,
     agent_unlock_window_request: Arc<Mutex<Option<DisplayedAgentUnlock>>>,
@@ -522,7 +523,7 @@ async fn desktop_invoke(
             })
             .await?;
             with_pin(&state, |pin| pin.disable()).await?;
-            with_biometric(&state, |biometric| biometric.disable().map(|_| ())).await?;
+            disable_biometrics(&state).await?;
             Ok(result)
         }
         "vault.unlock" => {
@@ -545,7 +546,7 @@ async fn desktop_invoke(
             })
             .await?;
             with_pin(&state, |pin| pin.disable()).await?;
-            with_biometric(&state, |biometric| biometric.disable().map(|_| ())).await?;
+            disable_biometrics(&state).await?;
             Ok(result)
         }
         "biometric.status" => {
@@ -558,24 +559,42 @@ async fn desktop_invoke(
                 with_runtime(&state, |runtime| runtime.quick_unlock_material())
                     .await
                     .map_err(|_| "请先在桌面端使用主密码解锁保险库。".to_owned())?;
-            with_biometric(&state, move |biometric| {
+            let agent_path = vault_path.clone();
+            let agent_key = vault_key.clone();
+            let status = with_biometric(&state, move |biometric| {
                 biometric
                     .enable(vault_path, vault_key.as_slice())
                     .map(|status| json!(status))
             })
+            .await?;
+            if let Err(error) = with_agent_biometric(&state, move |biometric| {
+                biometric
+                    .provision(agent_path, agent_key.as_slice())
+                    .map(|_| ())
+            })
             .await
+            {
+                let _ = disable_biometrics(&state).await;
+                return Err(error);
+            }
+            Ok(status)
         }
         "biometric.disable" => {
             require_empty_object(&input)?;
-            with_biometric(&state, |biometric| {
-                biometric.disable().map(|status| json!(status))
-            })
-            .await
+            disable_biometrics(&state).await.map(|status| json!(status))
         }
         "biometric.unlock" => {
             require_empty_object(&input)?;
             let credential = with_biometric(&state, |biometric| biometric.unlock()).await?;
             let vault_path = credential.0.clone();
+            let agent_path = credential.0.clone();
+            let agent_key = credential.1.clone();
+            with_agent_biometric(&state, move |biometric| {
+                biometric
+                    .provision(agent_path, agent_key.as_slice())
+                    .map(|_| ())
+            })
+            .await?;
             let result = with_runtime(&state, move |runtime| {
                 runtime
                     .unlock_with_biometric_key(credential.0, credential.1.as_slice())

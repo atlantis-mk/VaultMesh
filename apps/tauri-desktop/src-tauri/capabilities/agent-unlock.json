@@ -11,6 +11,7 @@
     "allow-agent-unlock-set-scope",
     "allow-agent-unlock-password",
     "allow-agent-unlock-pin",
+    "allow-agent-unlock-biometric",
     "allow-agent-unlock-cancel"
   ]
 }

@@ -2,7 +2,7 @@ id: "CHG-2026-004-tauri-desktop-migration"
 title: "以 Tauri 2 完整替换 Electron 桌面运行时"
 type: "migration"
 status: "Implementing"
-spec_revision: "0.1.4-active"
+spec_revision: "0.1.53-active"
 target_release: null
 requirements:
   - "REQ-TAURI-002"

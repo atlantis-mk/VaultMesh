@@ -140,6 +140,7 @@ pub fn run() {
             let email_settings_path = app_data.join("email-otp-settings.json");
             let pin_path = app_data.join("desktop-pin-unlock.json");
             let biometric_path = app_data.join("desktop-biometric-unlock.json");
+            let agent_biometric_path = app_data.join("agent-biometric-unlock.json");
             let lan_peer_trust_path = app_data.join("lan-peer-trust.json");
             let vault_path_record = app_data.join("vault-path");
             let vault_path = load_vault_path(&vault_path_record, app_data.join("vaultmesh.vault"));
@@ -153,6 +154,11 @@ pub fn run() {
             let agent_runtime = agent_vault_access.runtime();
             let agent_pin = Arc::new(Mutex::new(PinQuickUnlockService::new_agent(
                 app_data.join("agent-pin-unlock.json"),
+            )));
+            let agent_biometric = Arc::new(Mutex::new(BiometricQuickUnlockService::new(
+                agent_biometric_path,
+                "com.vaultmesh.desktop.agent-biometric",
+                "agent-biometric",
             )));
             let settings = Arc::new(Mutex::new(load_settings(&settings_path)));
             let clipboard_value = Arc::new(Mutex::new(None));
@@ -599,6 +605,7 @@ pub fn run() {
                 lan_sync,
                 agent_vault_access,
                 agent_pin,
+                agent_biometric,
                 agent_broker,
                 agent_pairing_window_request: Arc::new(Mutex::new(None)),
                 agent_unlock_window_request: Arc::new(Mutex::new(None)),
@@ -672,6 +679,7 @@ pub fn run() {
             agent_unlock_set_scope,
             agent_unlock_password,
             agent_unlock_pin,
+            agent_unlock_biometric,
             agent_unlock_cancel,
             agent_authorization_status,
             agent_authorization_resolve_permission,

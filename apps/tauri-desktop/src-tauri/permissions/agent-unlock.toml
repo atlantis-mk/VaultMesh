@@ -19,6 +19,11 @@ description = "Allows the isolated MCP unlock window to unlock the Agent-only ru
 commands.allow = ["agent_unlock_pin"]
 
 [[permission]]
+identifier = "allow-agent-unlock-biometric"
+description = "Allows the isolated MCP unlock window to unlock the Agent-only runtime with its independent OS biometric credential."
+commands.allow = ["agent_unlock_biometric"]
+
+[[permission]]
 identifier = "allow-agent-unlock-cancel"
 description = "Allows the isolated MCP unlock window to cancel only its displayed unlock request."
 commands.allow = ["agent_unlock_cancel"]

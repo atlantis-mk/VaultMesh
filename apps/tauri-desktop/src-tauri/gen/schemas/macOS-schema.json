@@ -207,6 +207,12 @@
           "markdownDescription": "Allows the isolated pairing window to read its pending-client status."
         },
         {
+          "description": "Allows the isolated MCP unlock window to unlock the Agent-only runtime with its independent OS biometric credential.",
+          "type": "string",
+          "const": "allow-agent-unlock-biometric",
+          "markdownDescription": "Allows the isolated MCP unlock window to unlock the Agent-only runtime with its independent OS biometric credential."
+        },
+        {
           "description": "Allows the isolated MCP unlock window to cancel only its displayed unlock request.",
           "type": "string",
           "const": "allow-agent-unlock-cancel",

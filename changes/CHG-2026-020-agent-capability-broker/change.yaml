@@ -2,7 +2,7 @@ id: "CHG-2026-020-agent-capability-broker"
 title: "以不披露凭据的能力代理向本地 Agent 提供 VaultMesh 操作"
 type: "feature"
 status: "Implementing"
-spec_revision: "0.1.35-active"
+spec_revision: "0.1.53-active"
 target_release: null
 requirements:
   - "REQ-AGENT-001"

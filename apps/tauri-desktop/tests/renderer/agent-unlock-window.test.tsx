@@ -39,6 +39,7 @@ const status = {
     settings: { unlockScope: 'connection' as const },
   },
   pin: { enabled: false, locked: false, remainingAttempts: 5 },
+  biometric: { available: true, enabled: false, kind: 'touchId' as const },
 };
 
 describe('CT-AGENT-UNLOCK-001 isolated MCP unlock window', () => {
@@ -134,5 +135,46 @@ describe('CT-AGENT-UNLOCK-001 isolated MCP unlock window', () => {
     const label = await screen.findByText('Agent 专用 PIN');
     expect(label.className).toContain('justify-center');
     expect(document.querySelector('.cn-input-otp.justify-center')).toBeTruthy();
+  });
+
+  it('automatically tries Agent Touch ID once and keeps the master-password fallback visible', async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'agent_unlock_status') {
+        return {
+          ...status,
+          pin: { enabled: true, locked: false, remainingAttempts: 5 },
+          biometric: { available: true, enabled: true, kind: 'touchId' },
+        };
+      }
+      if (command === 'agent_unlock_biometric') throw new Error('Touch ID 验证未完成。');
+      return { unlocked: true };
+    });
+
+    render(<AgentUnlockWindow />);
+
+    expect(await screen.findByLabelText('主密码')).toBeTruthy();
+    expect(screen.queryByLabelText('Agent 专用 PIN')).toBeNull();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('agent_unlock_biometric'));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Touch ID 验证未完成。'));
+    expect(invoke.mock.calls.filter(([command]) => command === 'agent_unlock_biometric')).toHaveLength(1);
+  });
+
+  it('shows a wrong-password error and submits the password form used by Enter', async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'agent_unlock_status') return status;
+      if (command === 'agent_unlock_password') throw new Error('主密码不正确。');
+      return { unlocked: true };
+    });
+
+    render(<AgentUnlockWindow />);
+
+    const password = await screen.findByLabelText('主密码');
+    fireEvent.change(password, { target: { value: 'wrong password value' } });
+    fireEvent.submit(password.closest('form')!);
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('agent_unlock_password', {
+      password: 'wrong password value',
+    }));
+    expect((await screen.findByRole('alert')).textContent).toContain('主密码不正确。');
   });
 });

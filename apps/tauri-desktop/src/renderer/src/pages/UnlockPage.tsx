@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { REGEXP_ONLY_DIGITS } from 'input-otp';
 import { ArrowRightIcon, ArrowLeftIcon, FingerprintIcon, LockKeyholeIcon } from 'lucide-react';
@@ -25,7 +25,16 @@ export function UnlockPage() {
   const unlockWithPin = useVaultStore((state) => state.unlockWithPin);
   const clearError = useVaultStore((state) => state.clearError);
   const navigate = useNavigate();
+  const biometricAttempted = useRef(false);
   const pinPreferred = Boolean(pin?.enabled && !pin.locked && !useMasterPassword);
+
+  useEffect(() => {
+    if (biometricAttempted.current || busy || !status?.hasVault || status.unlocked || !biometric?.available || !biometric.enabled) return;
+    biometricAttempted.current = true;
+    void unlockWithBiometrics().then((unlocked) => {
+      if (unlocked) void navigate({ to: '/vault', replace: true });
+    });
+  }, [biometric?.available, biometric?.enabled, busy, navigate, status?.hasVault, status?.unlocked, unlockWithBiometrics]);
 
   const unlockCredential = async (value: string): Promise<void> => {
     if (busy) return;

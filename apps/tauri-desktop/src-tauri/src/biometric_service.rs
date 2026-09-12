@@ -54,17 +54,38 @@ impl BiometricQuickUnlockService {
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.status().enabled
+    }
+
     pub fn enable(&self, vault_path: PathBuf, vault_key: &[u8]) -> Result<BiometricStatus, String> {
         if vault_key.len() != KEY_BYTES || !vault_path.is_file() {
             return Err("无法创建 Touch ID 快速解锁凭据。".to_owned());
         }
         prompt_biometric("启用 Touch ID 快速解锁 VaultMesh")?;
+        self.provision(vault_path, vault_key)
+    }
+
+    pub fn provision(
+        &self,
+        vault_path: PathBuf,
+        vault_key: &[u8],
+    ) -> Result<BiometricStatus, String> {
+        if vault_key.len() != KEY_BYTES || !vault_path.is_file() {
+            return Err("无法创建 Touch ID 快速解锁凭据。".to_owned());
+        }
+        let vault_path = vault_path
+            .canonicalize()
+            .map_err(|_| "无法定位当前保险库。".to_owned())?;
+        if self.read_record().is_some_and(|record| {
+            record.vault_path == vault_path && credential_exists(self.keyring_service, &record)
+        }) {
+            return Ok(self.status());
+        }
         self.disable()?;
         let record = BiometricRecord {
             version: 1,
-            vault_path: vault_path
-                .canonicalize()
-                .map_err(|_| "无法定位当前保险库。".to_owned())?,
+            vault_path,
             credential_id: format!("{}-{}", self.credential_prefix, uuid::Uuid::new_v4()),
         };
         set_credential(self.keyring_service, &record, vault_key)?;
