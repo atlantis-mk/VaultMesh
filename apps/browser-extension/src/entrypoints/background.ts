@@ -89,7 +89,7 @@ const extensionAction = (browser as unknown as {
 export default defineBackground(() => {
   // Listener registration is deliberately synchronous: Chromium requires the
   // WebAuthn proxy handlers to exist as soon as the MV3 worker starts.
-  const passkeyProxy = installPasskeyProxy();
+  const passkeyProxy = installPasskeyProxy({ openUnlockPrompt: openPasskeyUnlockPrompt });
   // The background worker, rather than the popup, owns the native
   // connection. An open native port also keeps the MV3 worker available.
   persistentNativeConnection.start();
@@ -97,6 +97,7 @@ export default defineBackground(() => {
     popupWorkspaceCache.clear();
     stopEmailOtpPolling();
     void cancelDeviceAssists();
+    void passkeyProxy.sync();
   });
   void warmPopupWorkspaceCache();
   void syncEmailOtpPolling();
@@ -108,12 +109,12 @@ export default defineBackground(() => {
     persistentNativeConnection.ensureConnected();
     void syncEmailOtpPolling();
     void refreshPluginSecurityPolicy().then((policy) => {
-      if (policy.lockOnBrowserRestart) lockExtensionWithRetry(3, () => passkeyProxy.detach());
+      if (policy.lockOnBrowserRestart) lockExtensionWithRetry(3, () => passkeyProxy.sync());
     });
   });
   browser.idle.onStateChanged.addListener((state) => {
     if (shouldLockForIdleState(activePluginSecurityPolicy, state as BrowserIdleState)) {
-      void lockExtension(() => passkeyProxy.detach());
+      void lockExtension(() => passkeyProxy.sync());
     }
   });
   browser.alarms.onAlarm.addListener((alarm) => {
@@ -210,7 +211,7 @@ export default defineBackground(() => {
         stopEmailOtpPolling();
     void cancelDeviceAssists();
       }
-      if (message.request.operation === 'vault.lock') void passkeyProxy.detach();
+      if (message.request.operation === 'vault.lock' || message.request.operation === 'browser.pairing.revoke') void passkeyProxy.sync();
       return response;
     }
 
@@ -348,6 +349,14 @@ export default defineBackground(() => {
       const pending = currentPendingPluginFill();
       return pending ? { fillConfirmationToken: pending.token, selectedItem: pending.selectedItem, requiresPassword: pending.requiresPassword } : null;
     }
+    if (parsed.data.kind === "vaultmesh.passkey-unlock.get") {
+      if (!isTrustedExtensionPage(sender)) return null;
+      return passkeyProxy.pendingUnlockPrompt();
+    }
+    if (parsed.data.kind === "vaultmesh.passkey-unlock.decline") {
+      if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
+      return { status: passkeyProxy.declineUnlock(parsed.data.token) ? "declined" as const : "expired" as const };
+    }
     if (parsed.data.kind === "vaultmesh.fill-confirmation.cancel") {
       if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
       if (pendingPluginFill?.token === parsed.data.fillConfirmationToken) pendingPluginFill = null;
@@ -427,6 +436,18 @@ export default defineBackground(() => {
     return startAutomaticFillForTab(page.tabId, page.fillOrigin, parsed.data.pageContext === "otp" ? "otp" : "login", page.framePageUrl, parsed.data.target, sender.frameId ?? 0);
   });
 });
+
+/** A locked WebAuthn request must reach the VaultMesh unlock UI. The toolbar
+ * popup needs a focused browser window, so a standalone window is the fallback. */
+async function openPasskeyUnlockPrompt(): Promise<void> {
+  try {
+    await extensionAction?.openPopup();
+    return;
+  } catch {
+    // Fall through to a standalone unlock window.
+  }
+  await browser.windows.create({ url: browser.runtime.getURL("/popup.html?passkey=1"), type: "popup", focused: true, width: 400, height: 600 });
+}
 
 async function refreshPluginSecurityPolicy(): Promise<PluginSecurityPolicy> {
   activePluginSecurityPolicy = await loadPluginSecurityPolicy();

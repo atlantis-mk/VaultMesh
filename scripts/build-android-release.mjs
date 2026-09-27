@@ -88,6 +88,21 @@ export function requireSigningEnvironment(environment) {
   if (missing.length > 0) throw new Error(`缺少 Android 签名配置：${missing.join(", ")}`);
 }
 
+// ADR-0049：签名发布必须编译固定 HTTPS 更新清单地址；本地未签名冒烟可以省略。
+export function androidUpdateManifestUrl(environment, { required }) {
+  const value = environment.VAULTMESH_ANDROID_UPDATE_MANIFEST_URL ?? "";
+  if (!value) {
+    if (required) throw new Error("缺少 VAULTMESH_ANDROID_UPDATE_MANIFEST_URL。");
+    return "";
+  }
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.search || url.hash || url.username || url.password
+    || !url.pathname.endsWith("/android.json")) {
+    throw new Error("Android 更新清单地址必须是 HTTPS android.json。");
+  }
+  return url.href;
+}
+
 async function latestBuildTool(environment, tool) {
   const sdk = environment.ANDROID_HOME ?? environment.ANDROID_SDK_ROOT;
   if (!sdk) throw new Error("ANDROID_HOME 未设置。");
@@ -109,6 +124,7 @@ export async function buildAndroidRelease({ outputDirectory, allowUnsigned = fal
   const names = androidReleaseAssetNames(version);
   const baseVersionCode = androidVersionCode(version);
   if (!allowUnsigned) requireSigningEnvironment(environment);
+  const updateManifestUrl = androidUpdateManifestUrl(environment, { required: !allowUnsigned });
   const destination = outputDirectory ?? path.join(workspace, "artifacts", "android");
 
   await rm(apkOutput, { recursive: true, force: true });
@@ -118,6 +134,7 @@ export async function buildAndroidRelease({ outputDirectory, allowUnsigned = fal
     `-Pvaultmesh.versionName=${version}`,
     `-Pvaultmesh.versionCode=${baseVersionCode}`,
     "-Pvaultmesh.abiSplits=true",
+    ...(updateManifestUrl ? [`-Pvaultmesh.updateManifestUrl=${updateManifestUrl}`] : []),
   ], { env: environment, cwd: workspace });
 
   const aapt2 = await latestBuildTool(environment, "aapt2");

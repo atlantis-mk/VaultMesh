@@ -11,6 +11,11 @@ val releaseVersionCode = providers.gradleProperty("vaultmesh.versionCode").orNul
 val abiSplitsEnabled = providers.gradleProperty("vaultmesh.abiSplits").orNull == "true"
 val releaseAbis = listOf("armeabi-v7a", "arm64-v8a", "x86_64")
 val releaseKeystore = providers.environmentVariable("VAULTMESH_ANDROID_KEYSTORE_PATH").orNull
+// ADR-0049：只有 Release 编译固定更新清单地址；Debug 与未配置时不检查更新。
+val updateManifestUrl = providers.gradleProperty("vaultmesh.updateManifestUrl").orNull.orEmpty()
+require(updateManifestUrl.isEmpty() || updateManifestUrl.matches(Regex("^https://[^\\s\"?#@]+/android\\.json$"))) {
+    "vaultmesh.updateManifestUrl must be an HTTPS android.json URL"
+}
 
 android {
     namespace = "com.vaultmesh.app"
@@ -25,10 +30,12 @@ android {
         versionName = releaseVersionName ?: "0.0.1-dev"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "UPDATE_MANIFEST_URL", "\"\"")
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     splits {
@@ -69,6 +76,7 @@ android {
             if (releaseKeystore != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
+            buildConfigField("String", "UPDATE_MANIFEST_URL", "\"$updateManifestUrl\"")
         }
     }
 
@@ -142,4 +150,5 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")
 }

@@ -655,6 +655,7 @@ export function PopupApp({ initialWorkspace = null }: { initialWorkspace?: Initi
         {activeTab === "vault" && pageInformation ? <PageInformationPanel capture={pageInformation.capture} busy={pageInformationBusy} onCancel={() => setPageInformation(null)} onRescan={() => void recognizeCurrentPage()} onSave={(data) => void saveCurrentPageInformation(data)} /> : activeTab === "vault" && editingItem?.type === "登录" ? <EditLoginPanel id={editingItem.id} onCancel={() => setEditingItem(null)} onPasskeysChanged={async () => { await refreshWorkspace(); setNotice("Passkey 已从 VaultMesh 永久删除；网站端登记不会自动撤销。", "success"); }} onScanTotp={scanCurrentPageTotp} onSaved={async () => { setEditingItem(null); await refreshWorkspace(); setNotice("登录信息已更新。", "success"); }} /> : activeTab === "vault" && editingItem ? <AddItemPanel kind={addKindForType(editingItem.type)} editId={editingItem.id} onCancel={() => setEditingItem(null)} onSaved={async () => { const type = editingItem.type; setEditingItem(null); await refreshWorkspace(); setNotice(`${type}已更新。`, "success"); }} /> : activeTab === "vault" && adding ? <AddItemPanel kind={adding} onCancel={() => setAdding(null)} onSaved={async () => { setAdding(null); await refreshWorkspace(); setNotice("项目已保存到保险库。", "success"); }} /> : activeTab === "vault" ? (
           <>
           {shouldShowDesktopConnection(desktopState, loading) ? <DesktopConnection state={desktopState} /> : null}
+          {desktopState === "unavailable" ? <PasskeyUnlockNotice /> : null}
           <div className="flex shrink-0 items-center gap-2">
             <Tabs className="min-w-0 flex-1" value={activeType} onValueChange={(value) => setActiveType(value as VaultItemType)}>
               <TabsList className="w-full justify-start overflow-x-auto">
@@ -817,6 +818,45 @@ function saveFailureReason(code?: string, message?: string): string {
 }
 
 type UnlockPhase = "idle" | "authenticating" | "loading";
+type PasskeyUnlockPrompt = { token: string; operation: "create" | "get"; origin: string | null };
+
+export function parsePasskeyUnlockPrompt(value: unknown): PasskeyUnlockPrompt | null {
+  if (!value || typeof value !== "object") return null;
+  const prompt = value as { token?: unknown; operation?: unknown; origin?: unknown };
+  if (typeof prompt.token !== "string" || (prompt.operation !== "create" && prompt.operation !== "get")) return null;
+  return { token: prompt.token, operation: prompt.operation, origin: typeof prompt.origin === "string" ? prompt.origin : null };
+}
+
+/** Shown while a WebAuthn request waits for VaultMesh. Declining is the only
+ * path that hands the request back to the browser. */
+function PasskeyUnlockNotice({ disabled = false }: { disabled?: boolean }) {
+  const [prompt, setPrompt] = useState<PasskeyUnlockPrompt | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void browser.runtime.sendMessage({ kind: "vaultmesh.passkey-unlock.get" }).then((response) => {
+      if (active) setPrompt(parsePasskeyUnlockPrompt(response));
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  async function decline() {
+    if (!prompt || disabled) return;
+    await browser.runtime.sendMessage({ kind: "vaultmesh.passkey-unlock.decline", token: prompt.token }).catch(() => undefined);
+    setPrompt(null);
+    window.close();
+  }
+
+  if (!prompt) return null;
+  return <div className="flex flex-col gap-2 rounded-md bg-muted px-3 py-2 text-sm" role="status"><p>{passkeyPromptText(prompt)}</p><Button size="sm" variant="ghost" disabled={disabled} onClick={() => void decline()}>不解锁，改用浏览器通行密钥</Button></div>;
+}
+
+export function passkeyPromptText(prompt: PasskeyUnlockPrompt): string {
+  const site = prompt.origin ?? "当前网站";
+  return prompt.operation === "create"
+    ? `${site} 正在创建通行密钥。解锁后由 VaultMesh 保存。`
+    : `${site} 正在请求通行密钥登录。解锁后由 VaultMesh 继续。`;
+}
 
 function PopupUnlockPage({ hasVault, onUnlocked }: { hasVault: boolean; onUnlocked: () => Promise<boolean> }) {
   const [credential, setCredential] = useState("");
@@ -872,7 +912,7 @@ function PopupUnlockPage({ hasVault, onUnlocked }: { hasVault: boolean; onUnlock
 
   const progressText = phase === "authenticating" ? "正在安全验证…" : phase === "loading" ? "验证成功，正在读取保险库…" : null;
 
-  return <main className="flex h-full w-full items-center p-3"><Card className="w-full"><CardContent className="flex flex-col gap-3"><span className="grid size-12 place-items-center rounded-xl bg-muted"><LockKeyholeIcon /></span><div><h1 className="text-lg font-semibold">{hasVault ? "解锁 VaultMesh 插件" : "创建 VaultMesh 保险库"}</h1><p className="text-sm text-muted-foreground">{pinPreferred ? `输入 6 位插件 PIN 后自动解锁，还可尝试 ${pin?.remainingAttempts ?? 0} 次。` : pin?.locked ? "插件 PIN 已锁定，请使用主密码解锁。" : message}</p></div>{hasVault ? <>{pinPreferred ? <InputOTP value={credential} maxLength={6} pattern={REGEXP_ONLY_DIGITS} autoComplete="off" pushPasswordManagerStrategy="none" autoFocus disabled={busy} containerClassName="justify-center" aria-label="6 位插件 PIN" onChange={setCredential} onComplete={(value) => void unlock(value)}><InputOTPGroup><InputOTPSlot index={0} mask /><InputOTPSlot index={1} mask /><InputOTPSlot index={2} mask /></InputOTPGroup><InputOTPSeparator /><InputOTPGroup><InputOTPSlot index={3} mask /><InputOTPSlot index={4} mask /><InputOTPSlot index={5} mask /></InputOTPGroup></InputOTP> : <input className="h-10 rounded-md border border-input bg-background px-3 text-sm" type="password" inputMode="text" maxLength={1_024} value={credential} autoFocus onChange={(event) => setCredential(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && credential.length >= 8 && !busy) void unlock(); }} placeholder="主密码（至少 8 位）" />}<div className={`flex min-h-5 items-center justify-center gap-2 text-sm text-muted-foreground transition-opacity duration-150 ${progressText ? "opacity-100" : "opacity-0"}`} role="status" aria-live="polite">{progressText ? <><RefreshCwIcon className="animate-spin" size={16} aria-hidden="true" /><span>{progressText}</span></> : null}</div>{!pinPreferred ? <Button disabled={busy || credential.length < 8} onClick={() => void unlock()}>{phase === "authenticating" ? "正在安全验证…" : phase === "loading" ? "正在读取保险库…" : "使用主密码解锁插件"}</Button> : null}{pin?.enabled && !pin.locked ? <Button variant="secondary" disabled={busy} onClick={() => { setCredential(""); setUseMasterPassword(pinPreferred); }}>{pinPreferred ? "改用主密码" : "改用 PIN"}</Button> : null}{biometric?.available && biometric.enabled ? <Button variant="secondary" disabled={busy} onClick={() => void unlockWithBiometrics()}>{phase === "authenticating" ? "正在等待系统验证…" : "使用生物识别解锁插件"}</Button> : null}</> : null}</CardContent></Card></main>;
+  return <main className="flex h-full w-full items-center p-3"><Card className="w-full"><CardContent className="flex flex-col gap-3"><span className="grid size-12 place-items-center rounded-xl bg-muted"><LockKeyholeIcon /></span><PasskeyUnlockNotice disabled={busy} /><div><h1 className="text-lg font-semibold">{hasVault ? "解锁 VaultMesh 插件" : "创建 VaultMesh 保险库"}</h1><p className="text-sm text-muted-foreground">{pinPreferred ? `输入 6 位插件 PIN 后自动解锁，还可尝试 ${pin?.remainingAttempts ?? 0} 次。` : pin?.locked ? "插件 PIN 已锁定，请使用主密码解锁。" : message}</p></div>{hasVault ? <>{pinPreferred ? <InputOTP value={credential} maxLength={6} pattern={REGEXP_ONLY_DIGITS} autoComplete="off" pushPasswordManagerStrategy="none" autoFocus disabled={busy} containerClassName="justify-center" aria-label="6 位插件 PIN" onChange={setCredential} onComplete={(value) => void unlock(value)}><InputOTPGroup><InputOTPSlot index={0} mask /><InputOTPSlot index={1} mask /><InputOTPSlot index={2} mask /></InputOTPGroup><InputOTPSeparator /><InputOTPGroup><InputOTPSlot index={3} mask /><InputOTPSlot index={4} mask /><InputOTPSlot index={5} mask /></InputOTPGroup></InputOTP> : <input className="h-10 rounded-md border border-input bg-background px-3 text-sm" type="password" inputMode="text" maxLength={1_024} value={credential} autoFocus onChange={(event) => setCredential(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && credential.length >= 8 && !busy) void unlock(); }} placeholder="主密码（至少 8 位）" />}<div className={`flex min-h-5 items-center justify-center gap-2 text-sm text-muted-foreground transition-opacity duration-150 ${progressText ? "opacity-100" : "opacity-0"}`} role="status" aria-live="polite">{progressText ? <><RefreshCwIcon className="animate-spin" size={16} aria-hidden="true" /><span>{progressText}</span></> : null}</div>{!pinPreferred ? <Button disabled={busy || credential.length < 8} onClick={() => void unlock()}>{phase === "authenticating" ? "正在安全验证…" : phase === "loading" ? "正在读取保险库…" : "使用主密码解锁插件"}</Button> : null}{pin?.enabled && !pin.locked ? <Button variant="secondary" disabled={busy} onClick={() => { setCredential(""); setUseMasterPassword(pinPreferred); }}>{pinPreferred ? "改用主密码" : "改用 PIN"}</Button> : null}{biometric?.available && biometric.enabled ? <Button variant="secondary" disabled={busy} onClick={() => void unlockWithBiometrics()}>{phase === "authenticating" ? "正在等待系统验证…" : "使用生物识别解锁插件"}</Button> : null}</> : null}</CardContent></Card></main>;
 }
 
 function VaultWorkspaceSkeleton() {

@@ -59,6 +59,7 @@ jobs:
       ANDROID_BUILD_TOOLS_VERSION: 36.1.0
       ANDROID_PLATFORM: android-37.0
       VAULTMESH_ANDROID_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+      VAULTMESH_ANDROID_UPDATE_MANIFEST_URL: ${{ vars.R2_PUBLIC_BASE_URL }}/channels/review/android.json
     defaults:
       run:
         shell: bash
@@ -292,6 +293,7 @@ jobs:
       R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
       RELEASE_NOTES: ${{ inputs.notes }}
       RELEASE_VERSION: ${{ inputs.version }}
+      ANDROID_SIGNER_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
     defaults:
       run:
         shell: bash
@@ -345,6 +347,23 @@ jobs:
             arguments+=(--current "$current_manifest")
           fi
           node scripts/create-update-manifest.mjs "${arguments[@]}"
+          current_android="$RUNNER_TEMP/current-android.json"
+          android_status="$(curl --silent --show-error --output "$current_android" --write-out '%{http_code}' "${R2_PUBLIC_BASE_URL%/}/channels/review/android.json")"
+          android_arguments=(
+            --input "$RUNNER_TEMP/vaultmesh-android"
+            --output "$RUNNER_TEMP/vaultmesh-publication/android.json"
+            --version "$RELEASE_VERSION"
+            --base-url "$R2_PUBLIC_BASE_URL"
+            --notes "$RELEASE_NOTES"
+            --signer-sha256 "$ANDROID_SIGNER_SHA256"
+          )
+          if [[ "$android_status" == "200" ]]; then
+            android_arguments+=(--current "$current_android")
+          elif [[ "$android_status" != "404" ]]; then
+            echo "Unable to read current Android review channel (HTTP $android_status)." >&2
+            exit 1
+          fi
+          node scripts/create-android-update-manifest.mjs "${android_arguments[@]}"
           for browser in chrome firefox; do
             asset="VaultMesh_${RELEASE_VERSION}_${browser}-extension.zip"
             source="$RUNNER_TEMP/vaultmesh-browser-extensions/$asset"
@@ -400,21 +419,10 @@ jobs:
               --metadata "sha256=$sha256" \
               --no-progress
           done < "$RUNNER_TEMP/vaultmesh-publication/immutable.tsv"
-      - name: Publish latest.json last and verify
+      - name: Verify public assets, then publish android.json and latest.json last
         run: |
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          source="$RUNNER_TEMP/vaultmesh-publication/latest.json"
-          aws s3 cp "$source" "s3://${R2_BUCKET}/channels/review/latest.json" \
-            --endpoint-url "$endpoint" \
-            --content-type "application/json" \
-            --cache-control "no-store, max-age=0" \
-            --no-progress
-          downloaded="$RUNNER_TEMP/published-latest.json"
-          aws s3 cp "s3://${R2_BUCKET}/channels/review/latest.json" "$downloaded" \
-            --endpoint-url "$endpoint" \
-            --no-progress
-          cmp "$source" "$downloaded"
           for browser in chrome firefox; do
             asset="VaultMesh_${RELEASE_VERSION}_${browser}-extension.zip"
             published="$RUNNER_TEMP/published-$asset"
@@ -430,6 +438,19 @@ jobs:
               "${R2_PUBLIC_BASE_URL%/}/releases/v${RELEASE_VERSION}/${asset}" \
               --output "$published"
             cmp "$RUNNER_TEMP/vaultmesh-android/$asset" "$published"
+          done
+          for manifest in android latest; do
+            source="$RUNNER_TEMP/vaultmesh-publication/${manifest}.json"
+            aws s3 cp "$source" "s3://${R2_BUCKET}/channels/review/${manifest}.json" \
+              --endpoint-url "$endpoint" \
+              --content-type "application/json" \
+              --cache-control "no-store, max-age=0" \
+              --no-progress
+            downloaded="$RUNNER_TEMP/published-${manifest}.json"
+            aws s3 cp "s3://${R2_BUCKET}/channels/review/${manifest}.json" "$downloaded" \
+              --endpoint-url "$endpoint" \
+              --no-progress
+            cmp "$source" "$downloaded"
           done
       - name: Write reviewer download links
         run: |
@@ -448,6 +469,7 @@ jobs:
             echo "- [Android armeabi-v7a APK](${base}/VaultMesh_${RELEASE_VERSION}_android-armeabi-v7a.apk)"
             echo "- [Android x86_64 APK](${base}/VaultMesh_${RELEASE_VERSION}_android-x86_64.apk)"
             echo "- [Updater manifest](${R2_PUBLIC_BASE_URL%/}/channels/review/latest.json)"
+            echo "- [Android update manifest](${R2_PUBLIC_BASE_URL%/}/channels/review/android.json)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   github_prerelease:

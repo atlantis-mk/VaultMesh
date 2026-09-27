@@ -34,6 +34,10 @@ pnpm android:release:build
 
 CI 的 `Publish R2 review release` workflow 需要 Secrets `ANDROID_RELEASE_KEYSTORE_BASE64`、`ANDROID_RELEASE_KEYSTORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD` 与仓库变量 `ANDROID_RELEASE_CERT_SHA256`。
 
+## 新版本提示
+
+Release APK 会在打开应用时（每天最多一次）检查 Review channel 的 `android.json`，发现新版本后提示下载；“设置 → 更新”可以手动检查或关闭自动检查。“下载”在系统浏览器中打开与设备 ABI 匹配的 APK，由系统完成覆盖安装并保留数据，应用本身不下载或安装 APK（`ADR-0049`）。Debug 构建不检查更新。签名发布需要提供 `VAULTMESH_ANDROID_UPDATE_MANIFEST_URL`，CI 由 `R2_PUBLIC_BASE_URL` 自动拼出。
+
 ## 应用图标
 
 `app/src/main/res/mipmap-nodpi/ic_launcher_artwork.png` 是内置 imagegen 以桌面端 `apps/tauri-desktop/resources/icon.png` 为品牌参考生成的透明 RGBA 图标，保留锁盘、青色钥匙孔、六节点和紫蓝配色。完整生成提示词保存在 `resources/launcher-icon-prompt.txt`。替换图片时必须保留 alpha；白色背景由 Android 自适应图层提供，不烘焙进 PNG。

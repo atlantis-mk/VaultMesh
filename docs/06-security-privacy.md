@@ -53,7 +53,7 @@ Summary/detail 省略 protected value。有界且用户授权的 reveal/fill pre
 
 ## Passkey 边界
 
-Passkey private key 是 encrypted secret。active desktop runtime revalidate RP/origin，逐次 native confirmation 并签名，只返回 public WebAuthn response。Private key 不进入 page、popup 或 extension storage；extension lock 必须 detach proxy。
+Passkey private key 是 encrypted secret。active desktop runtime revalidate RP/origin，逐次 native confirmation 并签名，只返回 public WebAuthn response。Private key 不进入 page、popup 或 extension storage。Extension lock 清除解密授权但保持 proxy 挂载，锁定时的 WebAuthn 请求只携带公开请求参数并等待插件解锁，签名仍须解锁与 native confirmation；只有用户明确拒绝解锁或确认未配对时 detach（REQ-PASSKEY-001）。
 
 ## Email、Import 与 SSH 临时状态
 

@@ -700,3 +700,27 @@ test('CT-ANDROID-AUTOFILL-003: local phone suggestion uses only the username fie
   const activity = read('apps/android/app/src/main/java/com/vaultmesh/app/MainActivity.kt');
   assert.match(activity, /DeviceAssistService.startIfEnabled\(this@MainActivity\)\s*if \(viewModel.state.value.status == "unlocked"\)/);
 });
+
+test('CT-ANDROID-UPDATE-001: update notice only opens the system browser from a fixed release endpoint', () => {
+  const manifest = read('apps/android/app/src/main/AndroidManifest.xml');
+  assert.doesNotMatch(manifest, /REQUEST_INSTALL_PACKAGES|DOWNLOAD_WITHOUT_NOTIFICATION/);
+  const build = read('apps/android/app/build.gradle.kts');
+  assert.match(build, /defaultConfig \{[\s\S]*buildConfigField\("String", "UPDATE_MANIFEST_URL", "\\"\\""\)/);
+  assert.match(build, /release \{[\s\S]*buildConfigField\("String", "UPDATE_MANIFEST_URL", "\\"\$updateManifestUrl\\""\)/);
+  assert.match(build, /\^https:\/\/[\s\S]*android\\\\\.json\$/);
+  const update = read('apps/android/app/src/main/java/com/vaultmesh/app/AndroidUpdate.kt');
+  assert.match(update, /instanceFollowRedirects = false/);
+  assert.match(update, /useCaches = false/);
+  assert.match(update, /MAX_MANIFEST_BYTES = 64 \* 1024/);
+  assert.match(update, /Intent\.ACTION_VIEW, Uri\.parse\(offer\.asset\.url\)/);
+  assert.doesNotMatch(update, /PackageInstaller|DownloadManager|ACTION_INSTALL_PACKAGE|FileProvider|VaultNativeBridge/);
+  assert.match(update, /uri\.host == endpointUri\.host/);
+  const ui = read('apps/android/app/src/main/java/com/vaultmesh/app/AndroidUpdateUi.kt');
+  assert.match(ui, /Dispatchers\.IO\) \{ checker\.check\(manual = false\) \}/);
+  assert.match(ui, /Lifecycle\.Event\.ON_RESUME[\s\S]*checker\.autoCheckDue\(\)/);
+  assert.match(ui, /Text\("下载"\)[\s\S]*Text\("稍后"\)[\s\S]*Text\("跳过此版本"\)/);
+  const activity = read('apps/android/app/src/main/java/com/vaultmesh/app/MainActivity.kt');
+  assert.match(activity, /AndroidUpdateAutoCheck\(\)/);
+  const home = read('apps/android/app/src/main/java/com/vaultmesh/app/UnlockedHomeUi.kt');
+  assert.match(home, /BuildConfig\.UPDATE_MANIFEST_URL\.isNotEmpty\(\)[\s\S]*UpdateSettingsCard\(\)/);
+});

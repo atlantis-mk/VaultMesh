@@ -873,6 +873,7 @@ class MainActivity : FragmentActivity() {
                             ::startRecoveryFileImport, ::resumeRecoveryFileImport,
                             ::recoveryCodesSaved, ::closeRecoveryEditor, recoveryDeleteCandidate != null,
                             ::confirmRecoverySourceDelete, { recoveryDeleteCandidate = null })
+                        AndroidUpdateAutoCheck()
                     }
                 }
             }

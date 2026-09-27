@@ -118,7 +118,7 @@ create、unlock、list 与所有 Item mutation 必须在 Compose 主线程之外
 
 主 Activity 在 `super.onCreate` 后、绘制敏感内容前设置 `FLAG_SECURE`。应用进入 `ON_PAUSE` 时同步失效前台回调并调用 lock；`ON_STOP` 再执行幂等锁定，覆盖快速离开后立即返回或异常生命周期顺序。UI 重新进入前台后重新读取 status，不通过 saved state 恢复数据。进程冷启动必须从 locked/missing 开始。
 
-Manifest 必须设置 `allowBackup=false`、`fullBackupContent=false`、`dataExtractionRules` 拒绝 cloud/device-transfer、`usesCleartextTraffic=false`；除生物识别所需权限外，仅前台 LAN 配对可声明 `INTERNET`、网络状态、Wi-Fi 多播和 Android 17 `ACCESS_LOCAL_NETWORK`，不得声明外部存储权限。系统 Autofill 服务及按请求包名验证签名的可见性由 REQ-ANDROID-023/024 授权；后台 LAN 服务由 REQ-ANDROID-022 授权。
+Manifest 必须设置 `allowBackup=false`、`fullBackupContent=false`、`dataExtractionRules` 拒绝 cloud/device-transfer、`usesCleartextTraffic=false`；除生物识别所需权限外，仅前台 LAN 配对可声明 `INTERNET`、网络状态、Wi-Fi 多播和 Android 17 `ACCESS_LOCAL_NETWORK`，不得声明外部存储权限；`INTERNET` 在 LAN 之外只额外用于 REQ-ANDROID-027 的前台新版本检查，不得申请 `REQUEST_INSTALL_PACKAGES`。系统 Autofill 服务及按请求包名验证签名的可见性由 REQ-ANDROID-023/024 授权；后台 LAN 服务由 REQ-ANDROID-022 授权。
 
 ## Android 与桌面局域网配对
 
@@ -163,3 +163,7 @@ Android 同步遵循 `specs/lan-vault-sync.md`，Kotlin connectedDevice 服务�
 ## 已配对设备填充互通
 
 REQ-DEVICE-ASSIST-001 / REQ-ANDROID-026 与 [独立互通规格](../specs/device-fill-assist.md) 定义逐设备一次授权、锁屏号码/短信交付及短时秘密生命周期。既有禁止 RECEIVE_SMS 的条款限于手机本地 Autofill；独立互通服务仅在用户主动启用后可以请求 RECEIVE_SMS，不使用 READ_SMS。短信正文仅本机瞬态解析，验证码不进入 Vault、备份、日志、同步或普通 DTO。系统限制自动读取时使用显式手动交付。
+
+## 新版本提示
+
+执行 `ADR-0049` 与 REQ-ANDROID-027。Release 构建的 `BuildConfig.UPDATE_MANIFEST_URL` 固定为 Review channel 的 `android.json`，Debug 为空并隐藏设置项。`AndroidUpdatePolicy` 负责清单校验、versionCode 基数比较、ABI 选择与 24 小时节流；`AndroidUpdateChecker` 在 IO 线程发起无重定向、无缓存、64 KiB 上限的 HTTPS GET，并只在非秘密偏好保存自动检查开关、上次检查时间和跳过的 versionCode。`AndroidUpdateAutoCheck` 在 Activity 恢复前台时检查，锁定页同样可以提示；设置页“更新”分组提供手动检查与自动检查开关。提示框的“下载”只以 `ACTION_VIEW` 交给系统浏览器，安装由系统完成且签名证书必须与已安装版本一致。

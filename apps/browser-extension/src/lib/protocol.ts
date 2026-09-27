@@ -284,6 +284,8 @@ export const PopupMessageSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("vaultmesh.fill-confirmation.cancel"), fillConfirmationToken: z.string().uuid() }),
   z.object({ kind: z.literal("vaultmesh.autofill-state") }),
   z.object({ kind: z.literal("vaultmesh.open-unlock") }),
+  z.object({ kind: z.literal("vaultmesh.passkey-unlock.get") }),
+  z.object({ kind: z.literal("vaultmesh.passkey-unlock.decline"), token: z.string().uuid() }),
   z.object({ kind: z.literal("vaultmesh.security-policy.updated") }),
   z.object({ kind: z.literal("vaultmesh.email-otp-fill"), candidateId: z.string().uuid() }),
   z.object({ kind: z.literal("vaultmesh.autofill-page-ready"), documentId: z.string().uuid(), signature: boundedText(512), pageContext: PageContextSchema, target: AutofillTargetSchema.optional() }),

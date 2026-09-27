@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   androidReleaseAbis,
   androidReleaseAssetNames,
+  androidUpdateManifestUrl,
   androidVersionCode,
   expectedVariantVersionCode,
   parseBadging,
@@ -81,4 +82,16 @@ test("Gradle splits and Rust release ABIs stay aligned with the release script",
   assert.match(gradle, /isEnable = abiSplitsEnabled/);
   assert.match(gradle, /VAULTMESH_ANDROID_KEYSTORE_PATH/);
   assert.match(rust, new RegExp(`default_abis="${androidReleaseAbis.join(" ")}"`));
+});
+
+test("CT-ANDROID-UPDATE-001: signed releases compile a fixed HTTPS update manifest URL", () => {
+  const url = "https://downloads.example.test/channels/review/android.json";
+  assert.equal(androidUpdateManifestUrl({ VAULTMESH_ANDROID_UPDATE_MANIFEST_URL: url }, { required: true }), url);
+  assert.equal(androidUpdateManifestUrl({}, { required: false }), "");
+  assert.throws(() => androidUpdateManifestUrl({}, { required: true }), /UPDATE_MANIFEST_URL/);
+  for (const bad of ["http://downloads.example.test/channels/review/android.json",
+    "https://downloads.example.test/channels/review/latest.json",
+    "https://downloads.example.test/channels/review/android.json?x=1"]) {
+    assert.throws(() => androidUpdateManifestUrl({ VAULTMESH_ANDROID_UPDATE_MANIFEST_URL: bad }, { required: true }), /HTTPS android\.json/);
+  }
 });

@@ -1,0 +1,37 @@
+schema: "2"
+id: "CHG-2026-075-android-update-notice"
+title: "Android 新版本提示"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "Android 前台检查 R2 Review 更新清单并提示用户通过系统浏览器下载安装，扩大 INTERNET 受控用途且跨越发布边界"
+requirements:
+  - "REQ-ANDROID-027"
+  - "REQ-UPDATE-002"
+
+tests:
+  - "CT-ANDROID-UPDATE-001"
+  - "AT-ANDROID-UPDATE-001"
+
+adrs:
+  - "ADR-0049"
+  - "ADR-0048"
+
+context_refs:
+  - "specs/android-client.md#新版本提示"
+
+related_changes:
+  - "CHG-2026-074-android-review-release"
+boundaries:
+  - "security"
+  - "platform"
+  - "release"
+
+risks:
+  - "清单仅靠 HTTPS 与同 host 校验保护，篡改清单可诱导打开同 host 其他 immutable 地址；签名不同的 APK 仍无法覆盖安装"
+  - "0.1.0-review 已安装的 APK 不含检查功能，需手动安装下一个 Review 版本后才开始提示"
+
+next:
+  - "随下一个 Review 版本发布，确认 channels/review/android.json 在 latest.json 之前发布"
+  - "按 AT-ANDROID-UPDATE-001 在 arm64 真机从旧版提示并覆盖升级后运行 work:finish"

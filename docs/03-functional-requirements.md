@@ -347,7 +347,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：短信、通知等系统权限弹窗触发暂停后，无论允许、拒绝或隐藏，返回 Activity 时必须恢复可操作的锁定页；仅发生 `onPause → onResume` 而未经过 `onStart` 时也必须重新读取快捷解锁可用状态，不得持续显示空白或复活旧解锁会话。
 - 必须：解锁后的保险库页面顶栏必须避让系统状态栏，以顶部类型标签切换安全摘要和适用回收站，以底部导航分别进入保险库、工具、设备和设置；搜索只留在当前前台会话，切换底部页面时清空查询与临时条目操作状态。全部标签只聚合已有脱敏摘要，不预读受保护值，也不得把固定类型操作替换为通用路由。全部页和类型页的条目行必须直接提供可用字段的复制入口与更多操作菜单；当前可见条目支持逐项选择、全选和取消选择，批量删除须明确确认，Secret 的不可恢复删除须单独告知，失败后不得报告全部成功。桌面托管的 SSH alias 不得被选入删除。
 - 必须：保险库“全部”、各类型和适用回收站列表每次最多追加 30 条脱敏摘要，滚动接近当前列表底部时继续追加并显示加载提示；切换类型、回收站或搜索条件时从首批重新开始。全选仅作用于当前已展示的可选条目，托管 SSH 仍不可选。
-- 必须：Android 首切片不得注册网络、Autofill、Credential Manager、Passkey、外部文件、后台同步或通用 WebView 权限；后续局域网发现与配对仅由 `REQ-ANDROID-021` 独立扩展，系统自动填充与识别保存由 `REQ-ANDROID-023/024` 独立扩展，其他能力仍须独立扩展 Requirement、ADR 和平台验收。
+- 必须：Android 首切片不得注册网络、Autofill、Credential Manager、Passkey、外部文件、后台同步或通用 WebView 权限；后续局域网发现与配对仅由 `REQ-ANDROID-021` 独立扩展，前台新版本检查由 `REQ-ANDROID-027` 独立扩展，系统自动填充与识别保存由 `REQ-ANDROID-023/024` 独立扩展，其他能力仍须独立扩展 Requirement、ADR 和平台验收。
 - 验收：`CT-ANDROID-RUNTIME-001`、`CT-ANDROID-JNI-001`、`CT-ANDROID-HOME-001`、`AT-ANDROID-001`。
 
 ### REQ-ANDROID-002 Compose 客户端 Login CRUD
@@ -527,6 +527,14 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：固定 JNI 不返回 Vault Key、设备私钥或通用执行能力；正文仅短时存在于本机解析过程，号码和 OTP 不进入普通状态、日志、备份或同步。后台锁 Vault 行为保持。锁定恢复必须验证由平台凭据库封存的 Vault/副本绑定及当前密文指纹；记录缺失、损坏、Vault 替换或恢复时封闭失败并提示重新解锁建立恢复记录，恢复记录不得包含解锁凭据。
 - 验收：`CT-DEVICE-ASSIST-001`、`CT-DEVICE-ASSIST-002`、`AT-DEVICE-ASSIST-001`。
 
+### REQ-ANDROID-027 新版本提示
+
+- 必须：按 `ADR-0049`，Release 构建从编译期固定的 HTTPS `channels/review/android.json` 读取 Android 更新清单；未配置地址的 Debug/本地构建不得显示或执行检查。检查只在 Activity 前台执行，自动检查每 24 小时最多一次，设置页提供默认开启的自动检查开关与手动“检查更新”。请求不得携带 Cookie、设备标识、Vault 或同步状态，不得跟随重定向，响应超过 64 KiB、超时或格式无效时静默失败（手动检查显示失败）。
+- 必须：清单只有 versionCode 基数（去除 ABI 个位）严格高于已安装版本时才提示；客户端按 `Build.SUPPORTED_ABIS` 顺序选择 ABI APK，无匹配时回退 universal。下载地址必须是与清单同 host 的 HTTPS 同版本 immutable 路径和规范文件名，否则视为无效清单。
+- 必须：提示框显示新版本、覆盖安装保留数据及 SHA-256，并提供“下载”“稍后”“跳过此版本”；下载只通过系统浏览器打开地址，应用不得下载或安装 APK，不得申请 `REQUEST_INSTALL_PACKAGES`。跳过的 versionCode 与上次检查时间只保存在非秘密偏好中，更高版本出现时重新提示。
+- 必须：发布 workflow 在 APK immutable 发布并公网校验后、`latest.json` 之前发布 `android.json`；清单 versionCode 必须严格递增，同版本仅在资产哈希完全一致时允许重发。
+- 验收：`CT-ANDROID-UPDATE-001`、`AT-ANDROID-UPDATE-001`。
+
 ## Browser
 
 ### REQ-BROWSER-001 配对与独立授权
@@ -614,7 +622,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 - 必须：Chromium WebAuthn proxy 的 ES256 私钥保存在加密 secret 中，签名在 main 完成，每次 registration/assertion 显示 native confirmation。
 - 必须：Passkey 创建或导入使用当前 RP/origin 的默认 Login 作为归属提示，并由 desktop 重新验证；无有效默认值时可以唯一用户名匹配，仍不确定时作为 Passkey-only Login，禁止进入普通 Secret/密钥分类。
-- 验收：`CT-PASSKEY-001`、`AT-PASSKEY-001`。
+- 必须：Chromium 扩展必须在后台启动时即挂载 WebAuthn proxy，并在插件锁定、native 连接重连或桌面端暂时不可达期间保持挂载；此时的 registration/assertion 与平台认证器探测不得绕过 VaultMesh，必须保留请求、打开插件解锁界面并在桌面端可用且解锁后由 VaultMesh 继续。仅当用户在该界面明确选择不解锁时，当前请求以 `NotAllowedError` 结束，proxy 暂时 detach 5 分钟以便网站重试交给浏览器；在此期间解锁则立即重新挂载。页面取消或 5 分钟未完成时请求失败，但不绕过。仅确认未配对时 detach。
+- 验收：`CT-PASSKEY-001`、`CT-PASSKEY-002`、`AT-PASSKEY-001`。
 
 ## 本地 Agent Capability Broker
 

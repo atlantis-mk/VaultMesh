@@ -193,6 +193,10 @@ fun UnlockedVaultScreen(
                     if (pinEnabled) "已启用" else "未启用 · 使用 6 位 PIN",
                     if (pinEnabled) "关闭" else "设置", R.drawable.ic_lock,
                     if (pinEnabled) onDisablePin else ({ showPinSetup = true }), !state.busy)
+                if (BuildConfig.UPDATE_MANIFEST_URL.isNotEmpty()) {
+                    HomeGroupTitle("更新")
+                    UpdateSettingsCard()
+                }
             }
         }
     }
