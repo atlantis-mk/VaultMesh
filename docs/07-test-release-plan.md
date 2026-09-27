@@ -29,6 +29,7 @@ pnpm extension:typecheck
 pnpm extension:test
 pnpm extension:build
 pnpm extension:release:zip:all
+pnpm android:release:build
 pnpm verify:browser-parity
 pnpm verify:tauri-source
 pnpm scripts:test
@@ -71,7 +72,8 @@ pnpm typecheck
 | `CT-TAURI-TRAY-THEME-001` | Windows light/dark/unknown 主题选择、黑白托盘资源尺寸/解码、macOS Retina 模板资源保持测试 |
 | `CT-DESKTOP-STARTUP-*` | Tauri Rust autostart owner、固定参数、初始化标记、隐藏窗口配置、主窗口关闭销毁 WebView 与托盘重建、typed adapter 与设置 UI contract tests |
 | `CT-UPDATE-001` | Rust-owned updater/no-renderer-capability、release-only HTTPS config、macOS/Windows 原生“检查更新…”菜单、主动/自动检查互斥、主动检查无更新/失败反馈、用户确认、安装前 lock/exit cleanup、Windows NSIS 覆盖复制前 Native Host 注销/停止与安装后恢复注册，以及标准 GitHub-hosted `macos-15` ARM64、`macos-15-intel` x86_64、`windows-2025` x64 原生目标/host 架构绑定、精确 Rust toolchain、按 OS/arch/target 隔离且忽略 workspace-only 版本变化的 dependency-only Cargo cache、workspace release object/编译期 credential 保存前清理、矩阵 `fail-fast: false`、上游失败时 publisher 明确失败并通过同 run “Re-run failed jobs”复用成功 artifact、发布 workflow 无 `self-hosted` 标签、manifest 的 SemVer/platform/signature/不可变 URL/三平台完整性与 latest-last publish contract tests；Windows target experimental package 必须只发布 immutable objects、保持 test channel 不变且不计入 Windows AT |
-| `CT-UPDATE-REVIEW-001` | `0.0.1-review` fresh-install baseline 与当前 `0.0.10-review` build 的 workspace/Rust/Tauri/extension 版本一致性；Review workflow 固定使用 `channels/review/latest.json`，保留完整发布的三目标、签名、immutable、latest-last、精确 toolchain、dependency-only Cargo cache、workspace object 清理与失败任务同 run 恢复约束，并为 Windows同时生成 NSIS/MSI；Chrome/Firefox ZIP 必须进入同版本不可变 R2 路径并通过公网内容校验，R2 成功后只创建不含 Git Tag 的 GitHub Draft Prerelease并上传两个 DMG、Windows NSIS/MSI 与两个 ZIP；任一 prerequisite 失败时 Draft job 明确失败并可随失败任务重跑；阶段性 manifest 只引用已发布的 signed immutable artifact、首次从 `.1` 创建且后续严格递增，并允许在相同 current version 下只追加一个缺失平台，同时保持顶层字段、既有平台和 test channel 不变；阶段性清单和 Draft Prerelease 均不得计为完整正式发布或平台 AT |
+| `CT-ANDROID-RELEASE-001` | Android Review 打包：`build-android-release.mjs` 的 versionCode 单调派生与 ABI 个位、四个 APK 资产命名、每个 APK 仅含预期 ABI 的 JNI runtime、aapt2 包名/版本校验、apksigner 单证书一致且匹配固定指纹、缺签名配置 fail closed；Gradle splits、Rust release ABI 与脚本一致，Debug 仍为单一 APK；Review workflow 的 Android job、keystore 清理、R2 immutable/公网校验与 Draft 资产 contract tests |
+| `CT-UPDATE-REVIEW-001` | `0.0.1-review` fresh-install baseline 与当前 `0.1.0-review` build 的 workspace/Rust/Tauri/extension 版本一致性；Review workflow 固定使用 `channels/review/latest.json`，保留完整发布的三目标、签名、immutable、latest-last、精确 toolchain、dependency-only Cargo cache、workspace object 清理与失败任务同 run 恢复约束，并为 Windows同时生成 NSIS/MSI；Chrome/Firefox ZIP 必须进入同版本不可变 R2 路径并通过公网内容校验，R2 成功后只创建不含 Git Tag 的 GitHub Draft Prerelease并上传两个 DMG、Windows NSIS/MSI 与两个 ZIP；任一 prerequisite 失败时 Draft job 明确失败并可随失败任务重跑；阶段性 manifest 只引用已发布的 signed immutable artifact、首次从 `.1` 创建且后续严格递增，并允许在相同 current version 下只追加一个缺失平台，同时保持顶层字段、既有平台和 test channel 不变；阶段性清单和 Draft Prerelease 均不得计为完整正式发布或平台 AT |
 | `CT-OSS-001` | 历史证据：`scripts/open-source-metadata.test.mjs` 保留原 AGPLv3-or-later 标准正文、首次公开 Work 封存记录和精确秘密扫描例外；该 ID 不再代表当前版本的许可元数据 |
 | `CT-LICENSE-001` | `scripts/source-license-metadata.test.mjs` 验证 PolyForm Noncommercial 1.0.0 标准正文、Rust/pnpm SPDX、source-available/非商业表述、商业授权入口、历史 AGPL 权利与第三方权利边界一致，并保持 workspace package `private: true` |
 | `CT-HISTORY-001` | `scripts/repository-history-policy.test.mjs` 验证当前 Git refs 不再包含已知 AGPL 发布提交、`main` 根快照使用 PolyForm Noncommercial，并保留当前许可证元数据 |
@@ -109,6 +111,7 @@ pnpm typecheck
 | `AT-TAURI-MACOS-002`、`AT-TAURI-WINDOWS-002` | packaged Tauri 主窗口的系统截图/录屏内容捕获保护；macOS 记录 best-effort 结果，Windows 10 2004+ 必须从公共捕获路径排除 |
 | `AT-TAURI-WINDOWS-003` | packaged Windows Tauri 在系统 light/dark 启动、运行中双向主题切换、Explorer/应用重启及主题读取失败回退时的托盘图标可读性和即时更新 |
 | `AT-UPDATE-MACOS-001`、`AT-UPDATE-WINDOWS-001` | 目标 OS/architecture 从旧版安装开始验证无更新、取消、离线、篡改拒绝、已解锁确认后的 lock/cleanup、R2 test channel 成功更新，以及 Windows installer exit/macOS restart；macOS 分别覆盖 aarch64/x86_64，两平台均从原生应用菜单验证主动检查的无更新、失败与发现更新路径 |
+| `AT-ANDROID-RELEASE-001` | 从同一 Review run 下载 APK：arm64 真机安装 arm64-v8a 与 universal、32 位或兼容 armeabi-v7a 设备安装 armeabi-v7a、x86_64 模拟器安装 x86_64，完成 create/unlock/lock 冒烟；验证更高 Review 版本覆盖安装保留 Vault、同版本不同 ABI 互相覆盖安装、证书指纹与发布记录一致；不得触碰用户产品 Vault |
 | `AT-UPDATE-REVIEW-MACOS-001`、`AT-UPDATE-REVIEW-WINDOWS-001` | 目标 OS/architecture 全新安装 `0.0.1-review`，验证 Review endpoint、无更新和后续更高 Review 版本更新；已有 `0.1.x` test 安装验证不会自动降级，并按说明手动重装且保留 Vault 数据 |
 | `AT-RECOVERY-CODES-*` | packaged Tauri/插件的 Login 恢复码粘贴、文件导入/确认删除、保存、逐次主密码查看/复制与锁定清理验收 |
 | `AT-AGENT-PAIRING-001` | packaged Tauri 的自定义 client key、通用 stdio client、主窗口保持隐藏、配对不要求或继承 Vault 解锁、批准后无需客户端重启、deny/close/revoke/restart 验收 |
@@ -187,7 +190,7 @@ pnpm typecheck
 - `testDebugUnitTest` 中的 `CT-ANDROID-GENERATOR-001` 通过。
 - `CT-ANDROID-REVEAL-001` 的 contract 与仪器化测试包通过；真机行为以 `AT-ANDROID-013` 验收。
 - `CT-ANDROID-LAN-PAIRING-001` 的桌面↔Android 同协议测试与 Android arm64/x86_64 构建通过；跨设备行为以 `AT-ANDROID-021` 验收。
-- Android arm64/x86_64 target 必须编译固定 JNI exports；Manifest 只可增加生物识别、`REQ-ANDROID-021` 前台 LAN 和 `REQ-ANDROID-023` 本机号码所需权限，不得声明外部存储、Credential Manager 或 READ_SMS 权限；RECEIVE_SMS 仅允许 REQ-ANDROID-026 的显式互通路径，RECEIVE_BOOT_COMPLETED 仅用于恢复用户已开启且认证记录有效的互通；REQ-ANDROID-023 允许受 BIND_AUTOFILL_SERVICE 保护的导出系统 Autofill 服务及非导出认证页，允许 QUERY_ALL_PACKAGES 仅按请求包名读取签名，并允许 READ_PHONE_NUMBERS 只在用户主动设置时申请；REQ-ANDROID-025 仅通过 Google Play SMS Code Autofill API 取得经系统授权的验证码；REQ-ANDROID-022 允许非导出 connectedDevice 前台服务及对应权限。
+- Android arm64/x86_64 target 必须编译固定 JNI exports，Release 另须编译 armeabi-v7a；Manifest 只可增加生物识别、`REQ-ANDROID-021` 前台 LAN 和 `REQ-ANDROID-023` 本机号码所需权限，不得声明外部存储、Credential Manager 或 READ_SMS 权限；RECEIVE_SMS 仅允许 REQ-ANDROID-026 的显式互通路径，RECEIVE_BOOT_COMPLETED 仅用于恢复用户已开启且认证记录有效的互通；REQ-ANDROID-023 允许受 BIND_AUTOFILL_SERVICE 保护的导出系统 Autofill 服务及非导出认证页，允许 QUERY_ALL_PACKAGES 仅按请求包名读取签名，并允许 READ_PHONE_NUMBERS 只在用户主动设置时申请；REQ-ANDROID-025 仅通过 Google Play SMS Code Autofill API 取得经系统授权的验证码；REQ-ANDROID-022 允许非导出 connectedDevice 前台服务及对应权限。
 - Debug APK 可以在模拟器验证布局与基本 lifecycle，但 `FLAG_SECURE`、后台/系统锁定、任务划除、进程终止、backup exclusion 和 release JNI 必须由 `AT-ANDROID-001` 在 arm64 真机验收。
 - 未完成 `AT-ANDROID-001`、签名、依赖审查与独立发布记录前，Android 保持 Partial 且不得描述为已发布。
 
@@ -255,8 +258,9 @@ pnpm typecheck
 - Test channel 必须完成三目标 updater artifact、Tauri 签名、R2 latest-last 发布及 `AT-UPDATE-*`；该证据不替代正式发布所需的 Apple notarization 或 Windows Authenticode。
 - Test 与 Review 的完整三目标构建必须使用标准 GitHub-hosted 原生架构 Runner；发布 workflow 不得依赖 `self-hosted` 或自定义 Runner 标签。
 - Review 发布必须使用独立 channel；`0.0.1-review` 作为 fresh-install 基线，不得覆盖 test channel 或对已有 `0.1.x` 安装启用 downgrade。
-- Review GitHub Draft Prerelease 可以在 R2 完整发布后创建，但两个 DMG、Windows NSIS/MSI、Chrome ZIP
-  与 Firefox ZIP 必须来自同一 source SHA，且两个 ZIP 已通过 R2 公网下载校验；Draft 必须保持 Draft、不得创建 Git Tag，并且不得在平台
+- Review GitHub Draft Prerelease 可以在 R2 完整发布后创建，但两个 DMG、Windows NSIS/MSI、Chrome ZIP、
+  Firefox ZIP 与四个 Android APK（universal、arm64-v8a、armeabi-v7a、x86_64）必须来自同一 source SHA，且 ZIP 与 APK 已通过 R2 公网下载校验；
+  Android APK 由 `ADR-0048` 的 CI release keystore 签名，Review 构建不计为 `AT-ANDROID-RELEASE-001` 或 Android 已发布；Draft 必须保持 Draft、不得创建 Git Tag，并且不得在平台
   AT、Work 封存、Release record 门禁完成前公开。
 - Release record 与 Git Tag 存在。
 - Release 中引用的 Work 均为 schema-v2 Done 或已列入 `changes/archive.json` 的 legacy Work，且 `VAULTMESH_ARCHIVE_BASE_REF` 基线校验通过。

@@ -14,6 +14,26 @@ pnpm android:build
 
 `ANDROID_HOME` 必须指向 SDK；`ANDROID_NDK_HOME` 可以省略，构建脚本会选择固定 NDK。Debug APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
+## Review 发布打包
+
+Release 构建覆盖 `armeabi-v7a`、`arm64-v8a`、`x86_64`，并额外生成包含全部 ABI 的 universal APK（`ADR-0048`）。本地需要再安装 32 位 Rust target：
+
+```sh
+rustup target add armv7-linux-androideabi
+```
+
+签名密钥只通过环境变量提供，不得提交到仓库：
+
+```sh
+VAULTMESH_ANDROID_KEYSTORE_PATH=/path/to/release.jks \
+VAULTMESH_ANDROID_KEYSTORE_PASSWORD=... VAULTMESH_ANDROID_KEY_ALIAS=... VAULTMESH_ANDROID_KEY_PASSWORD=... \
+pnpm android:release:build
+```
+
+输出位于 `artifacts/android/VaultMesh_<version>_android-<universal|armeabi-v7a|arm64-v8a|x86_64>.apk`。versionName 取自根 `package.json`，versionCode 按版本单调派生，个位区分 ABI（universal 0、armeabi-v7a 1、arm64-v8a 2、x86_64 3）。设置 `VAULTMESH_ANDROID_CERT_SHA256` 时脚本还会校验证书指纹；仅做本地冒烟时可加 `-- --allow-unsigned` 生成未签名 APK。
+
+CI 的 `Publish R2 review release` workflow 需要 Secrets `ANDROID_RELEASE_KEYSTORE_BASE64`、`ANDROID_RELEASE_KEYSTORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD` 与仓库变量 `ANDROID_RELEASE_CERT_SHA256`。
+
 ## 应用图标
 
 `app/src/main/res/mipmap-nodpi/ic_launcher_artwork.png` 是内置 imagegen 以桌面端 `apps/tauri-desktop/resources/icon.png` 为品牌参考生成的透明 RGBA 图标，保留锁盘、青色钥匙孔、六节点和紫蓝配色。完整生成提示词保存在 `resources/launcher-icon-prompt.txt`。替换图片时必须保留 alpha；白色背景由 Android 自适应图层提供，不烘焙进 PNG。

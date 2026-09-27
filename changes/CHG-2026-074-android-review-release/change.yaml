@@ -1,0 +1,39 @@
+schema: "2"
+id: "CHG-2026-074-android-review-release"
+title: "Android 多 ABI Review 打包发布"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "把 Android 纳入 Review 发布：新增 armeabi-v7a、按 ABI 拆分签名 APK 并引入 CI 签名密钥，跨越平台范围、凭据与发布边界"
+requirements:
+  - "REQ-UPDATE-002"
+  - "REQ-ANDROID-001"
+
+tests:
+  - "CT-ANDROID-RELEASE-001"
+  - "CT-UPDATE-REVIEW-001"
+  - "AT-ANDROID-RELEASE-001"
+
+adrs:
+  - "ADR-0048"
+
+context_refs:
+  - "specs/android-client.md"
+  - "docs/07-test-release-plan.md#GATE-6 平台发布"
+
+related_changes: []
+boundaries:
+  - "platform"
+  - "secrets"
+  - "release"
+
+risks:
+  - "armeabi-v7a 为新增 32 位运行面，host 测试只覆盖 64 位"
+  - "release keystore 丢失将无法对既有安装覆盖升级，需离线备份"
+  - "首次运行前需配置 ANDROID_RELEASE_* Secrets 与证书指纹变量，否则 workflow fail closed"
+
+next:
+  - "生成 release keystore，配置 GitHub Secrets 与 ANDROID_RELEASE_CERT_SHA256 变量"
+  - "运行 Publish R2 review release，确认四个 APK 进入 R2 与 Draft Prerelease"
+  - "按 AT-ANDROID-RELEASE-001 在 arm64、armeabi-v7a 与 x86_64 设备完成安装与升级冒烟后运行 work:finish"

@@ -294,7 +294,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 - 必须：`0.0.1-review` 是 fresh-install 基线；每个后续 Review build 的 workspace、Rust package、
   Tauri desktop、Chromium extension 和 Firefox extension 必须统一为同一个严格递增的规范 Review SemVer，当前更新版本为
-  `0.0.10-review`；打包输出和 updater descriptor 不得丢失 `review` prerelease 标识。
+  `0.1.0-review`；打包输出和 updater descriptor 不得丢失 `review` prerelease 标识。
 - 必须：Review build 从编译期固定的 HTTPS `channels/review/latest.json` 检查更新，并继续使用
   `REQ-UPDATE-001` 的 Rust-owned 检查、用户确认、Tauri 签名验证、安装前 lock/cleanup 和 latest-last
   发布、Cargo cache 与失败任务恢复约束；完整 Review 发布同样必须使用三个标准 GitHub-hosted 原生架构
@@ -313,9 +313,16 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
   当前版本的目标平台 artifact 后续就绪时，可以在 version、notes、pub_date 与既有 platform entry 全部
   不变的前提下只追加一个尚不存在的平台；重复平台、不同版本、失去 immutable/signature 证据或并发变更
   必须 fail closed。阶段性 manifest 不得计为完整 Review 发布或平台 AT；完整发布仍必须包含三个目标平台。
+- 必须：完整 Review 发布按 `ADR-0048` 同时构建 Android release APK：armeabi-v7a、arm64-v8a、x86_64
+  三个按 ABI 拆分的 APK 与一个 universal APK，各自只包含对应 ABI 的 JNI runtime 且不得含其他 ABI；
+  versionName 与 Review SemVer 一致，versionCode 由版本单调派生并以个位区分 ABI。所有 APK 必须由 CI
+  Secret 中同一 release keystore 签名，证书 SHA-256 必须匹配仓库固定指纹；缺少签名配置、指纹不一致、
+  ABI 或版本漂移时 fail closed。Android APK 与其他产物一样先 immutable 发布到同版本 R2 路径并公网校验，
+  再上传到 Draft Prerelease；Android job 失败时 publisher 与 Draft job 必须以可重跑失败结束。
+  Review APK 不计为 Android 平台 AT 或已发布。
 - 失败：现有 `0.1.x` test 安装不得接收 `0.0.1-review` 自动降级。加入 Review 必须使用明确的手动
   重装路径；失败或取消必须保留既有安装和 Vault 数据。
-- 验收：`CT-UPDATE-REVIEW-001`、`AT-UPDATE-REVIEW-MACOS-001`、`AT-UPDATE-REVIEW-WINDOWS-001`。
+- 验收：`CT-UPDATE-REVIEW-001`、`CT-ANDROID-RELEASE-001`、`AT-UPDATE-REVIEW-MACOS-001`、`AT-UPDATE-REVIEW-WINDOWS-001`、`AT-ANDROID-RELEASE-001`。
 
 ### REQ-FEEDBACK-001 React 客户端瞬态反馈
 

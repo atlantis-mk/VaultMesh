@@ -6,7 +6,7 @@ on:
       version:
         description: "Review SemVer without a leading v (must start at 0.0.1-review)"
         required: true
-        default: "0.0.10-review"
+        default: "0.1.0-review"
         type: string
       notes:
         description: "Short reviewer-facing release notes"
@@ -47,6 +47,85 @@ jobs:
         with:
           name: vaultmesh-browser-extensions
           path: ${{ runner.temp }}/vaultmesh-browser-extensions
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    name: Build signed Android APKs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ANDROID_NDK_VERSION: 28.2.13676358
+      ANDROID_BUILD_TOOLS_VERSION: 36.1.0
+      ANDROID_PLATFORM: android-37.0
+      VAULTMESH_ANDROID_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate Android Review version matches source metadata
+        env:
+          REVIEW_VERSION: ${{ inputs.version }}
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const sourceVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
+            if (process.env.REVIEW_VERSION !== sourceVersion) {
+              throw new Error(`Review version ${process.env.REVIEW_VERSION} does not match source ${sourceVersion}.`);
+            }
+          '
+      - name: Require pinned Android signing certificate
+        run: |
+          if [[ ! "$VAULTMESH_ANDROID_CERT_SHA256" =~ ^[0-9a-fA-F:]{64,95}$ ]]; then
+            echo "Set repository variable ANDROID_RELEASE_CERT_SHA256 to the Review signing certificate SHA-256." >&2
+            exit 1
+          fi
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Install Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platforms;${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
+            "ndk;${ANDROID_NDK_VERSION}" >/dev/null
+      - name: Install Rust Android targets and cargo-ndk
+        run: |
+          rustup target add armv7-linux-androideabi aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Restore Android signing keystore
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          [[ -n "$ANDROID_RELEASE_KEYSTORE_BASE64" ]] || {
+            echo "Missing secret ANDROID_RELEASE_KEYSTORE_BASE64." >&2
+            exit 1
+          }
+          umask 077
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/vaultmesh-android-release.jks"
+      - name: Build and verify per-ABI and universal APKs
+        env:
+          VAULTMESH_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/vaultmesh-android-release.jks
+          VAULTMESH_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          VAULTMESH_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          VAULTMESH_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: >-
+          node scripts/build-android-release.mjs
+          --output "$RUNNER_TEMP/vaultmesh-android"
+      - name: Remove Android signing keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/vaultmesh-android-release.jks"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vaultmesh-android
+          path: ${{ runner.temp }}/vaultmesh-android
           if-no-files-found: error
           retention-days: 7
 
@@ -189,7 +268,7 @@ jobs:
 
   publish:
     name: Publish immutable artifacts then review channel
-    needs: [build, extension]
+    needs: [build, extension, android]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -206,13 +285,14 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Require successful platform and extension builds
+      - name: Require successful platform, extension, and Android builds
         env:
           BUILD_RESULT: ${{ needs.build.result }}
           EXTENSION_RESULT: ${{ needs.extension.result }}
+          ANDROID_RESULT: ${{ needs.android.result }}
         run: |
-          if [[ "$BUILD_RESULT" != "success" || "$EXTENSION_RESULT" != "success" ]]; then
-            echo "One or more platform or extension builds failed. Use Re-run failed jobs on this workflow run so successful artifacts are reused." >&2
+          if [[ "$BUILD_RESULT" != "success" || "$EXTENSION_RESULT" != "success" || "$ANDROID_RESULT" != "success" ]]; then
+            echo "One or more platform, extension, or Android builds failed. Use Re-run failed jobs on this workflow run so successful artifacts are reused." >&2
             exit 1
           fi
       - uses: actions/checkout@v7
@@ -228,6 +308,10 @@ jobs:
         with:
           name: vaultmesh-browser-extensions
           path: ${{ runner.temp }}/vaultmesh-browser-extensions
+      - uses: actions/download-artifact@v8
+        with:
+          name: vaultmesh-android
+          path: ${{ runner.temp }}/vaultmesh-android
       - name: Validate channel and build publication
         run: |
           set -euo pipefail
@@ -262,6 +346,21 @@ jobs:
               "$source" \
               "releases/v${RELEASE_VERSION}/${asset}" \
               "application/zip" \
+              "$sha256" \
+              >> "$RUNNER_TEMP/vaultmesh-publication/immutable.tsv"
+          done
+          for android_variant in universal arm64-v8a armeabi-v7a x86_64; do
+            asset="VaultMesh_${RELEASE_VERSION}_android-${android_variant}.apk"
+            source="$RUNNER_TEMP/vaultmesh-android/$asset"
+            [[ -f "$source" ]] || {
+              echo "Missing R2 Android asset: $asset" >&2
+              exit 1
+            }
+            sha256="$(sha256sum "$source" | awk '{print $1}')"
+            printf '%s\t%s\t%s\t%s\n' \
+              "$source" \
+              "releases/v${RELEASE_VERSION}/${asset}" \
+              "application/vnd.android.package-archive" \
               "$sha256" \
               >> "$RUNNER_TEMP/vaultmesh-publication/immutable.tsv"
           done
@@ -313,6 +412,14 @@ jobs:
               --output "$published"
             cmp "$RUNNER_TEMP/vaultmesh-browser-extensions/$asset" "$published"
           done
+          for android_variant in universal arm64-v8a armeabi-v7a x86_64; do
+            asset="VaultMesh_${RELEASE_VERSION}_android-${android_variant}.apk"
+            published="$RUNNER_TEMP/published-$asset"
+            curl --fail --silent --show-error \
+              "${R2_PUBLIC_BASE_URL%/}/releases/v${RELEASE_VERSION}/${asset}" \
+              --output "$published"
+            cmp "$RUNNER_TEMP/vaultmesh-android/$asset" "$published"
+          done
       - name: Write reviewer download links
         run: |
           base="${R2_PUBLIC_BASE_URL%/}/releases/v${RELEASE_VERSION}"
@@ -325,12 +432,16 @@ jobs:
             echo "- [Windows x64 MSI installer](${base}/VaultMesh_${RELEASE_VERSION}_windows-x86_64-installer.msi)"
             echo "- [Chrome/Chromium extension ZIP](${base}/VaultMesh_${RELEASE_VERSION}_chrome-extension.zip)"
             echo "- [Firefox extension ZIP](${base}/VaultMesh_${RELEASE_VERSION}_firefox-extension.zip)"
+            echo "- [Android universal APK](${base}/VaultMesh_${RELEASE_VERSION}_android-universal.apk)"
+            echo "- [Android arm64-v8a APK](${base}/VaultMesh_${RELEASE_VERSION}_android-arm64-v8a.apk)"
+            echo "- [Android armeabi-v7a APK](${base}/VaultMesh_${RELEASE_VERSION}_android-armeabi-v7a.apk)"
+            echo "- [Android x86_64 APK](${base}/VaultMesh_${RELEASE_VERSION}_android-x86_64.apk)"
             echo "- [Updater manifest](${R2_PUBLIC_BASE_URL%/}/channels/review/latest.json)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   github_prerelease:
     name: Create GitHub draft prerelease
-    needs: [build, publish, extension]
+    needs: [build, publish, extension, android]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -344,13 +455,14 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Require successful build, publish, and extension jobs
+      - name: Require successful build, publish, extension, and Android jobs
         env:
           BUILD_RESULT: ${{ needs.build.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
           EXTENSION_RESULT: ${{ needs.extension.result }}
+          ANDROID_RESULT: ${{ needs.android.result }}
         run: |
-          if [[ "$BUILD_RESULT" != "success" || "$PUBLISH_RESULT" != "success" || "$EXTENSION_RESULT" != "success" ]]; then
+          if [[ "$BUILD_RESULT" != "success" || "$PUBLISH_RESULT" != "success" || "$EXTENSION_RESULT" != "success" || "$ANDROID_RESULT" != "success" ]]; then
             echo "Review prerequisites are incomplete. Use Re-run failed jobs on this workflow run so successful artifacts are reused." >&2
             exit 1
           fi
@@ -366,6 +478,10 @@ jobs:
         with:
           name: vaultmesh-browser-extensions
           path: ${{ runner.temp }}/vaultmesh-update
+      - uses: actions/download-artifact@v8
+        with:
+          name: vaultmesh-android
+          path: ${{ runner.temp }}/vaultmesh-update
       - name: Create or resume GitHub draft prerelease
         env:
           RELEASE_TARGET: ${{ github.sha }}
@@ -380,6 +496,10 @@ jobs:
             "VaultMesh_${RELEASE_VERSION}_windows-x86_64-installer.msi"
             "VaultMesh_${RELEASE_VERSION}_chrome-extension.zip"
             "VaultMesh_${RELEASE_VERSION}_firefox-extension.zip"
+            "VaultMesh_${RELEASE_VERSION}_android-universal.apk"
+            "VaultMesh_${RELEASE_VERSION}_android-arm64-v8a.apk"
+            "VaultMesh_${RELEASE_VERSION}_android-armeabi-v7a.apk"
+            "VaultMesh_${RELEASE_VERSION}_android-x86_64.apk"
           )
           for asset in "${assets[@]}"; do
             [[ -f "$asset_directory/$asset" ]] || {

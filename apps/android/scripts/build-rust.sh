@@ -19,19 +19,28 @@ if [[ "$(cargo ndk --version 2>/dev/null || true)" != "cargo-ndk 4.1.2" ]]; then
   exit 1
 fi
 
-cd "$repo_dir"
+# Release 覆盖全部发布 ABI；Debug 默认只构建真机 arm64 与模拟器 x86_64。
 if [[ "$profile" == "release" ]]; then
-  cargo ndk \
-    --platform 26 \
-    --target arm64-v8a \
-    --target x86_64 \
-    --output-dir "$output_dir" \
-    build --release --package vaultmesh-android-runtime
+  default_abis="armeabi-v7a arm64-v8a x86_64"
 else
-  cargo ndk \
-    --platform 26 \
-    --target arm64-v8a \
-    --target x86_64 \
-    --output-dir "$output_dir" \
-    build --package vaultmesh-android-runtime
+  default_abis="arm64-v8a x86_64"
 fi
+read -r -a abis <<<"${VAULTMESH_ANDROID_ABIS:-$default_abis}"
+target_args=()
+for abi in "${abis[@]}"; do
+  case "$abi" in
+    armeabi-v7a|arm64-v8a|x86_64) target_args+=(--target "$abi") ;;
+    *) echo "unsupported Android ABI: $abi" >&2; exit 1 ;;
+  esac
+done
+
+cd "$repo_dir"
+cargo_args=(build --package vaultmesh-android-runtime)
+if [[ "$profile" == "release" ]]; then
+  cargo_args+=(--release)
+fi
+cargo ndk \
+  --platform 26 \
+  "${target_args[@]}" \
+  --output-dir "$output_dir" \
+  "${cargo_args[@]}"

@@ -18,7 +18,7 @@
 | 远程 MCP、云端 Agent、常驻网络监听 broker | Out | Out | 不引入 VaultMesh 服务端、远程 bearer 管理面或端口映射 |
 | SwiftUI/AppKit client | Out | N/A | 产品源码已移除；历史 contract 证据保留在 Rejected Change |
 | WinUI 3 client | N/A | Out | reserved source root 已移除 |
-| Android Compose client | N/A | N/A | Partial；`CHG-2026-047` 至 `CHG-2026-062` 逐步实施本地 Vault、Login/Card/Secret/SSH/Identity 字段编辑、主密码轮换、受保护复制与查看、历史、TOTP、备份恢复、密码健康、Login 恢复码及生物识别/PIN 快捷解锁；直接实现本地生成器。`CHG-2026-064` 扩展与桌面互通的显式局域网发现和配对；`CHG-2026-065` 接入独立局域网同步服务。Agent 工作流不纳入 Android；`CHG-2026-066` 接入系统 Autofill 与登录识别保存，`CHG-2026-069` 增加本机号码用户名候选，`CHG-2026-070` 增加锁定态加密候选预览与先选后授权，`CHG-2026-072` 增加经系统授权的短信验证码字段填充；Credential Manager、Passkey 和其他导入仍需分别建立受控切片与平台验收。format 3 升级按 `NFR-COMPAT-001` 仍仅由 desktop 主密码入口执行 |
+| Android Compose client | N/A | N/A | Partial；`CHG-2026-047` 至 `CHG-2026-062` 逐步实施本地 Vault、Login/Card/Secret/SSH/Identity 字段编辑、主密码轮换、受保护复制与查看、历史、TOTP、备份恢复、密码健康、Login 恢复码及生物识别/PIN 快捷解锁；直接实现本地生成器。`CHG-2026-064` 扩展与桌面互通的显式局域网发现和配对；`CHG-2026-065` 接入独立局域网同步服务。Agent 工作流不纳入 Android；`CHG-2026-066` 接入系统 Autofill 与登录识别保存，`CHG-2026-069` 增加本机号码用户名候选，`CHG-2026-070` 增加锁定态加密候选预览与先选后授权，`CHG-2026-072` 增加经系统授权的短信验证码字段填充；Credential Manager、Passkey 和其他导入仍需分别建立受控切片与平台验收。format 3 升级按 `NFR-COMPAT-001` 仍仅由 desktop 主密码入口执行。`CHG-2026-074` 把 armeabi-v7a、arm64-v8a、x86_64 分 ABI APK 与 universal APK 以 CI 签名纳入 Review 打包，不计为 Android 已发布 |
 | Linux/iOS/web client | Out | Out | 不在当前范围 |
 
 ## Vault 能力

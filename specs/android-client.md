@@ -132,7 +132,7 @@ JNI 只返回 `ok`、`not_initialized`、`already_exists`、`missing`、`locked`
 
 ## 验收
 
-Host Rust 测试覆盖 create、拒绝覆盖、unlock、wrong password、lock、重新构造 runtime、损坏文件、各类型 CRUD/适用回收站与历史持久化、秘密与元数据保留及 mutation 回滚、快捷解锁错误秘密/失败限制/禁用/写入失败；contract 测试扫描 JNI、脱敏 DTO、本地搜索、破坏性确认、Manifest、Compose 编辑、Kotlin lifecycle 与 Keystore 边界。Android target 编译覆盖 arm64 与 x86_64；`AT-ANDROID-001` 至 `AT-ANDROID-020` 必须在 arm64 真机执行。
+Host Rust 测试覆盖 create、拒绝覆盖、unlock、wrong password、lock、重新构造 runtime、损坏文件、各类型 CRUD/适用回收站与历史持久化、秘密与元数据保留及 mutation 回滚、快捷解锁错误秘密/失败限制/禁用/写入失败；contract 测试扫描 JNI、脱敏 DTO、本地搜索、破坏性确认、Manifest、Compose 编辑、Kotlin lifecycle 与 Keystore 边界。Android target 编译覆盖 arm64 与 x86_64，Release 另覆盖 armeabi-v7a 并按 `ADR-0048` 拆分 ABI APK 与 universal APK；`AT-ANDROID-001` 至 `AT-ANDROID-020` 必须在 arm64 真机执行。
 
 ## Android LAN 同步
 

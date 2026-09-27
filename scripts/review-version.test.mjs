@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workspace = new URL("../", import.meta.url);
-const expectedVersion = "0.0.10-review";
+const expectedVersion = "0.1.0-review";
 
 async function json(relativePath) {
   return JSON.parse(await readFile(new URL(relativePath, workspace), "utf8"));
@@ -27,7 +27,7 @@ test("Review product manifests use one prerelease version", async () => {
 test("Review publication is isolated from the existing test channel", async () => {
   const workflow = await readFile(new URL(".github/workflows/r2-review-release.yml", workspace), "utf8");
   assert.match(workflow, /name: Publish R2 review release/);
-  assert.match(workflow, /default: "0\.0\.10-review"/);
+  assert.match(workflow, /default: "0\.1\.0-review"/);
   assert.equal(workflow.match(/uses: pnpm\/action-setup@v6/g)?.length, 2);
   assert.doesNotMatch(workflow, /pnpm\/action-setup@v6\n\s+with:\n\s+version:/);
   assert.match(workflow, /channels\/review\/latest\.json/);
@@ -43,7 +43,7 @@ test("Review publication is isolated from the existing test channel", async () =
   assert.match(workflow, /platform_key: windows-x86_64[\s\S]*?bundles: nsis,msi/);
   assert.match(workflow, /strategy:\n\s+fail-fast: false/);
   assert.match(workflow, /Verify GitHub-hosted runner matches target architecture/);
-  const extensionJob = workflow.match(/\n  extension:[\s\S]*?\n  build:/)?.[0] ?? "";
+  const extensionJob = workflow.match(/\n  extension:[\s\S]*?\n  android:/)?.[0] ?? "";
   const buildJob = workflow.match(/\n  build:[\s\S]*?\n  publish:/)?.[0] ?? "";
   assert.doesNotMatch(extensionJob, /actions\/cache@v5/);
   assert.match(buildJob, /name: Compute Rust dependency cache key[\s\S]*rust-dependency-cache-key\.mjs --github-output/);
@@ -53,11 +53,11 @@ test("Review publication is isolated from the existing test channel", async () =
   assert.match(buildJob, /name: Remove workspace release objects before saving dependency cache[\s\S]*cargo clean --release --target/);
   assert.ok(buildJob.indexOf("uses: actions/upload-artifact@v7") < buildJob.indexOf("name: Remove workspace release objects before saving dependency cache"));
   assert.doesNotMatch(workflow, /vaultmesh-cargo-v1-|hashFiles\(|sccache/);
-  assert.match(workflow, /publish:\n\s+name: Publish immutable artifacts then review channel\n\s+needs: \[build, extension\]\n\s+if: \$\{\{ always\(\) && !cancelled\(\) \}\}/);
-  assert.match(workflow, /name: Require successful platform and extension builds[\s\S]*BUILD_RESULT: \$\{\{ needs\.build\.result \}\}[\s\S]*EXTENSION_RESULT: \$\{\{ needs\.extension\.result \}\}/);
+  assert.match(workflow, /publish:\n\s+name: Publish immutable artifacts then review channel\n\s+needs: \[build, extension, android\]\n\s+if: \$\{\{ always\(\) && !cancelled\(\) \}\}/);
+  assert.match(workflow, /name: Require successful platform, extension, and Android builds[\s\S]*BUILD_RESULT: \$\{\{ needs\.build\.result \}\}[\s\S]*EXTENSION_RESULT: \$\{\{ needs\.extension\.result \}\}[\s\S]*ANDROID_RESULT: \$\{\{ needs\.android\.result \}\}/);
   assert.match(workflow, /github_prerelease:\n\s+name: Create GitHub draft prerelease/);
-  assert.match(workflow, /needs: \[build, publish, extension\]\n\s+if: \$\{\{ always\(\) && !cancelled\(\) \}\}/);
-  assert.match(workflow, /name: Require successful build, publish, and extension jobs/);
+  assert.match(workflow, /needs: \[build, publish, extension, android\]\n\s+if: \$\{\{ always\(\) && !cancelled\(\) \}\}/);
+  assert.match(workflow, /name: Require successful build, publish, extension, and Android jobs/);
   assert.match(workflow, /Use Re-run failed jobs on this workflow run/);
   assert.match(workflow, /extension:\n\s+name: Build Chrome and Firefox extensions/);
   assert.match(workflow, /VAULTMESH_EXTENSION_DISTRIBUTION: sideload-review/);
@@ -68,7 +68,7 @@ test("Review publication is isolated from the existing test channel", async () =
   assert.doesNotMatch(workflow, /secrets\.WXT_CHROME_EXTENSION_KEY/);
   assert.match(workflow, /build-browser-extension-release\.mjs/);
   assert.match(workflow, /name: vaultmesh-browser-extensions/);
-  assert.match(workflow, /needs: \[build, publish, extension\]/);
+  assert.match(workflow, /needs: \[build, publish, extension, android\]/);
   assert.match(workflow, /permissions:\n\s+contents: write/);
   assert.match(workflow, /--draft\s+\\\n\s+--prerelease/);
   assert.match(workflow, /git ls-remote --exit-code --tags origin/);
@@ -87,6 +87,20 @@ test("Review publication is isolated from the existing test channel", async () =
   assert.match(workflow, /\.isDraft.*== "true"/);
   assert.match(workflow, /\.isPrerelease.*== "true"/);
   assert.doesNotMatch(workflow, /gh release upload[^\n]*--clobber/);
+  const androidJob = workflow.match(/\n  android:[\s\S]*?\n  build:/)?.[0] ?? "";
+  assert.match(androidJob, /name: Build signed Android APKs\n\s+runs-on: ubuntu-24\.04/);
+  assert.match(androidJob, /vars\.ANDROID_RELEASE_CERT_SHA256/);
+  assert.match(androidJob, /secrets\.ANDROID_RELEASE_KEYSTORE_BASE64/);
+  assert.match(androidJob, /rustup target add armv7-linux-androideabi aarch64-linux-android x86_64-linux-android/);
+  assert.match(androidJob, /node scripts\/build-android-release\.mjs/);
+  assert.match(androidJob, /name: Remove Android signing keystore\n\s+if: always\(\)/);
+  assert.doesNotMatch(androidJob, /--allow-unsigned/);
+  for (const variant of ["universal", "arm64-v8a", "armeabi-v7a", "x86_64"]) {
+    assert.match(workflow, new RegExp(`"VaultMesh_\\$\\{RELEASE_VERSION\\}_android-${variant}\\.apk"`));
+  }
+  assert.equal(workflow.match(/for android_variant in universal arm64-v8a armeabi-v7a x86_64; do/g)?.length, 2);
+  assert.match(workflow, /"application\/vnd\.android\.package-archive"/);
+  assert.match(workflow, /cmp "\$RUNNER_TEMP\/vaultmesh-android\/\$asset" "\$published"/);
   assert.doesNotMatch(workflow, /self-hosted/);
 });
 
