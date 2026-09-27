@@ -52,6 +52,19 @@ describe("popup workspace memory cache", () => {
     expect(cache.read()).toBeNull();
   });
 
+  it("drops a stale snapshot when the broker reports a Vault change", () => {
+    const cache = new PopupWorkspaceMemoryCache();
+    cache.observeRpcResponse("vault.workspace", rpcResult(workspace), 1_000);
+    cache.observeRpcResponse("events.poll", rpcResult({
+      sequence: 1,
+      events: [{ sequence: 1, type: "vault-changed", occurredAt: "2026-09-18T00:00:00.000Z" }],
+    }), 2_000);
+    expect(cache.read()).toBeNull();
+
+    cache.observeRpcResponse("vault.workspace", rpcResult(workspace), 3_000);
+    expect(cache.read()?.cachedAt).toBe(3_000);
+  });
+
   it("ignores malformed or failed workspace responses", () => {
     const cache = new PopupWorkspaceMemoryCache();
     cache.observeRpcResponse("vault.workspace", { ...rpcResult(workspace), ok: false }, 1_000);

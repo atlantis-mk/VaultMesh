@@ -1,0 +1,33 @@
+schema: "2"
+id: "CHG-2026-061-android-biometric-quick-unlock"
+title: "Android 生物识别快捷解锁"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "Android Keystore 与 core Vault Key 包装跨平台安全边界且需真机验收"
+requirements:
+  - "REQ-ANDROID-019"
+tests:
+  - "CT-ANDROID-JNI-017"
+  - "AT-ANDROID-019"
+adrs:
+  - "ADR-0021"
+  - "ADR-0036"
+context_refs:
+  - "docs/02-scope-matrix.md#客户端与平台"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-019 Compose 生物识别快捷解锁"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "仅强生物识别逐次授权 Keystore 随机包装秘密；Vault Key 不越过 JNI"
+  - "core 验证当前加密 Vault 后才发布解锁 session；主密码回退保持可用"
+risks:
+  - "Keystore/生物识别注册与 Activity 生命周期需 arm64 真机验收"
+next:
+  - "arm64 真机 Debug APK 已确认系统生物识别弹窗直接出现、成功解锁、取消后回退 PIN 且本次前台不重复弹窗，进程重启后再次弹窗；独立缓存 Vault 的生物识别封装 AndroidTest 通过"
+  - "继续用独立 Debug Vault 验证识别失败、无生物识别、注册变化、主密码轮换、关闭和主密码回退，完成 AT-ANDROID-019"

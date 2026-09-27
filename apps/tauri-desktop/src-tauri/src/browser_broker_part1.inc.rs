@@ -67,6 +67,12 @@ pub const TAURI_BROWSER_SLICE_OPERATIONS: &[&str] = &[
     "browser.fill.record",
     "browser.fill.history",
     "browser.fill.request",
+    "device.assist.capabilities",
+    "device.assist.start",
+    "device.assist.poll",
+    "device.assist.select",
+    "device.assist.finish",
+    "device.assist.cancel",
     "email.otp.watch",
     "email.otp.poll",
     "email.otp.candidates",
@@ -190,6 +196,7 @@ fn requires_gesture(operation: &str) -> bool {
             | "browser.login.password-changed"
             | "browser.fill.record"
             | "browser.fill.history"
+            | "device.assist.capabilities" | "device.assist.poll" | "device.assist.cancel"
             | "email.otp.poll"
             | "email.otp.candidates"
             | "passkeys.create"
@@ -266,7 +273,7 @@ pub trait BrowserBrokerPlatform: Send + Sync {
         now_millis: i64,
     ) -> Option<Result<Value, BrowserPlatformError>>;
 
-    fn after_master_unlock(&self, _runtime: &DesktopRuntime) -> Result<(), BrowserPlatformError> {
+    fn after_master_unlock(&self, _runtime: &mut DesktopRuntime) -> Result<(), BrowserPlatformError> {
         Ok(())
     }
 
@@ -571,7 +578,7 @@ impl BrowserBrokerCore {
                 };
                 match self.runtime.create_for_browser(password.to_owned()) {
                     Ok(status) => {
-                        if let Err(error) = self.platform.after_master_unlock(&self.runtime) {
+                        if let Err(error) = self.platform.after_master_unlock(&mut self.runtime) {
                             self.runtime.lock();
                             return rpc_failure(envelope_request_id, error.code, &error.message);
                         }
@@ -599,7 +606,7 @@ impl BrowserBrokerCore {
                 };
                 match self.runtime.unlock_for_browser(password.to_owned()) {
                     Ok(status) => {
-                        if let Err(error) = self.platform.after_master_unlock(&self.runtime) {
+                        if let Err(error) = self.platform.after_master_unlock(&mut self.runtime) {
                             self.runtime.lock();
                             return rpc_failure(envelope_request_id, error.code, &error.message);
                         }
@@ -725,7 +732,7 @@ impl BrowserBrokerCore {
                         operation,
                         "vault.restore" | "pin.unlock" | "biometric.unlock"
                     ) {
-                        if let Err(error) = self.platform.after_master_unlock(&self.runtime) {
+                        if let Err(error) = self.platform.after_master_unlock(&mut self.runtime) {
                             self.runtime.lock();
                             return rpc_failure(envelope_request_id, error.code, &error.message);
                         }

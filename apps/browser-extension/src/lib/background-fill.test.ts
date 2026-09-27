@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { startFillForTab } from "./background-fill";
+import { applyApprovedFill, startFillForTab } from "./background-fill";
 import { backgroundDesktopRpc } from "./desktop-rpc";
 
 vi.mock("./desktop-rpc", () => ({ backgroundDesktopRpc: vi.fn(), DesktopRpcError: class extends Error {} }));
@@ -30,5 +30,14 @@ describe("CT-AUTOFILL-001 originating frame routing", () => {
     vi.spyOn(browser.tabs, "sendMessage").mockImplementation(async () => ({ documentId: crypto.randomUUID(), frameOrigin: "https://example.test", fields: [{ handle: crypto.randomUUID(), control: "input", inputType: "text", isEmpty: true, autocomplete: ["username"], label: "Username", name: "username", id: "username", placeholder: "", context: "login" }] }));
     expect(await startFillForTab(7, undefined, { target, targetFrameId: 3, skipLoginPairWait: true })).toMatchObject({ status: "no-supported-fields" });
     expect(backgroundDesktopRpc).not.toHaveBeenCalled();
+  });
+});
+describe("CT-AUTOFILL-001 non-empty preservation", () => {
+  it("reports preserved content instead of a changed page when every assignment was skipped", async () => {
+    const approval = { requestId: crypto.randomUUID(), tabId: 7, topOrigin: "https://example.test", expiresAt: new Date(Date.now() + 10_000).toISOString(), frames: [{ frameId: 0, documentId: crypto.randomUUID(), frameOrigin: "https://example.test", assignments: [{ handle: crypto.randomUUID(), value: "synthetic", overwrite: false }] }] };
+    vi.spyOn(browser.tabs, "sendMessage").mockImplementation(async () => ({ status: "completed", results: [{ handle: "h", status: "skipped-non-empty" }] }));
+    expect(await applyApprovedFill(approval as never, 7, "https://example.test")).toEqual({ status: "preserved-existing", filledCount: 0 });
+    vi.spyOn(browser.tabs, "sendMessage").mockImplementation(async () => ({ status: "stale-document", results: [] }));
+    expect(await applyApprovedFill(approval as never, 7, "https://example.test")).toEqual({ status: "document-changed", filledCount: 0 });
   });
 });

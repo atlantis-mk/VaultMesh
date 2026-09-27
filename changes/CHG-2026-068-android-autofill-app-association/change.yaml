@@ -1,0 +1,32 @@
+schema: "2"
+id: "CHG-2026-068-android-autofill-app-association"
+title: "Android 自动填充应用关联推荐"
+type: "feature"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "应用与网站凭据的推荐和记住关联跨越目标信任、凭据交付及加密持久化边界，需保存决策与真机验收状态"
+requirements:
+  - "REQ-ANDROID-023"
+tests:
+  - "CT-ANDROID-AUTOFILL-001"
+  - "CT-ANDROID-AUTOFILL-002"
+  - "AT-ANDROID-023"
+adrs:
+  - "ADR-0042"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-ANDROID-023 Android 系统自动填充"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md#系统自动填充与识别保存"
+related_changes:
+  - "CHG-2026-066-android-autofill"
+  - "CHG-2026-067-android-autofill-quick-auth"
+boundaries:
+  - "应用名称和网站域名仅影响候选顺序，不证明网站归属或允许无确认交付"
+  - "用户明确选择记住后，Rust 将目标包名、当前签名与 origin 的关联原子写入加密 Login；填充与写入共享一次性请求授权"
+  - "成功填充的选择顺序只保存目标与条目 ID 的 Android 私有加密记录，最近一次选择排第一，绝不作为授权依据"
+risks:
+  - "应用显示名称可以伪造，因此相似候选必须标记未验证并在首次交付前明确确认"
+next: []

@@ -1,0 +1,36 @@
+schema: "2"
+id: "CHG-2026-054-android-recovery-codes"
+title: "Android Login 恢复码"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "恢复码跨固定 JNI 秘密边界且文件导入与平台剪贴板需真机验收"
+requirements:
+  - "REQ-ANDROID-012"
+  - "REQ-ITEM-001"
+tests:
+  - "CT-ANDROID-JNI-011"
+  - "AT-ANDROID-012"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0029"
+context_refs:
+  - "docs/02-scope-matrix.md#Vault 能力"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-012 Compose Login 恢复码"
+  - "docs/03-functional-requirements.md#REQ-ITEM-001 Login"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "固定 JNI 仅在按次主密码复验后返回有界恢复码；普通摘要仅返回存在性"
+  - "粘贴/导入的恢复码由 core 验证并原子提交，Kotlin 输入与查看值只在当前前台会话存在"
+risks:
+  - "不同文档提供者的 URI 权限、删除支持和后台返回行为须在真机验收"
+next:
+  - "固定 JNI、Compose 交互、有界 UTF-8 文件导入、源文件确认、Host/contract 检查及 Debug/Release 构建已通过本地检查"
+  - "arm64 真机验证输入清理、剪贴板、文件提供者和后台锁定"

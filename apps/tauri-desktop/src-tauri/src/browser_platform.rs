@@ -55,6 +55,7 @@ pub struct TauriBrowserPlatform {
     ssh_scan: Mutex<SshScanService>,
     email_otp: Arc<Mutex<EmailOtpService>>,
     email_fill_seen: Mutex<HashMap<Uuid, i64>>,
+    device_assist: Mutex<crate::device_assist::DeviceAssistBroker>,
 }
 
 impl TauriBrowserPlatform {
@@ -109,6 +110,7 @@ impl TauriBrowserPlatform {
             ssh_scan: Mutex::new(SshScanService::default()),
             email_otp,
             email_fill_seen: Mutex::new(HashMap::new()),
+            device_assist: Mutex::new(crate::device_assist::DeviceAssistBroker::new(app_data.join("lan-peer-trust.json"))),
         }
     }
 
@@ -604,6 +606,12 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                     .revoke()
                     .map(|()| json!({ "paired": false }))
                     .map_err(|message| failure(&message)),
+                "device.assist.capabilities" | "device.assist.start" | "device.assist.poll" | "device.assist.select" | "device.assist.finish" | "device.assist.cancel" => {
+                    let state = runtime.sync_state().map_err(runtime_error)?;
+                    let mut assist = self.device_assist.lock().map_err(|_| failure("设备互通不可用。"))?;
+                    assist.prepare(format!("{}:{}:{}", runtime.current_path().display(), state.vault_id, state.replica))?;
+                    assist.dispatch(operation,input,now_millis)
+                }
                 "email.otp.watch" => {
                     let origin = required_string(input, "topOrigin")?;
                     let now = now_millis.max(0) as u64 / 1_000;
@@ -869,7 +877,13 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
         Some(result)
     }
 
-    fn after_master_unlock(&self, runtime: &DesktopRuntime) -> Result<(), BrowserPlatformError> {
+    fn after_master_unlock(&self, runtime: &mut DesktopRuntime) -> Result<(), BrowserPlatformError> {
+        // Warm the authenticated subscription before the user opens a fill menu.
+        if let Ok(state) = runtime.sync_state() {
+            if let Ok(mut assist) = self.device_assist.lock() {
+                let _ = assist.prepare(format!("{}:{}:{}", runtime.current_path().display(), state.vault_id, state.replica));
+            }
+        }
         let path = runtime.current_path();
         let pin = self
             .pin
@@ -931,6 +945,7 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
     }
 
     fn clear(&self) {
+        if let Ok(mut assist) = self.device_assist.lock() { assist.clear(); }
         if let Ok(mut files) = self.recovery_files.lock() {
             files.clear();
         }
@@ -974,6 +989,7 @@ pub(crate) fn is_platform_operation(operation: &str) -> bool {
             | "security.settings.get"
             | "security.settings.update"
             | "browser.pairing.revoke"
+            | "device.assist.capabilities" | "device.assist.start" | "device.assist.poll" | "device.assist.select" | "device.assist.finish" | "device.assist.cancel"
             | "email.otp.watch"
             | "email.otp.poll"
             | "email.otp.candidates"

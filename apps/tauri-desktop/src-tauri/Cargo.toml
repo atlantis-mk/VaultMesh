@@ -47,6 +47,7 @@ tauri-plugin-updater = { version = "2.10.1", default-features = false, features 
 uuid.workspace = true
 url = "2.5.8"
 vaultmesh-ffi = { path = "../../../crates/vault-ffi" }
+vaultmesh-lan-pairing = { path = "../../../crates/vault-lan-pairing", features = ["desktop-sync"] }
 zeroize.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
@@ -60,7 +61,7 @@ block2 = "0.6.2"
 core-foundation = "0.10.1"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
 objc2 = "0.6.4"
-objc2-foundation = { version = "0.3.2", features = ["NSError", "NSString"] }
+objc2-foundation = { version = "0.3.2", features = ["NSError", "NSProcessInfo", "NSString"] }
 objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["LAContext", "LABiometryType", "block2"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

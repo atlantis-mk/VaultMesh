@@ -1,3 +1,4 @@
+import { isDeviceAssistField } from "./device-assist-fields";
 import type { ContentMessage, FieldDescriptor, PageContext } from "@/lib/protocol";
 import { createUuid } from "@/lib/uuid";
 import fieldPolicy from "../../../tauri-desktop/src/shared/autofill-field-policy.json";
@@ -31,6 +32,7 @@ const SENSITIVE_METADATA = /\b(ssn|social[\s-]?security|tax|passport|national[\s
 const CURRENT_PASSWORD_METADATA = /\b(current|old|existing|previous|login)\s*[\s_-]*pass(word|code)\b|当前密码|原密码|旧密码|登录密码/i;
 const NEW_PASSWORD_METADATA = /\b(new|set|create|choose|reset|confirm|repeat|verify|re[\s_-]*enter)\s*[\s_-]*pass(word|code)\b|password[\s_-]*(confirmation|confirm)|新密码|设置密码|创建密码|重置密码|确认密码|再次(?:输入)?密码|重复密码/i;
 const CONFIRM_PASSWORD_METADATA = /\b(confirm|repeat|verify|re[\s_-]*enter)\s*[\s_-]*pass(word|code)\b|password[\s_-]*(confirmation|confirm)|确认密码|再次(?:输入)?密码|重复密码/i;
+const SECRET_SUBTYPE_METADATA = /authenticator[\s_-]*(?:key|secret)|totp[\s_-]*secret|认证密钥|connection[\s_-]*string|\bdsn\b|database[\s_-]*(?:credential|password|url|uri)|数据库连接|连接串|recovery[\s_-]*codes?|backup[\s_-]*codes?|恢复码|备用代码|\bpem\b|(?:tls|ssl|x\.?509|client)[\s_-]*certificate|certificate[\s_-]*(?:pem|chain|body)|证书|software[\s_-]*licen[cs]e|licen[cs]e[\s_-]*key|product[\s_-]*key|activation[\s_-]*(?:code|key)|许可证|激活码|identity[\s_-]*document|secure[\s_-]*note|安全笔记|seed[\s_-]*phrase|recovery[\s_-]*phrase|mnemonic|wallet[\s_-]*(?:seed|key|secret|private)|助记词|other[\s_-]*secret|其他密钥/i;
 const OTP_METADATA = /\b(?:otp|totp|2fa|mfa)\b|one[\s_-]?time[\s_-]?(?:code|password|passcode|token)|(?:verification|authentication|authenticator)[\s_-]?(?:code|passcode|token|pin)|two[\s_-]?factor|验证码|动态码|认证码/i;
 const LOGIN_SEMANTICS = /\b(?:log[\s_-]*in|sign[\s_-]*in|account[\s_-]*login)\b|登录|登入/i;
 const SIGNUP_SEMANTICS = /\b(?:sign[\s_-]*up|register|registration|create\s+(?:an?\s+)?account|join\s+now)\b|注册|创建账号|创建账户/i;
@@ -99,6 +101,7 @@ export function classifyControl(control: Element): AutofillFieldKind | null {
   if (isNonAutofillControl(control, text)) return null;
   const semantics = analyzeControlSemantics(control);
   const context = semantics.context;
+  if (context === "developer-secret" && !(control instanceof HTMLSelectElement) && SECRET_SUBTYPE_METADATA.test(text)) return "secret";
   if (context === "developer-secret" && !(control instanceof HTMLSelectElement) && /\b(?:api key|access token|client secret|webhook secret|password|credential|secret|token|key|account|project|tenant|organization|username|provider|vendor)\b|密码|凭据|密钥|令牌|账号|项目|租户|服务商|平台/i.test(text)) return "secret";
   if (context === "ssh-console" && !(control instanceof HTMLSelectElement) && /\b(?:private key|public key|authorized keys?|ssh key|passphrase|key password|ssh password|login password|ssh user|username|login|host|hostname|server|port)\b|私钥|公钥|口令|密码|账号|用户名|服务器|主机|端口/i.test(text)) return "ssh";
   if (tokens.some((token) => CARD_AUTOCOMPLETE.has(token)) || /\b(?:card number|cc num|cardholder|name on card|cvv|cvc|security code|billing address)\b|卡号|持卡人|安全码|账单地址/i.test(text) || context === "checkout" && /\b(?:expiration|expiry)\b|有效期|到期/i.test(text)) return "card";
@@ -106,6 +109,14 @@ export function classifyControl(control: Element): AutofillFieldKind | null {
   if (tokens.some((token) => IDENTITY_AUTOCOMPLETE.has(token)) || /\b(?:first name|given name|middle name|last name|family name|surname|full name|e ?mail|phone|mobile|telephone|birthday|birth date|organization|company|employer|department|job title|website|street|address line [12]|city|province|postal|zip|country)\b|姓名|名字|姓氏|邮箱|电话|手机|城市|邮编|国家|部门|出生日期|公司/i.test(text)) return "identity";
   if (context === "profile" && /\b(?:state|region|suite|unit|apartment|position|team)\b|省|州|地区/i.test(text)) return "identity";
   return null;
+}
+
+export function deviceAssistKindForControl(control: HTMLElement): "phone" | "sms" | null {
+  if (!(control instanceof HTMLInputElement) || !isSupportedControl(control)) return null;
+  const field = buildDescriptor(control);
+  if (!field) return null;
+  if (isDeviceAssistField(field, "phone")) return "phone";
+  return isDeviceAssistField(field, "sms") ? "sms" : null;
 }
 
 function qualificationText(metadata: ReturnType<typeof getMetadata>) {
@@ -154,6 +165,11 @@ export function analyzeControlSemantics(control: SupportedControl): ControlSeman
   const clusterText = clusterSemanticText(cluster);
   if (/api[\s_-]*key|access[\s_-]*token|client[\s_-]*secret|webhook[\s_-]*secret|接口密钥|访问令牌/i.test(`${directText} ${clusterText}`)) {
     return { context: "developer-secret", role: "other", confidence: "high", score: 180, competingScore: 0, reasons: ["cluster:developer-secret"] };
+  }
+  // The remaining secret subtypes are matched on the field's own metadata only,
+  // so one such field never recasts a surrounding identity or login form.
+  if (SECRET_SUBTYPE_METADATA.test(directText)) {
+    return { context: "developer-secret", role: "other", confidence: "high", score: 180, competingScore: 0, reasons: ["field:secret-subtype"] };
   }
   if (/ssh|private[\s_-]*key|public[\s_-]*key|authorized[\s_-]*keys|私钥|公钥/i.test(`${directText} ${clusterText}`)) {
     return { context: "ssh-console", role: "other", confidence: "high", score: 180, competingScore: 0, reasons: ["cluster:ssh"] };
@@ -494,6 +510,32 @@ export async function applyAssignments({
     return { status: "stale-document" as const, results: [] };
   }
 
+  if (message.deviceAssistKind) {
+    // Device responses may have waited on a remote phone. Never wait again,
+    // replace a target, overwrite input, or simulate typing across user events.
+    const eligible = (handle: string, value: string) => {
+      const control = fields.get(handle);
+      if (!control || control.ownerDocument.hidden || !isControlReady(control) || hasValue(control)) return false;
+      const descriptor = buildDescriptor(control);
+      return descriptor != null && isDeviceAssistField(descriptor, message.deviceAssistKind!)
+        && (descriptor.maxLength == null || value.length <= descriptor.maxLength)
+        && (descriptor.inputType !== "number" || /^\d+$/.test(value));
+    };
+    if (message.clearBeforeFill || message.assignments.some(a => a.overwrite || !eligible(a.handle, a.value))) {
+      return {status: "stale-document" as const, results: []};
+    }
+    const results: Array<{handle: string; status: string}> = [];
+    for (const assignment of message.assignments) {
+      if (!assignmentIsCurrent() || !eligible(assignment.handle, assignment.value)) return {status: "stale-document" as const, results};
+      const control = fields.get(assignment.handle)!;
+      if (!assignValue(control, assignment.value)) return {status: "stale-document" as const, results};
+      dispatchInput(control);
+      control.dispatchEvent(new Event("change", {bubbles: true}));
+      results.push({handle: assignment.handle, status: "filled"});
+    }
+    return {status: "completed" as const, results};
+  }
+
   // Login pages commonly list the password assignment first even though users
   // expect to see the account entered before the password. Keep all other
   // assignments stable while always moving password controls to the end.
@@ -742,7 +784,9 @@ function clipsCollapsedContent(style: CSSStyleDeclaration) {
 }
 
 function hasValue(control: SupportedControl) {
-  return isNativeControl(control) ? control.value.length > 0 : (control.textContent ?? "").length > 0;
+  // Whitespace-only content (for example markup indentation inside a
+  // <textarea>) is not user input and must not block an explicit fill.
+  return (isNativeControl(control) ? control.value : control.textContent ?? "").trim().length > 0;
 }
 
 function assignValue(control: SupportedControl, value: string) {

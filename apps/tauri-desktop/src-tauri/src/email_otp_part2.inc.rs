@@ -480,7 +480,12 @@ fn gmail_readonly_granted(scope: &str) -> bool {
 
 fn wait_for_callback(listener: &TcpListener) -> Result<String, String> {
     let started = Instant::now();
-    while started.elapsed() < OAUTH_CALLBACK_TIMEOUT {
+    while let Some(remaining) = OAUTH_CALLBACK_TIMEOUT.checked_sub(started.elapsed()) {
+        match crate::socket_wait::wait_for_connection(listener, remaining.min(Duration::from_secs(1))) {
+            Ok(crate::socket_wait::Readiness::Ready) => {}
+            Ok(_) => continue,
+            Err(_) => return Err("OAuth 回调失败。".to_owned()),
+        }
         match listener.accept() {
             Ok((mut stream, _)) => {
                 stream
@@ -505,9 +510,7 @@ fn wait_for_callback(listener: &TcpListener) -> Result<String, String> {
                 let _ = stream.write_all(body);
                 return Ok(format!("http://127.0.0.1{target}"));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(_) => return Err("OAuth 回调失败。".to_owned()),
         }
     }

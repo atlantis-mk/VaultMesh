@@ -534,8 +534,8 @@ fn operation_policy_is_exhaustive_and_confirmation_tokens_are_single_use() {
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(TAURI_BROWSER_SLICE_OPERATIONS.len(), 113);
-    assert_eq!(operations.len(), 113);
+    assert_eq!(TAURI_BROWSER_SLICE_OPERATIONS.len(), 119);
+    assert_eq!(operations.len(), 119);
     for operation in TAURI_BROWSER_SLICE_OPERATIONS {
         let owners = [
             is_broker_operation(operation),
@@ -546,6 +546,11 @@ fn operation_policy_is_exhaustive_and_confirmation_tokens_are_single_use() {
         .filter(|owned| *owned)
         .count();
         assert_eq!(owners, 1, "{operation} must have exactly one Tauri owner");
+    }
+    for op in ["device.assist.capabilities", "device.assist.start", "device.assist.poll", "device.assist.select", "device.assist.finish", "device.assist.cancel"] {
+        assert!(requires_unlock(op));
+        assert!(!requires_confirmation(op));
+        assert_eq!(requires_gesture(op), matches!(op, "device.assist.start" | "device.assist.select" | "device.assist.finish"));
     }
     assert!(!requires_unlock("vault.unlock"));
     assert!(requires_unlock("items.list"));

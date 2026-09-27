@@ -1,0 +1,42 @@
+schema: "2"
+id: "CHG-2026-048-android-password-rotation"
+title: "Android 主密码轮换"
+type: "security"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "Android 主密码轮换跨凭据与持久化边界，需保留原子失败恢复和真机验收状态"
+requirements:
+  - "REQ-ANDROID-005"
+  - "REQ-VAULT-002"
+  - "NFR-REL-001"
+  - "NFR-PRIV-001"
+tests:
+  - "CT-ANDROID-JNI-005"
+  - "AT-ANDROID-005"
+adrs:
+  - "ADR-0001"
+  - "ADR-0021"
+  - "ADR-0023"
+context_refs:
+  - "docs/02-scope-matrix.md#客户端与平台"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-005 Compose 主密码轮换"
+  - "docs/03-functional-requirements.md#REQ-VAULT-002 主密码轮换"
+  - "docs/03-functional-requirements.md#NFR-REL-001 原子持久化"
+  - "docs/03-functional-requirements.md#NFR-PRIV-001 秘密最小化"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "Android 仅用固定 JNI operation 轮换 format 4 Vault 的主密码包装材料，不导出 Vault Key、完整 payload 或文件字节"
+  - "先以磁盘旧 Vault 构造候选 session，验证旧密码、重新包装并原子写盘；只有写盘成功才替换当前进程 session"
+  - "Compose 不持久化旧或新主密码，完成、失败、取消和后台锁定均清空输入；提交结果不确定时不得重试"
+risks:
+  - "JVM String 无法可靠原位擦除，旧/新主密码只能缩短存活期并解除 UI 引用"
+  - "arm64 真机的生命周期与轮换验收暂缓，Host/contract/交叉构建不替代发布验收"
+next:
+  - "Rust、JNI、Compose、Host/contract/Debug/Release/instrumentation APK 与 lint 已通过；等待 arm64 真机验收"
+  - "真机可用后执行 AT-ANDROID-005，验证旧/新密码、失败恢复、后台锁定与冷启动"

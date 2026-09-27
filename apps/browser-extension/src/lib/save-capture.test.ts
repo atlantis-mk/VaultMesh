@@ -25,6 +25,14 @@ describe("captureSubmittedData", () => {
     expect(JSON.stringify(result)).not.toContain("private search");
   });
 
+  it("takes the filled account of the password's own form when a page has several sign-in forms", () => {
+    document.body.innerHTML = `<form><input autocomplete="username"><input name="code" autocomplete="one-time-code"></form>
+      <form><input autocomplete="username" value="qa-otp@vaultmesh.test"><input type="password" autocomplete="current-password" value="synthetic password"></form>`;
+
+    expect(captureSubmittedData(document.body, "https://accounts.example.test/login", { context: "login" }).login)
+      .toEqual({ username: "qa-otp@vaultmesh.test", password: "synthetic password" });
+  });
+
   it("captures the new password rather than the current password on password-change forms", () => {
     document.body.innerHTML = `<form>
       <input autocomplete="username" value="ada">

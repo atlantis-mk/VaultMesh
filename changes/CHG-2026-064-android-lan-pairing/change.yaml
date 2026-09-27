@@ -1,0 +1,43 @@
+schema: "2"
+id: "CHG-2026-064-android-lan-pairing"
+title: "Android 与桌面局域网互通配对"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "Android 与桌面以 LAN protocol 2.0 互相发现并完成同一安全配对协议，跨平台网络与凭据边界需要持续验收"
+requirements:
+  - "REQ-LAN-PEER-001"
+  - "REQ-ANDROID-021"
+  - "REQ-LAN-SYNC-001"
+tests:
+  - "CT-LAN-PAIRING-001"
+  - "CT-ANDROID-LAN-PAIRING-001"
+  - "AT-ANDROID-021"
+adrs:
+  - "ADR-0018"
+  - "ADR-0019"
+  - "ADR-0021"
+  - "ADR-0038"
+context_refs:
+  - "docs/02-scope-matrix.md#客户端与平台"
+  - "docs/03-functional-requirements.md#REQ-LAN-PEER-001 局域网客户端发现与可信配对"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-021 Android 与桌面局域网发现和配对"
+  - "docs/04-architecture.md#LAN peer pairing"
+  - "docs/06-security-privacy.md#LAN peer pairing"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/lan-peer-pairing.md"
+  - "specs/lan-vault-sync.md#LAN-SYNC-002 授权与网络"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-040-lan-peer-discovery-pairing"
+  - "CHG-2026-043-lan-vault-sync"
+boundaries:
+  - "桌面与 Android 共用 LAN protocol 2.0 的发现、TLS/PAKE 帧、设备信任和碰撞仲裁；不得创建移动端私有的不兼容协议"
+  - "Android 网络仅在已解锁且用户显式开启的附近设备页面运行；权限、Wi-Fi 多播、Keystore 和后台锁定由 Kotlin 拥有"
+  - "配对成功必须绑定双方当前 Vault 的同步授权；本切片不启动 Android 后台密文同步"
+risks:
+  - "Android 17 target SDK 37 的本地网络运行时权限拒绝或撤销必须在开始监听前和运行中 fail closed"
+  - "平台凭据存储、网络接口、IPv4/IPv6 和 mDNS 行为需要 Android 与打包桌面客户端互通验收"
+next:
+  - "以 macOS/Windows 打包桌面客户端完成 AT-ANDROID-021 的 UI 互通、权限撤销、网络切换、锁定、同时发起与十分钟超时验收；arm64 Debug 与 macOS 共享桌面协议的双向真实设备配对、错误码、撤销和重启路径已验证"

@@ -1,0 +1,29 @@
+schema: "2"
+id: "CHG-2026-071-android-registration-phone-autofill"
+title: "Android 注册手机号字段自动填充识别"
+type: "security"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "QQ 注册页仅提供无标签纯数字字段，识别为手机号会扩展 Android Autofill 字段信任边界"
+requirements:
+  - "REQ-ANDROID-023"
+tests:
+  - "CT-ANDROID-AUTOFILL-002"
+  - "CT-ANDROID-AUTOFILL-003"
+  - "AT-ANDROID-024"
+adrs:
+  - "ADR-0040"
+  - "ADR-0043"
+  - "ADR-0045"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-ANDROID-023 Android 系统自动填充"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md#系统自动填充与识别保存"
+related_changes: []
+boundaries:
+  - "仅对经系统提供的明确 QQ 注册手机号 Activity 中唯一聚焦的无标签数字字段提供手机号候选；不得推断任意数字框"
+risks:
+  - "目标应用更新后 Activity 结构可能改变，应安全退回无候选而不是扩大数字字段匹配"
+next:
+  - "实现精确目标及结构守卫，并以合成输入和 QQ 真机回归验证"

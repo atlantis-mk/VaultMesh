@@ -294,3 +294,14 @@ impl DesktopRuntime {
         Ok(())
     }
 }
+
+impl vaultmesh_sync::SyncRuntime for DesktopRuntime {
+    type Error = DesktopRuntimeError;
+    fn current_path(&self) -> std::path::PathBuf { DesktopRuntime::current_path(self) }
+    fn is_unlocked(&self) -> bool { DesktopRuntime::is_unlocked(self) }
+    fn sync_relay(&self) -> std::sync::Arc<crate::sync_relay::RelayHub> { DesktopRuntime::sync_relay(self) }
+    fn sync_state(&mut self) -> Result<vaultmesh_core::SyncState, Self::Error> { DesktopRuntime::sync_state(self) }
+    fn sync_pump(&mut self) -> Result<(), Self::Error> { DesktopRuntime::sync_pump(self) }
+    fn sync_channel_offer(&self, peer: &str) -> Result<vaultmesh_core::SyncChannel, Self::Error> { DesktopRuntime::sync_channel_offer(self, peer) }
+    fn sync_accept_channel(&mut self, peer: &str, fingerprint: &str, remote: Uuid, offer: &vaultmesh_core::SyncChannel) -> Result<(), Self::Error> { DesktopRuntime::sync_accept_channel(self, peer, fingerprint, remote, offer) }
+}

@@ -1,0 +1,36 @@
+schema: "2"
+id: "CHG-2026-059-android-identity-fields"
+title: "Android Identity 完整字段编辑"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "Identity 多值字段及个人资料跨 JNI 边界且需真机验收"
+requirements:
+  - "REQ-ANDROID-017"
+  - "REQ-ITEM-004"
+tests:
+  - "CT-ANDROID-JNI-015"
+  - "AT-ANDROID-017"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0034"
+context_refs:
+  - "docs/02-scope-matrix.md#Vault 能力"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-017 Compose Identity 完整字段编辑"
+  - "docs/03-functional-requirements.md#REQ-ITEM-004 Identity"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "仅显式 Identity 编辑读取完整个人资料，普通列表保持安全摘要"
+  - "多值 UUID 原样提交且完整资料由 core 单次原子替换"
+risks:
+  - "个人资料及多值首选约束需在真机与桌面共用 Vault 上验收"
+next:
+  - "固定详情、完整创建/更新、Compose 结构化编辑、Host/contract 与 Debug/Release 构建已通过本地检查"
+  - "arm64 真机验证清理、冷启动及跨端字段和 UUID 一致性"

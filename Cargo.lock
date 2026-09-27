@@ -5918,12 +5918,21 @@ name = "vaultmesh-android-runtime"
 version = "0.0.10-review"
 dependencies = [
  "atomic-write-file",
+ "base64 0.22.1",
+ "chacha20poly1305",
  "jni 0.21.1",
+ "rand_core 0.6.4",
+ "scrypt",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
+ "url",
  "uuid",
  "vaultmesh-core",
+ "vaultmesh-ffi",
+ "vaultmesh-lan-pairing",
+ "vaultmesh-sync",
  "zeroize",
 ]
 
@@ -5956,7 +5965,46 @@ dependencies = [
  "sha2",
  "uuid",
  "vaultmesh-core",
+ "vaultmesh-sync",
  "zeroize",
+]
+
+[[package]]
+name = "vaultmesh-lan-pairing"
+version = "0.0.10-review"
+dependencies = [
+ "atomic-write-file",
+ "base64 0.22.1",
+ "hmac",
+ "if-addrs",
+ "keyring",
+ "mdns-sd",
+ "rand_core 0.6.4",
+ "rcgen",
+ "rustls 0.23.42",
+ "serde",
+ "serde_json",
+ "sha2",
+ "socket2",
+ "spake2-conflux",
+ "uuid",
+ "vaultmesh-core",
+ "vaultmesh-ffi",
+ "vaultmesh-sync",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "vaultmesh-sync"
+version = "0.0.10-review"
+dependencies = [
+ "atomic-write-file",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+ "vaultmesh-core",
 ]
 
 [[package]]
@@ -6005,6 +6053,7 @@ dependencies = [
  "uuid",
  "vaultmesh-core",
  "vaultmesh-ffi",
+ "vaultmesh-lan-pairing",
  "windows-sys 0.61.2",
  "zeroize",
 ]

@@ -16,6 +16,15 @@ describe("candidateGroups", () => {
     expect(groups.map((group) => group.candidates.map((candidate) => candidate.id))).toEqual([[path.id, exact.id], [domain.id]]);
   });
 
+  it("CT-DEVICE-ASSIST-002 keeps paired-phone sources out of the same-domain vault group", () => {
+    const phone = { kind: "device-assist" as const, id: "device-assist", assistKind: "sms" as const, title: "从手机获取验证码", subtitle: "已配对设备 · 在电脑点选填充" };
+    const groups = candidateGroups([exact, phone], "example.test:8443", "example.test");
+
+    expect(groups.map((group) => group.label)).toEqual(["当前站点 · example.test:8443", "已配对手机"]);
+    expect(groups.at(-1)!.candidates).toEqual([phone]);
+    expect(candidateGroups([phone], "example.test:8443", "example.test")).toEqual([{ key: "device-assist", label: null, candidates: [phone] }]);
+  });
+
   it("shows current-origin email codes before saved authenticator logins", () => {
     const emailOtp = {
       id: "453370ec-4dc7-4c77-a6e0-f2a4f6e37f03",

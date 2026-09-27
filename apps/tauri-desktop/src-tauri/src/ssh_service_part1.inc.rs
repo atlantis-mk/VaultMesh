@@ -172,6 +172,11 @@ pub fn open_agent_tunnel(
             && accepted < max_connections
             && current_millis() < expires_at
         {
+            match crate::socket_wait::wait_for_connection(&listener, Duration::from_millis(250)) {
+                Ok(crate::socket_wait::Readiness::Ready) => {}
+                Ok(_) => continue,
+                Err(_) => break,
+            }
             match listener.accept() {
                 Ok((stream, peer)) if peer.ip().is_loopback() => {
                     accepted = accepted.saturating_add(1);
@@ -185,9 +190,7 @@ pub fn open_agent_tunnel(
                     );
                 }
                 Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(_) => break,
             }
         }

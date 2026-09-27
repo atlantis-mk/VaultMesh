@@ -1,3 +1,4 @@
+import { startDeviceAssist, deviceAssistAction, cancelDeviceAssists, deviceAssistTabActivated } from "@/lib/device-assist-background";
 import {
   ContentMessageSchema,
   DiscoveryFrameResponseSchema,
@@ -95,6 +96,7 @@ export default defineBackground(() => {
   persistentNativeConnection.onDisconnected(() => {
     popupWorkspaceCache.clear();
     stopEmailOtpPolling();
+    void cancelDeviceAssists();
   });
   void warmPopupWorkspaceCache();
   void syncEmailOtpPolling();
@@ -120,6 +122,7 @@ export default defineBackground(() => {
       void passkeyProxy.sync();
     }
   });
+  browser.tabs.onActivated.addListener(({ tabId, windowId }) => { void deviceAssistTabActivated(tabId, windowId); });
   browser.tabs.onRemoved.addListener((tabId) => {
     automaticAttempts.reset(tabId);
     for (const key of stagedAccounts.keys()) if (key.startsWith(`${tabId}:`)) stagedAccounts.delete(key);
@@ -127,14 +130,17 @@ export default defineBackground(() => {
     for (const [captureId, pending] of pendingCredentialCaptures) if (pending.tabId === tabId) discardSaveCapture(captureId);
     for (const [captureId, preparing] of preparingCredentialCaptures) if (preparing.tabId === tabId) discardPreparingSaveCapture(captureId);
     void stopEmailOtpBoostForTab(tabId);
+    void cancelDeviceAssists(tabId);
   });
   browser.webNavigation.onCommitted.addListener((details) => {
+    void cancelDeviceAssists(details.tabId, details.frameId);
     if (details.frameId === 0) {
       automaticAttempts.reset(details.tabId);
       void stopEmailOtpBoostForTab(details.tabId);
     }
   });
   browser.webNavigation.onHistoryStateUpdated.addListener((details) => {
+    void cancelDeviceAssists(details.tabId, details.frameId);
     if (details.frameId === 0) {
       automaticAttempts.reset(details.tabId);
     }
@@ -189,6 +195,7 @@ export default defineBackground(() => {
     }
   });
 
+  let deviceAssistSupported = false;
   browser.runtime.onMessage.addListener(async (message, sender) => {
     if (isDesktopRpcRuntimeMessage(message)) {
       if (!isTrustedExtensionPage(sender)) {
@@ -201,6 +208,7 @@ export default defineBackground(() => {
       if (['vault.create', 'vault.unlock', 'biometric.unlock', 'pin.unlock'].includes(message.request.operation)) startEmailOtpPolling();
       if (message.request.operation === 'vault.lock' || message.request.operation === 'browser.pairing.revoke') {
         stopEmailOtpPolling();
+    void cancelDeviceAssists();
       }
       if (message.request.operation === 'vault.lock') void passkeyProxy.detach();
       return response;
@@ -286,6 +294,28 @@ export default defineBackground(() => {
       if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
       await refreshPluginSecurityPolicy();
       return { status: "updated" as const };
+    }
+    if (parsed.data.kind === "vaultmesh.device-assist-capabilities") {
+      if (!isTrustedExtensionPage(sender) && !trustedPage(sender)) return { supported: false };
+      if (deviceAssistSupported) return { supported: true };
+      try { const result = await backgroundDesktopRpc("device.assist.capabilities"); deviceAssistSupported = (result as {version?:number})?.version === 1; return { supported: deviceAssistSupported }; }
+      catch { return { supported: false }; }
+    }
+    if (parsed.data.kind === "vaultmesh.device-assist-start" || parsed.data.kind === "vaultmesh.device-assist-action") {
+      const popup = isTrustedExtensionPage(sender);
+      const page = popup ? null : trustedPage(sender);
+      if (!popup && (!page || page.fillOrigin !== page.topOrigin)) return { status: "unsupported-page" };
+      if (parsed.data.kind === "vaultmesh.device-assist-action") {
+        return deviceAssistAction(parsed.data.id, parsed.data.action, parsed.data.candidateId, { popup, tabId: sender.tab?.id, frameId: sender.frameId ?? 0 });
+      }
+      if (popup) {
+        const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        const origin = getHttpOrigin(tab?.url);
+        if (tab?.id == null || !tab.url || !origin) return { status: "unsupported-page" };
+        return startDeviceAssist({ popup: true, tabId: tab.id, frameId: 0, origin, pageUrl: tab.url }, parsed.data.assistKind);
+      }
+      if (!page || !parsed.data.target) return { status: "unsupported-page" };
+      return startDeviceAssist({ popup: false, tabId: page.tabId, frameId: sender.frameId ?? 0, origin: page.topOrigin, pageUrl: page.framePageUrl, target: parsed.data.target }, parsed.data.assistKind);
     }
     if (parsed.data.kind === "vaultmesh.email-otp-fill") {
       if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
@@ -424,6 +454,7 @@ async function syncEmailOtpPolling(): Promise<void> {
     else stopEmailOtpPolling();
   } catch {
     stopEmailOtpPolling();
+    void cancelDeviceAssists();
   }
 }
 

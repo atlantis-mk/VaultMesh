@@ -1,0 +1,46 @@
+schema: "2"
+id: "CHG-2026-049-android-protected-item-access"
+title: "Android 受保护值访问与复制"
+type: "security"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "Android 受保护字段访问跨 JNI 与系统剪贴板边界，需保留授权、清理和真机验收状态"
+requirements:
+  - "REQ-ANDROID-006"
+  - "REQ-ITEM-001"
+  - "REQ-ITEM-002"
+  - "REQ-ITEM-003"
+  - "REQ-ITEM-005"
+  - "NFR-PRIV-001"
+tests:
+  - "CT-ANDROID-JNI-006"
+  - "AT-ANDROID-006"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0024"
+context_refs:
+  - "docs/02-scope-matrix.md#客户端与平台"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-006 Compose 受保护值复制"
+  - "docs/03-functional-requirements.md#REQ-ITEM-001 Login"
+  - "docs/03-functional-requirements.md#REQ-ITEM-002 Payment card"
+  - "docs/03-functional-requirements.md#REQ-ITEM-003 SSH credential"
+  - "docs/03-functional-requirements.md#REQ-ITEM-005 Developer/service secret"
+  - "docs/03-functional-requirements.md#NFR-PRIV-001 秘密最小化"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "仅固定字段操作在 core 内核验当次主密码并取值，JNI 返回有界值供 Kotlin 特权服务写系统剪贴板；摘要、Compose 列表和持久状态不持有受保护值"
+  - "Android 剪贴板标记 sensitive，30 秒到期仅清理仍由本应用拥有的 clip，不清除用户后续复制的内容"
+  - "Passkey 不经普通 Secret 复制，所有受保护操作在锁定或 lifecycle generation 失效后拒绝"
+risks:
+  - "Android 后台剪贴板读取受平台限制，定时清理依赖变更监听与标签所有权；需真机验证替换、后台和版本差异"
+  - "JVM 字符串中的短期复制值不能原位可靠擦除，Kotlin 服务必须最小化引用和期限"
+next:
+  - "固定 JNI 字段访问、Kotlin 特权剪贴板服务、Compose 确认 UI 和 Host/contract 测试已通过本地检查"
+  - "arm64 真机验证 Android 10/13+ 的敏感提示、30 秒到期、他人替换不清除及生命周期失效"

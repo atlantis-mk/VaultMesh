@@ -1,11 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArchiveRestoreIcon, ArrowLeftIcon, ChevronRightIcon, HistoryIcon, LockKeyholeIcon, RefreshCwIcon, SettingsIcon, ShieldCheckIcon, type LucideIcon } from "lucide-react";
 
 import { ToastMessage, type ToastVariant } from "@/components/ToastMessage";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { confirmedDesktopRpc, desktopRpc, getPasswordHealth, getUnlockHistory, type FillEvent, type PasswordHealth, type UnlockEvent } from "@/lib/desktop-rpc";
 import {
   loadPluginSecurityPolicy,
@@ -20,6 +19,20 @@ type DesktopSecuritySettings = { lockOnBlur: boolean; idleTimeoutMs: number; loc
 type SettingsSection = "menu" | "pin" | "security" | "device" | "history" | "recovery";
 
 const fieldClass = "h-9 rounded-md border border-input bg-background px-3 text-sm";
+const idleTimeoutOptions: ReadonlyArray<{ value: PluginSecurityPolicy["idleTimeoutMinutes"]; label: string }> = [
+  { value: 0, label: "关闭" },
+  { value: 1, label: "1 分钟" },
+  { value: 5, label: "5 分钟（默认）" },
+  { value: 10, label: "10 分钟" },
+  { value: 15, label: "15 分钟" },
+  { value: 30, label: "30 分钟" },
+];
+const clipboardTimeoutOptions = [
+  { value: 10_000, label: "10 秒" },
+  { value: 30_000, label: "30 秒" },
+  { value: 60_000, label: "1 分钟" },
+  { value: 120_000, label: "2 分钟" },
+] as const;
 
 export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged, onNotice, onLocked }: { fillHistory: FillEvent[]; recoveryTargets: RecoveryTarget[]; onRecoveryChanged: () => void | Promise<void>; onNotice: (message: string, variant?: ToastVariant) => void; onLocked: () => void }) {
   const [pinStatus, setPinStatus] = useState<PinStatus | null>(null);
@@ -30,6 +43,7 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
   const [paired, setPaired] = useState(false);
   const [pluginPolicy, setPluginPolicy] = useState<PluginSecurityPolicy | null>(null);
   const [desktopSettings, setDesktopSettings] = useState<DesktopSecuritySettings | null>(null);
+  const savedDesktopSettings = useRef<DesktopSecuritySettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [section, setSection] = useState<SettingsSection>("menu");
   const [health, setHealth] = useState<PasswordHealth | null>(null);
@@ -37,24 +51,22 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
   const [auditBusy, setAuditBusy] = useState(false);
 
   async function load() {
-    try {
-      const [nextPin, nextBiometric, nextPairing, nextDesktopSettings, nextPluginPolicy] = await Promise.all([
-        desktopRpc("pin.status"),
-        desktopRpc("biometric.status"),
-        desktopRpc("browser.pairing.status"),
-        desktopRpc("security.settings.get"),
-        loadPluginSecurityPolicy(),
-      ]);
-      const parsedPin = nextPin as PinStatus;
-      setPinStatus(parsedPin);
-      setFailureLimit(parsedPin.failureLimit);
-      setBiometric(nextBiometric as BiometricStatus);
-      setPaired(Boolean((nextPairing as { paired: boolean }).paired));
-      setDesktopSettings(nextDesktopSettings as DesktopSecuritySettings);
-      setPluginPolicy(nextPluginPolicy);
-    } catch (error) {
-      onNotice(error instanceof Error ? error.message : "无法加载插件设置。", "error");
-    }
+    setPluginPolicy(await loadPluginSecurityPolicy());
+    const results = await Promise.allSettled([
+      desktopRpc("pin.status").then((nextPin) => {
+        const parsedPin = nextPin as PinStatus;
+        setPinStatus(parsedPin);
+        setFailureLimit(parsedPin.failureLimit);
+      }),
+      desktopRpc("biometric.status").then((nextBiometric) => setBiometric(nextBiometric as BiometricStatus)),
+      desktopRpc("browser.pairing.status").then((nextPairing) => setPaired(Boolean((nextPairing as { paired: boolean }).paired))),
+      desktopRpc("security.settings.get").then((nextDesktopSettings) => {
+        const parsedSettings = nextDesktopSettings as DesktopSecuritySettings;
+        setDesktopSettings(parsedSettings);
+        savedDesktopSettings.current = parsedSettings;
+      }),
+    ]);
+    if (results.some((result) => result.status === "rejected")) onNotice("部分桌面端设置暂不可用；已加载的选项仍可操作。", "warning");
   }
 
   useEffect(() => {
@@ -88,14 +100,34 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
   }
 
   async function saveSecurityPolicy() {
-    if (!pluginPolicy || !desktopSettings) return;
-    await run(async () => {
+    if (!pluginPolicy) return;
+    if (busy) return;
+    setBusy(true);
+    try {
       if (!await savePluginSecurityPolicy(pluginPolicy)) throw new Error("无法保存插件安全策略。");
-      await Promise.all([
-        browser.runtime.sendMessage({ kind: "vaultmesh.security-policy.updated" }),
-        desktopRpc("security.settings.update", desktopSettings),
-      ]);
-    }, "插件安全策略已更新。", false);
+      let policyApplied = false;
+      try {
+        const response = await browser.runtime.sendMessage({ kind: "vaultmesh.security-policy.updated" });
+        policyApplied = response?.status === "updated";
+      } catch {
+        // The stored policy remains available to the background on its next start.
+      }
+      const desktopChanged = desktopSettings && desktopSettings.clipboardClearTimeoutMs !== savedDesktopSettings.current?.clipboardClearTimeoutMs;
+      if (desktopChanged) {
+        try {
+          await desktopRpc("security.settings.update", desktopSettings);
+          savedDesktopSettings.current = desktopSettings;
+        } catch {
+          onNotice("插件安全策略已保存；桌面剪贴板设置未保存，请重试。", "warning");
+          return;
+        }
+      }
+      onNotice(policyApplied ? "插件安全策略已更新。" : "插件安全策略已保存；后台暂未确认生效，重启插件后会重新读取。", policyApplied ? "success" : "warning");
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "无法保存插件安全策略。", "error");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function loadSecuritySummary() {
@@ -135,7 +167,7 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
           <p className="text-xs text-muted-foreground">{pinStatus?.enabled ? pinStatus.locked ? `已锁定（${pinStatus.failureLimit} 次失败上限），请使用主密码解锁插件。` : `已启用；输入固定 6 位 PIN 后自动解锁，失败上限 ${pinStatus.failureLimit} 次。` : "默认关闭，与桌面端 PIN 独立。启用后插件优先使用 PIN。"}</p>
           <input className={fieldClass} type="password" inputMode="numeric" minLength={6} maxLength={6} autoComplete="new-password" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder={pinStatus?.enabled ? "新 6 位 PIN" : "6 位 PIN"} />
           <input className={fieldClass} type="password" inputMode="numeric" minLength={6} maxLength={6} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="确认 6 位 PIN" />
-          <div className="flex flex-col gap-1 text-xs"><span id="pin-failure-limit-label">连续失败次数上限</span><Select value={String(failureLimit)} onValueChange={(value) => { if (value !== null) setFailureLimit(Number(value)); }}><SelectTrigger className="h-9 w-full" aria-labelledby="pin-failure-limit-label"><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{[3, 4, 5, 6, 7, 8, 9, 10].map((value) => <SelectItem key={value} value={String(value)}>{value} 次{value === 5 ? "（默认）" : ""}</SelectItem>)}</SelectGroup></SelectContent></Select></div>
+          <div className="flex flex-col gap-1 text-xs"><span id="pin-failure-limit-label">连续失败次数上限</span><div className="grid grid-cols-4 gap-1.5" role="group" aria-labelledby="pin-failure-limit-label">{[3, 4, 5, 6, 7, 8, 9, 10].map((value) => <Button key={value} type="button" size="sm" className="w-full px-1 text-xs" variant={failureLimit === value ? "default" : "outline"} aria-pressed={failureLimit === value} onClick={() => setFailureLimit(value)}>{value} 次{value === 5 ? "（默认）" : ""}</Button>)}</div></div>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" disabled={busy || pin.length !== 6 || pin !== confirmation} onClick={() => void savePin()}>{pinStatus?.enabled ? "更新 PIN" : "启用 PIN"}</Button>
             {pinStatus?.enabled ? <Button size="sm" variant="destructive" disabled={busy} onClick={() => void run(() => desktopRpc("pin.disable"), "插件 PIN 解锁已关闭。")}>关闭 PIN</Button> : null}
@@ -148,12 +180,12 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
       <Card>
         <CardContent className="flex flex-col gap-3">
           <div className="flex items-center gap-2"><SettingsIcon size={18} /><h2 className="text-sm font-semibold">安全策略</h2></div>
-          {pluginPolicy && desktopSettings ? <>
-            <p className="text-xs text-muted-foreground">以下规则只影响浏览器插件，不会改变桌面端的锁定设置。</p>
+          {pluginPolicy ? <>
+            <p className="text-xs text-muted-foreground">浏览器锁定规则只影响插件；剪贴板设置由桌面端管理。</p>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.lockOnBrowserRestart} onChange={(event) => setPluginPolicy({ ...pluginPolicy, lockOnBrowserRestart: event.target.checked })} />浏览器启动或重启时锁定插件</label>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.lockOnSystemLock} onChange={(event) => setPluginPolicy({ ...pluginPolicy, lockOnSystemLock: event.target.checked })} />系统锁屏时锁定插件</label>
-            <div className="flex flex-col gap-1 text-xs"><span id="plugin-idle-timeout-label">浏览器空闲后锁定插件</span><Select value={String(pluginPolicy.idleTimeoutMinutes)} onValueChange={(value) => { if (value !== null) setPluginPolicy({ ...pluginPolicy, idleTimeoutMinutes: Number(value) as PluginSecurityPolicy["idleTimeoutMinutes"] }); }}><SelectTrigger className="h-9 w-full" aria-labelledby="plugin-idle-timeout-label"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="0">关闭</SelectItem><SelectItem value="1">1 分钟</SelectItem><SelectItem value="5">5 分钟（默认）</SelectItem><SelectItem value="10">10 分钟</SelectItem><SelectItem value="15">15 分钟</SelectItem><SelectItem value="30">30 分钟</SelectItem></SelectGroup></SelectContent></Select></div>
-            <div className="flex flex-col gap-1 text-xs"><span id="clipboard-timeout-label">剪贴板自动清除</span><Select value={String(desktopSettings.clipboardClearTimeoutMs)} onValueChange={(value) => { if (value !== null) setDesktopSettings({ ...desktopSettings, clipboardClearTimeoutMs: Number(value) }); }}><SelectTrigger className="h-9 w-full" aria-labelledby="clipboard-timeout-label"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="10000">10 秒</SelectItem><SelectItem value="30000">30 秒</SelectItem><SelectItem value="60000">1 分钟</SelectItem><SelectItem value="120000">2 分钟</SelectItem></SelectGroup></SelectContent></Select></div>
+            <div className="flex flex-col gap-1 text-xs"><span id="plugin-idle-timeout-label">浏览器空闲后锁定插件</span><div className="grid grid-cols-3 gap-1.5" role="group" aria-labelledby="plugin-idle-timeout-label">{idleTimeoutOptions.map(({ value, label }) => <Button key={value} type="button" size="sm" className="w-full px-1 text-xs" variant={pluginPolicy.idleTimeoutMinutes === value ? "default" : "outline"} aria-pressed={pluginPolicy.idleTimeoutMinutes === value} onClick={() => setPluginPolicy({ ...pluginPolicy, idleTimeoutMinutes: value })}>{label}</Button>)}</div></div>
+            {desktopSettings ? <div className="flex flex-col gap-1 text-xs"><span id="clipboard-timeout-label">剪贴板自动清除</span><div className="grid grid-cols-2 gap-1.5" role="group" aria-labelledby="clipboard-timeout-label">{clipboardTimeoutOptions.map(({ value, label }) => <Button key={value} type="button" size="sm" className="w-full text-xs" variant={desktopSettings.clipboardClearTimeoutMs === value ? "default" : "outline"} aria-pressed={desktopSettings.clipboardClearTimeoutMs === value} onClick={() => setDesktopSettings({ ...desktopSettings, clipboardClearTimeoutMs: value })}>{label}</Button>)}</div></div> : <p className="text-xs text-muted-foreground">桌面端剪贴板设置暂不可用，不影响插件锁定策略。</p>}
             <div className="flex flex-wrap gap-2">
               <Button size="sm" disabled={busy} onClick={() => void saveSecurityPolicy()}>保存安全策略</Button>
               <Button size="sm" variant="destructive" disabled={busy} onClick={() => void (async () => { if (await run(() => desktopRpc("vault.lock"), "插件已锁定。", false)) onLocked(); })()}><LockKeyholeIcon size={14} />立即锁定</Button>

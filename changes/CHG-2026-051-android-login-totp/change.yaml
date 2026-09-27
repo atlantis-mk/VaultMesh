@@ -1,0 +1,37 @@
+schema: "2"
+id: "CHG-2026-051-android-login-totp"
+title: "Android Login TOTP"
+type: "security"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "TOTP 密钥设置与验证码复制跨 JNI 和剪贴板边界且需真机验收"
+requirements:
+  - "REQ-ANDROID-008"
+  - "REQ-ITEM-001"
+tests:
+  - "CT-ANDROID-JNI-008"
+  - "AT-ANDROID-008"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0024"
+  - "ADR-0026"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-ANDROID-008 Compose Login TOTP"
+  - "docs/03-functional-requirements.md#REQ-ITEM-001 Login"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+  - "CHG-2026-049-android-protected-item-access"
+boundaries:
+  - "固定 JNI 设置/移除 TOTP 密钥，core 归一化并保存，列表仅含存在性"
+  - "固定 JNI 在当次主密码复验后生成当前代码，Kotlin 特权服务直接写标记 sensitive 的剪贴板"
+risks:
+  - "设备时间偏差可使 TOTP 验证失败；剪贴板代码可能在定时清除前先自然过期"
+next:
+  - "固定 TOTP JNI、Compose 设置/移除与复制、Host/contract 测试和 Debug/Release 构建已通过本地检查"
+  - "arm64 真机验证设置、错误密钥、复制、时钟变化、后台锁定和重启"

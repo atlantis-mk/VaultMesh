@@ -1,0 +1,32 @@
+schema: "2"
+id: "CHG-2026-069-android-autofill-phone-number"
+title: "Android 自动填充本机号码"
+type: "feature"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "系统电话权限、私有号码持久化与免解锁用户名填充跨越 Android 特权和个人资料交付边界"
+requirements:
+  - "REQ-ANDROID-023"
+tests:
+  - "CT-ANDROID-AUTOFILL-003"
+  - "AT-ANDROID-024"
+adrs:
+  - "ADR-0040"
+  - "ADR-0043"
+context_refs:
+  - "docs/02-scope-matrix.md#Android Compose client"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-023 Android 系统自动填充"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md#系统自动填充与识别保存"
+related_changes:
+  - "CHG-2026-066-android-autofill"
+boundaries:
+  - "READ_PHONE_NUMBERS 仅由用户在设置中主动授权；拒绝或 SIM 无值时可选应用私有加密手动号码"
+  - "电话候选只绑定已验证目标表单的用户名 AutofillId，选择后才交付 Android 系统和目标应用；不需要解锁 Vault"
+risks:
+  - "运营商可能不提供号码或格式不可靠，必须验证并允许手动覆盖空值"
+  - "多 SIM 默认订阅号码可能不是用户期望的账号，候选须显示完整号码供用户选择"
+next: []

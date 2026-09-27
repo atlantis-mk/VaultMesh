@@ -1,0 +1,10 @@
+Generation mode: built-in image_gen; transparent_background=true.
+Reference: apps/tauri-desktop/resources/icon.png
+Output: apps/android/app/src/main/res/mipmap-nodpi/ic_launcher_artwork.png
+
+Use case: logo-brand
+Asset type: production Android application icon PNG with genuine transparent alpha.
+Input image 1: VaultMesh desktop brand reference, not an exact layout to copy.
+Primary request: Redesign this as a beautiful, bold, cohesive Android icon. The user rejected our padded circular vector conversion: NO added whitespace or inset badge. Retain the desktop identity: indigo/violet and electric-blue palette, cyan keyhole, secure circular vault dial, exactly six interconnected mesh nodes. Create a refined compact emblem whose outer silhouette is approximately circular, with the vault face and six nodes integrated into one confident mark rather than a tiny logo floating on a large colored disc.
+Style: exceptionally crisp polished app-brand artwork, restrained dimensional depth, smooth clean contours, strong small-size legibility, thoughtful simplification. Front-on symmetric orientation. Larger central vault dial and clear cyan keyhole, mesh connections supporting it quietly. Subtle satin indigo material, pale lavender rim and node accents, no chrome or exaggerated 3D.
+Composition: square canvas, one centered icon, tightly framed. The emblem reaches nearly to the canvas edges, only a minimal antialiasing margin, no broad transparent padding. Transparent negative space OUTSIDE the emblem and between exposed connections; solid dark indigo vault face. No square background tile, no enclosing background circle, no white border, no frame, no platform mask baked in, no surrounding halo or external drop shadow. No text, letters, watermark, comparison sheet, phone mockup or checkerboard. Output one finished icon, real RGBA transparent PNG.

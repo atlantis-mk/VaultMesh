@@ -1,0 +1,32 @@
+schema: "2"
+id: "CHG-2026-070-android-autofill-preauth-suggestions"
+title: "Android自动填充先选账号后授权"
+type: "security"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "锁定态系统候选预览与点选后独立授权涉及持久化元数据和填充权限边界"
+requirements:
+  - "REQ-ANDROID-023"
+tests:
+  - "CT-ANDROID-AUTOFILL-001"
+  - "CT-ANDROID-AUTOFILL-002"
+  - "AT-ANDROID-023"
+adrs:
+  - "ADR-0040"
+  - "ADR-0041"
+  - "ADR-0042"
+  - "ADR-0044"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-ANDROID-023 Android 系统自动填充"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md#系统自动填充与识别保存"
+related_changes: []
+boundaries:
+  - "锁定态仅展示 Keystore 加密的有界安全摘要；条目秘密和可信关联仅由当次 Rust 授权后重新校验"
+  - "系统候选点选绑定一次性请求和条目 ID；未匹配目标仍须明确确认"
+risks:
+  - "锁定态候选会向当前屏幕观察者显示用户名，须限制预览范围并允许在 Vault 变化时失效"
+next:
+  - "实现候选快照、先选择再授权、重新校验与真机验证"

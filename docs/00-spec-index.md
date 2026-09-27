@@ -7,8 +7,8 @@
 - Vault 格式：`4`（唯一写入格式；format 3 仅允许 desktop 主密码验证、备份后升级；不提供降级）
 - Browser RPC：`2`
 - Native ABI：`1`
-- 状态：Tauri 2 desktop、Android Compose、Chromium MV3 与 Firefox MV2 扩展为当前实现；Android 首个 create/unlock/status/lock 切片实施中，Firefox 不包含 Chromium-only Passkey proxy；Electron/Native Preview 源码已移除；`0.0.1-review` 为独立 Review 安装基线，当前 Review 更新版本为 `0.0.10-review`，正式发布门禁未完成
-- 最后更新：`2026-09-13`
+- 状态：Tauri 2 desktop、Android Compose、Chromium MV3 与 Firefox MV2 扩展为当前实现；Android 正在逐项对齐适用桌面能力，真机验收按用户决定暂缓，Firefox 不包含 Chromium-only Passkey proxy；Electron/Native Preview 源码已移除；`0.0.1-review` 为独立 Review 安装基线，当前 Review 更新版本为 `0.0.10-review`，正式发布门禁未完成
+- 最后更新：`2026-09-26`
 
 ## 路由顺序
 
@@ -43,6 +43,8 @@
 
 - `../specs/lan-vault-sync.md`：已授权桌面设备的局域网自动双向同步
 
+- `../specs/device-fill-assist.md`：已配对 Android 的号码与短时短信填充协助
+
 ## 已接受 ADR
 
 - `../adr/0001-rust-vault-core.md`
@@ -64,6 +66,35 @@
 - `../adr/0017-cross-browser-extension-native-messaging.md`
 - `../adr/0018-lan-peer-discovery-trust-model.md`
 - `../adr/0019-lan-vault-sync.md`
+- `../adr/0020-locked-sync-mailbox.md`
+- `../adr/0021-android-compose-jni-client.md`
+- `../adr/0022-android-item-operations.md`
+- `../adr/0023-android-master-password-rotation.md`
+- `../adr/0024-android-protected-copy.md`
+- `../adr/0025-android-item-history.md`
+- `../adr/0026-android-login-totp.md`
+- `../adr/0027-android-encrypted-backup.md`
+- `../adr/0028-android-password-health.md`
+- `../adr/0029-android-login-recovery-codes.md`
+- `../adr/0030-android-protected-reveal.md`
+- `../adr/0031-android-card-editor-fields.md`
+- `../adr/0032-android-secret-editor-fields.md`
+- `../adr/0033-android-ssh-editor-fields.md`
+- `../adr/0034-android-identity-editor-fields.md`
+- `../adr/0035-android-login-editor-fields.md`
+- `../adr/0036-android-biometric-quick-unlock.md`
+- `../adr/0037-android-pin-quick-unlock.md`
+- `../adr/0038-android-desktop-lan-pairing.md`
+- `../adr/0039-android-lan-sync.md`
+- `../adr/0040-android-autofill.md`
+- `../adr/0041-android-autofill-quick-auth.md`
+- `../adr/0042-android-autofill-app-association.md`
+- `../adr/0043-android-autofill-local-phone-number.md`
+- `../adr/0044-android-autofill-preauth-preview.md`
+- `../adr/0045-android-qq-registration-phone-field.md`
+- `../adr/0046-android-sms-otp-autofill.md`
+
+- `../adr/0047-device-fill-assist.md`
 
 ## Change 与 Release 入口
 

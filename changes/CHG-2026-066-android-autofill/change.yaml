@@ -1,0 +1,33 @@
+schema: "2"
+id: "CHG-2026-066-android-autofill"
+title: "Android 系统自动填充与登录识别保存"
+type: "feature"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "接入 Android Autofill 系统服务及跨应用凭据使用、捕获和保存边界，并保留平台验收状态"
+requirements:
+  - "REQ-ANDROID-023"
+  - "REQ-ANDROID-024"
+tests:
+  - "CT-ANDROID-AUTOFILL-001"
+  - "CT-ANDROID-AUTOFILL-002"
+  - "AT-ANDROID-023"
+adrs:
+  - "ADR-0040"
+context_refs:
+  - "docs/02-scope-matrix.md#客户端与平台"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-023 Android 系统自动填充"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-024 Android 登录识别保存"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md#系统自动填充与识别保存"
+related_changes: []
+boundaries:
+  - "Kotlin AutofillService 拥有系统表单、应用签名和短时捕获；Rust 固定 JNI 拥有隔离授权与原子保存"
+  - "关联写入既有加密 Login URL 集合，不改变 Vault 格式；Credential Manager 与 Passkey 不纳入本切片"
+risks:
+  - "应用或网页未提供可识别结构时平台不能填充；WebView 域名声明必须显式确认，不能作为网站归属证明"
+  - "JVM 字符串不可保证原位清零，秘密仅在短时平台处理和系统 Dataset 中存在"
+next: []

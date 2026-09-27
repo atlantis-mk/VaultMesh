@@ -270,9 +270,11 @@ impl BrowserFillService {
             .get("title")
             .and_then(Value::as_str)
             .ok_or_else(|| failure("所选项目无效。"))?;
+        let totp_code = values.values.get("totpCode").cloned();
         let mut frames = Vec::new();
         for frame in &discovery.frames {
             let mut assignments = Vec::new();
+            let mut cell_lengths = Vec::new();
             for field in &frame.fields {
                 let value = if let Some(plan) = &request.native_item_plan {
                     let entry = plan.iter().find(|entry| entry.handle == field.handle)
@@ -296,6 +298,12 @@ impl BrowserFillService {
                     "value": value,
                     "overwrite": request.mode == "selection" && selected.kind == "login" && !field.is_empty,
                 }));
+                cell_lengths.push(field.max_length);
+            }
+            if selected.kind == "login" && request.native_login_plan.is_none() {
+                if let Some(code) = &totp_code {
+                    segment_totp_assignments(&mut assignments, &cell_lengths, code);
+                }
             }
             if !assignments.is_empty() {
                 frames.push(json!({
@@ -318,6 +326,33 @@ impl BrowserFillService {
             "selectedItem": { "kind": selected.kind, "id": selected.id, "title": actual_title },
             "frames": frames,
         }))
+    }
+}
+
+/// The legacy login mapper resolves every OTP-looking field to the whole TOTP
+/// code. A group of single-character cells is one logical code field: give each
+/// cell its digit in document order, and never put the whole code into a cell
+/// that cannot hold it.
+fn segment_totp_assignments(assignments: &mut Vec<Value>, cell_lengths: &[Option<u8>], code: &str) {
+    let cells = assignments
+        .iter()
+        .zip(cell_lengths)
+        .enumerate()
+        .filter(|(_, (assignment, length))| **length == Some(1) && assignment.get("value").and_then(Value::as_str) == Some(code))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if cells.is_empty() {
+        return;
+    }
+    let digits = code.chars().map(|value| value.to_string()).collect::<Vec<_>>();
+    if cells.len() >= 2 && cells.len() == digits.len() {
+        for (cell, digit) in cells.iter().zip(digits) {
+            assignments[*cell]["value"] = Value::String(digit);
+        }
+        return;
+    }
+    for cell in cells.into_iter().rev() {
+        assignments.remove(cell);
     }
 }
 
@@ -794,4 +829,140 @@ fn valid_field(field: &DiscoveredField) -> bool {
                     .iter()
                     .all(|option| text_within(&option.value, 160) && text_within(&option.text, 160))
         })
+}
+
+/// Device values stay in the privileged broker until the original discovery is consumed.
+pub(crate) fn validate_device_discovery(
+    discovery: &Value,
+    kind: vaultmesh_lan_pairing::assist::Kind,
+    now: i64,
+) -> Result<(), BrowserPlatformError> {
+    let request = parse_execute(
+        &json!({"mode":"selection","discovery":discovery})
+            .as_object()
+            .unwrap()
+            .clone(),
+        now,
+    )?;
+    let d = request.discovery;
+    if d.selected_item.is_some()
+        || d.top_origin != d.target_origin
+        || d.frames.len() != 1
+    {
+        return Err(invalid("设备填充必须绑定当前 HTTP(S) 文档。"));
+    }
+    let fields = &d.frames[0].fields;
+    if fields.iter().any(|f| !device_field(f, kind))
+        || (kind == vaultmesh_lan_pairing::assist::Kind::Phone && fields.len() != 1)
+        || (fields.len() > 1 && !fields.iter().all(|f| f.max_length == Some(1)))
+    {
+        return Err(invalid("请选择明确的空手机号或验证码字段。"));
+    }
+    Ok(())
+}
+fn device_field(f: &DiscoveredField, kind: vaultmesh_lan_pairing::assist::Kind) -> bool {
+    if !f.is_empty
+        || f.control != "input"
+        || !matches!(
+            f.input_type.as_deref().unwrap_or(""),
+            "" | "text" | "tel" | "number"
+        )
+    {
+        return false;
+    }
+    let metadata = format!(
+        "{} {} {} {} {}",
+        f.label,
+        f.name,
+        f.id,
+        f.placeholder,
+        f.autocomplete.join(" ")
+    )
+    .to_lowercase();
+    if [
+        "totp",
+        "authenticator",
+        "验证器",
+        "银行卡",
+        "credit-card",
+        "cc-",
+    ]
+    .iter()
+    .any(|v| metadata.contains(v))
+    {
+        return false;
+    }
+    let label = format!("{} {}", f.label, f.placeholder).to_lowercase();
+    let phone_words = ["手机号", "手机号码", "电话", "phone", "mobile"];
+    let otp_words = ["验证码", "校验码", "sms", "otp", "verification", "one-time"];
+    let explicit_phone = f.autocomplete
+                .iter()
+                .any(|v| v == "tel" || v == "tel-national")
+                || phone_words.iter().any(|v| label.contains(v));
+    if ["password", "密码"].iter().any(|v| label.contains(v))
+        || f.autocomplete.iter().any(|v| v.contains("password"))
+        || (!explicit_phone && ["password", "密码"].iter().any(|v| metadata.contains(v)))
+    {
+        return false;
+    }
+    let explicit_otp = f.autocomplete.iter().any(|v| v == "one-time-code")
+        || otp_words.iter().any(|v| label.contains(v));
+    let phone = !explicit_otp && (explicit_phone || phone_words.iter().any(|v| metadata.contains(v)));
+    match kind {
+        vaultmesh_lan_pairing::assist::Kind::Phone => phone,
+        vaultmesh_lan_pairing::assist::Kind::Sms => {
+            !phone && !f.autocomplete.iter().any(|v| v == "username" || v == "email")
+                && (explicit_otp || otp_words.iter().any(|v| metadata.contains(v)))
+        }
+    }
+}
+pub(crate) fn device_assignment(
+    discovery: Value,
+    kind: vaultmesh_lan_pairing::assist::Kind,
+    value: &str,
+    now: i64,
+) -> Result<Value, BrowserPlatformError> {
+    validate_device_discovery(&discovery, kind, now)?;
+    let valid = match kind {
+        vaultmesh_lan_pairing::assist::Kind::Phone => {
+            (6..=24).contains(&value.len())
+                && value.bytes().all(|b| b.is_ascii_digit() || b == b'+')
+        }
+        vaultmesh_lan_pairing::assist::Kind::Sms => {
+            (4..=10).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_alphanumeric())
+        }
+    };
+    if !valid {
+        return Err(invalid("设备结果无效。"));
+    }
+    let request = parse_execute(
+        json!({"mode":"selection","discovery":discovery})
+            .as_object()
+            .unwrap(),
+        now,
+    )?;
+    let d = request.discovery;
+    let f = &d.frames[0];
+    let segmented = f.fields.len() > 1;
+    if segmented && f.fields.len() != value.len() {
+        return Err(invalid("验证码长度与原字段不匹配。"));
+    }
+    let mut assignments = Vec::new();
+    for (index, field) in f.fields.iter().enumerate() {
+        let result = if segmented {
+            value[index..index + 1].to_owned()
+        } else {
+            value.to_owned()
+        };
+        if field.max_length.is_some_and(|n| result.len() > n as usize)
+            || field.input_type.as_deref() == Some("number")
+                && !result.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(invalid("设备结果不适合原字段。"));
+        }
+        assignments.push(json!({"handle":field.handle,"value":result,"overwrite":false}));
+    }
+    Ok(
+        json!({"kind":"vaultmesh.approved-fill","requestId":d.request_id,"tabId":d.tab_id,"topOrigin":d.top_origin,"expiresAt":d.expires_at,"frames":[{"frameId":f.frame_id,"documentId":f.document_id,"frameOrigin":f.frame_origin,"assignments":assignments}]}),
+    )
 }

@@ -58,14 +58,34 @@ browser UI/content → background RPC → Rust native-host → Rust broker → s
 | Quick-unlock wrapper | platform credential integration | Vault format |
 | Android Activity、lifecycle、系统服务与 app-private path | Kotlin Android shell | Compose state、Tauri desktop runtime、`vault-core` |
 | Android JNI operation、进程内会话与原子持久化 | `vault-android-runtime` | Kotlin UI、raw JNI pointer、Tauri desktop runtime |
-| LAN peer discovery、TLS identity、short-code pairing、peer trust index 与 lifecycle | Tauri Rust LAN pairing service | vault-core、renderer、Agent broker、Browser RPC |
+| LAN peer discovery、TLS identity、short-code pairing 与 peer trust state machine | `vault-lan-pairing` Rust crate | vault-core、renderer、Agent broker、Browser RPC |
+| LAN pairing 平台凭据、网络权限与页面生命周期 | Tauri Rust runtime / Android Kotlin + narrow JNI adapter | 共享配对协议、Vault Key、renderer |
 
 ## Android 边界
 
+- 系统 Autofill 由 Kotlin 平台服务解析与绑定系统表单；非导出认证 Activity 仅处理安全候选与用户输入，固定 JNI 将最终值直接交给 Dataset 构造器。Rust 持有隔离的短期单请求授权与原子保存，具体边界见 `ADR-0040`。
+- 本机号码是 Kotlin 平台所有的独立 Autofill Dataset，仅关联用户名字段；SIM 读取和手动备用号码分别受运行时电话权限、Android Keystore 私有密文保护，均不经过 Vault JNI，见 `ADR-0043`。
+
 - `apps/android` 是唯一 Android 产品 shell；Compose 只持有 renderer-safe 状态和当前用户输入，不持有 Vault Key 或 core 对象。
 - `crates/vault-android-runtime` 是 Kotlin 与 `vault-core` 之间的唯一 JNI owner；公开函数必须是固定 operation，返回稳定错误码或按 operation 定义的脱敏 DTO，不允许通用 JSON method router。
-- Kotlin 拥有 `Activity`、`Application`、Android lifecycle、`FLAG_SECURE`、系统服务、瞬态编辑/搜索状态和 app-private 路径选择；Rust runtime 拥有解锁 session、Login/回收站 mutation 回滚、原子 Vault 文件提交和显式 lock。
-- Android 不依赖 `apps/tauri-desktop/src-tauri`。Autofill、Credential Manager、Passkey、Keystore quick unlock 与后台 LAN 服务进入独立受控切片前不得注册。
+- Android 主密码轮换独立于 Item payload mutation：Rust runtime 用旧磁盘 Vault 建立候选 session，并在 core rewrap 与原子文件提交成功后替换当前 session；失败不得发布候选 header。
+- Android 受保护字段复制由 core 按字段鉴权、固定 JNI 返回有界值，再由 Kotlin 特权剪贴板服务直接写入标记 sensitive 的系统 clip；Compose 只保存目标字段与短期主密码输入，不持有复制值。
+- Android 受保护字段查看复用同一固定字段鉴权；仅用户显式查看后当前前台 Compose 弹窗短时持有一个值，30 秒或生命周期失效即清除，不构成普通详情或通用 reveal JNI。
+- Android 四类条目历史只经各类型固定 JNI 投影安全摘要；恢复和清空由 core 校验条目/版本并复用 Android runtime 原子提交，Compose 确认不持有旧秘密。
+- Android Login TOTP seed 仅作为固定设置/替换 mutation 的短期输入，core 负责归一化与持久化；固定复制操作由 core 在当次主密码复验后生成短期代码，Kotlin 只写特权剪贴板。
+- Android Login 恢复码通过固定 JNI 在 Rust/core 解析、验证并原子替换；普通摘要只含存在性。查看和逐码复制各自重新验证主密码；`content:` 文件选择跨越后台锁定，只暂存 URI，解锁后把有界 UTF-8 内容读入当前草稿，不创建明文 staging。
+- Android 加密备份使用固定应用私有 staging 文件跨越文件选择器的后台锁定；Kotlin 仅通过系统 `content:` 文档 URI 搬运有界密文，Rust/core 验证恢复格式与主密码、重置同步 epoch/授权并原子替换本机 Vault。JNI 不接收外部 URI、路径或 Vault 字节。
+- Android 密码健康由 core 在用户主动请求时计算，固定 JNI 只投影分数和 Login ID；Kotlin 用当前安全摘要显示标题，不读取密码或复制判定算法。
+- Android 凭据生成器是 Kotlin 当前会话内的显式 UI 操作，使用平台安全随机源和与桌面一致的字符规则；结果仅供当前草稿填入或特权剪贴板复制，不持久化。
+- Android 卡片完整编辑只在明确打开时通过固定详情读取补充字段，完整卡号/CVV/PIN 继续省略；基础与补充字段由固定完整卡片 JNI 在单次 core mutation 中原子提交，不以两次写盘拼接。
+- Android 普通 Secret 完整编辑也只在明确打开时读取不含值的补充字段；固定完整操作单次原子提交，core 负责保留内部生命周期 Scope，Passkey 继续排除。
+- Android 普通 SSH 完整编辑只在明确打开时读取不含认证值的补充字段；固定完整操作单次原子提交，桌面托管的 OpenSSH alias 继续只读。
+- Android Identity 完整编辑只在明确打开时读取结构化个人资料；多值字段 ID 随严格有界 DTO 原样提交，由 core 完整验证并单次原子替换，普通列表仍只持有安全摘要。
+- Android Login 常规补充字段只在明确编辑时读取；固定完整操作单次原子提交，core 保留未替换密码、TOTP seed 和恢复码，后两者继续通过独立受保护操作管理。
+- Android 生物识别快捷解锁由 Rust/core 用随机包装秘密加密 Vault Key；Kotlin 仅用强生物识别逐次授权的 Keystore 密钥封存该随机秘密。固定 JNI 只交付短期包装秘密，不交付 Vault Key；Rust 验证当前加密 Vault 后才发布 session。
+- Android PIN 快捷解锁由 Kotlin Keystore 封存独立设备秘密，Rust 把六位 PIN 与设备秘密经 scrypt 派生包装密钥，原子记录五次失败限制；固定 JNI 不输出 Vault Key，主密码解锁重置 PIN 失败次数。
+- Kotlin 拥有 `Activity`、`Application`、Android lifecycle、`FLAG_SECURE`、系统服务、瞬态编辑/搜索状态和 app-private 路径选择；Rust runtime 拥有解锁 session、各 Item 基础 mutation 与适用回收站的回滚、原子 Vault 文件提交和显式 lock。Card/SSH/Secret 的受保护值只允许作为当前固定 mutation 的输入，列表只能投影安全摘要；Android 不编辑 core 中未提供的元数据。
+- Android 不依赖 `apps/tauri-desktop/src-tauri`。前台短时 LAN 配对共用独立 Rust protocol crate；系统 Autofill 与后台 LAN 同步各按独立 Requirement 注册；Credential Manager、Passkey 在独立受控切片前不得注册。
 
 ## Tauri 边界
 
@@ -83,9 +103,9 @@ browser UI/content → background RPC → Rust native-host → Rust broker → s
 
 ## LAN peer pairing
 
-LAN pairing 是显式十分钟的短时设备信任服务，desktop 锁定、离开页面、系统锁定、睡眠和退出关闭配对发现。当前 v2.0 流程使用 TLS 内 PAKE；新配对明确授权当前 Vault 同步，旧信任须双方补充确认。身份固定、碰撞仲裁和原子信任持久化保持 ADR-0018 的机制。
+LAN pairing 是显式十分钟的短时设备信任服务，desktop 锁定、离开页面、系统锁定、睡眠和退出以及 Android Activity 暂停关闭配对发现。桌面与 Android 共用 Rust protocol 2.0 的发现、TLS 内 PAKE、身份固定、碰撞仲裁和原子信任持久化；平台凭据存储分别接入 OS credential store 与 Android Keystore，见 ADR-0018、ADR-0038。新配对明确授权当前 Vault 同步，旧信任须双方补充确认；Android 同步由独立 Kotlin 服务管理，见 ADR-0039。
 
-同步拥有独立的已授权密文 mDNS/listener 与持续连接协议；Tauri Rust LAN sync service 拥有 transport、peer pin 与生命周期，shared runtime 拥有授权绑定、密文缓存和原子提交，Core 拥有逐连接方向密钥、密文封装、记录投影、验证、HLC 合并、历史与 tombstone。renderer 仅操作 typed 控制接口，无法获取同步 payload；Browser/Agent 不获得网络控制接口，但其已授权 core 会话可以验证合并本机收件箱。完全锁定的后台只搬运密文，不保留方向密钥；冷启动路由须验证 OS-protected 证明与 Vault 指纹，见 ADR-0020。配对服务与同步服务的页面生命周期相互独立。详细行为由 `specs/lan-vault-sync.md` 所有。
+同步拥有独立的已授权密文 mDNS/listener 与持续连接协议；共享 Rust LAN sync service 拥有 transport 与 peer pin，平台 shell 拥有生命周期，shared runtime 拥有授权绑定、密文缓存和原子提交，Core 拥有逐连接方向密钥、密文封装、记录投影、验证、HLC 合并、历史与 tombstone。renderer 仅操作 typed 控制接口，无法获取同步 payload；Browser/Agent 不获得网络控制接口，但其已授权 core 会话可以验证合并本机收件箱。完全锁定的后台只搬运密文，不保留方向密钥；冷启动路由须验证 OS-protected 证明与 Vault 指纹，见 ADR-0020。配对服务与同步服务的页面生命周期相互独立。详细行为由 `specs/lan-vault-sync.md` 所有。
 
 Desktop 与 browser authorization 独立。任一授权存在时 core 可以保持解锁；最后一个授权锁定后，
 Rust runtime 必须清除 core、email connection/candidate、import/SSH session、pending fill、Passkey
@@ -162,3 +182,7 @@ permission。持久 lease 存在 OS-key-protected AEAD 本地
 
 Electron/Native 源码删除不授权删除旧 Electron 加密 user-data；其保留与未来清理由
 `CHG-2026-008` 和 Release rollback window 管理。
+
+## 已配对设备填充互通
+
+REQ-DEVICE-ASSIST-001 / REQ-ANDROID-026 与 [独立互通规格](../specs/device-fill-assist.md) 定义逐设备一次授权、锁屏号码/短信交付及短时秘密生命周期。既有禁止 RECEIVE_SMS 的条款限于手机本地 Autofill；独立互通服务仅在用户主动启用后可以请求 RECEIVE_SMS，不使用 READ_SMS。短信正文仅本机瞬态解析，验证码不进入 Vault、备份、日志、同步或普通 DTO。系统限制自动读取时使用显式手动交付。

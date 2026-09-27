@@ -1,0 +1,39 @@
+schema: "2"
+id: "CHG-2026-052-android-encrypted-backup"
+title: "Android 加密备份与恢复"
+type: "security"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "文件选择器与加密 Vault 恢复跨平台文件、格式和持久化边界且需真机验收"
+requirements:
+  - "REQ-ANDROID-009"
+  - "REQ-VAULT-003"
+  - "REQ-LAN-SYNC-001"
+tests:
+  - "CT-ANDROID-JNI-009"
+  - "AT-ANDROID-009"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0027"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-ANDROID-009 Compose 加密备份与恢复"
+  - "docs/03-functional-requirements.md#REQ-VAULT-003 加密备份与恢复"
+  - "docs/03-functional-requirements.md#REQ-LAN-SYNC-001 局域网自动双向同步"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+  - "specs/lan-vault-sync.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "Android 文件选择器只读写 content URI 中的加密 Vault envelope；固定 app-private staging 路径由 Kotlin 文件服务与 Rust runtime 约定，不传任意 URI、路径或原始字节过 JNI"
+  - "恢复在 core 校验格式/主密码并重置同步 epoch 与授权后原子替换文件，再发布新 session；失败保留旧 Vault"
+risks:
+  - "文档 Provider 的持久化与截断语义因实现而异，需真机验收且写入失败不可报告完成"
+  - "当前仅接收 format 4；旧 format 3 升级需要独立迁移安全切片，不能把不支持格式静默导入"
+next:
+  - "固定 staging JNI、ContentResolver 有界读写、Compose 文件选择和确认、Host/contract 测试已通过本地检查"
+  - "arm64 真机验收文档 Provider 取消、错误密码、坏文件、覆盖恢复、重启和同步 epoch"

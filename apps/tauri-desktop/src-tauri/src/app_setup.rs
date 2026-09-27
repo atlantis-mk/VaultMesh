@@ -2,6 +2,8 @@ use super::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    disable_app_nap();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init());
@@ -711,7 +713,14 @@ fn stop_lan_pairing(state: &RuntimeState) {
         sync.stop();
     }
     if let Ok(mut lan_pairing) = state.lan_pairing.lock() {
-        lan_pairing.stop();
+        lan_pairing.stop_with_authorization(|vault, peer, fingerprint, enabled| {
+            state.runtime.lock().ok().is_some_and(|mut runtime| {
+                runtime
+                    .sync_state()
+                    .is_ok_and(|sync| sync.vault_id == vault)
+                    && runtime.sync_authorize(peer, fingerprint, enabled).is_ok()
+            })
+        });
     }
 }
 
@@ -746,6 +755,16 @@ fn monitor_lan_session_lock(app: AppHandle, state: RuntimeState) {
                 sync.lock_sensitive();
             }
             if !was_system_locked {
+                if let Ok(mut pairing) = state.lan_pairing.lock() {
+                    pairing.stop_with_authorization(|vault, peer, fingerprint, enabled| {
+                        state.runtime.lock().ok().is_some_and(|mut runtime| {
+                            runtime
+                                .sync_state()
+                                .is_ok_and(|sync| sync.vault_id == vault)
+                                && runtime.sync_authorize(peer, fingerprint, enabled).is_ok()
+                        })
+                    });
+                }
                 lock_system_authorizations(&app, &state);
             }
         }
@@ -753,25 +772,34 @@ fn monitor_lan_session_lock(app: AppHandle, state: RuntimeState) {
         let unlocked = state.runtime.lock().ok().is_some_and(|r| r.is_unlocked());
         if system_locked || !unlocked {
             if let Ok(mut pairing) = state.lan_pairing.lock() {
-                pairing.stop();
+                pairing.stop_with_authorization(|vault, peer, fingerprint, enabled| {
+                    state.runtime.lock().ok().is_some_and(|mut runtime| {
+                        runtime
+                            .sync_state()
+                            .is_ok_and(|sync| sync.vault_id == vault)
+                            && runtime.sync_authorize(peer, fingerprint, enabled).is_ok()
+                    })
+                });
             }
             // Ciphertext transport is independent of desktop unlock. No core
             // key or renderer capability is retained by this service.
         }
-        let authorizations = if let Ok(mut pairing) = state.lan_pairing.lock() {
+        if let Ok(mut pairing) = state.lan_pairing.lock() {
             if pairing.is_active() {
-                pairing.status(std::time::Instant::now(), unix_millis());
+                pairing.status_with_authorization(
+                    std::time::Instant::now(),
+                    unix_millis(),
+                    |vault, peer, fingerprint, enabled| {
+                        state.runtime.lock().ok().is_some_and(|mut runtime| {
+                            runtime
+                                .sync_state()
+                                .is_ok_and(|sync| sync.vault_id == vault)
+                                && runtime.sync_authorize(peer, fingerprint, enabled).is_ok()
+                        })
+                    },
+                );
             }
-            pairing.take_sync_authorizations()
-        } else {
-            vec![]
-        };
-        for (vault, peer, fingerprint) in authorizations {
-            if let Ok(mut runtime) = state.runtime.lock() {
-                if runtime.sync_state().is_ok_and(|s| s.vault_id == vault) {
-                    let _ = runtime.sync_authorize(&peer, &fingerprint, true);
-                }
-            }
+            let _ = pairing.take_sync_authorizations();
         }
         let changed = if let Ok(mut sync) = state.lan_sync.lock() {
             sync.tick();
@@ -794,6 +822,22 @@ fn monitor_lan_session_lock(app: AppHandle, state: RuntimeState) {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn confirmed_session_lock(observation: Option<bool>) -> bool {
     matches!(observation, Some(true))
+}
+
+/// VaultMesh serves the browser extension, Agent broker and LAN sync from a
+/// window that is usually in the background. App Nap throttles the timers of
+/// such apps, delaying request handling, idle auto-lock and clipboard clearing
+/// by seconds to minutes. Hold one activity for the process lifetime; idle
+/// system sleep remains allowed.
+#[cfg(target_os = "macos")]
+fn disable_app_nap() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+
+    let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+        &NSString::from_str("Serve local VaultMesh clients and enforce security timers"),
+    );
+    std::mem::forget(activity);
 }
 
 #[cfg(target_os = "macos")]

@@ -335,3 +335,119 @@ fn email_otp_assignment_is_empty_field_only_segmented_and_one_use() {
         .is_err()
     );
 }
+
+#[test]
+fn device_assist_accepts_http_and_https_but_keeps_exact_origin_binding() {
+    use vaultmesh_lan_pairing::assist::Kind;
+    let now = DateTime::parse_from_rfc3339("2027-01-15T08:00:01.000Z").unwrap().timestamp_millis();
+    for origin in ["http://localhost:4173", "http://example.test", "https://example.test"] {
+        for (kind, token, value) in [(Kind::Phone, "tel", "+12025550123"), (Kind::Sms, "one-time-code", "482103")] {
+            let mut d = native_plan_fixture()["discovery"].clone();
+            d.as_object_mut().unwrap().remove("selectedItem");
+            d["topOrigin"] = json!(origin); d["targetOrigin"] = json!(origin);
+            d["targetPageUrl"] = json!(format!("{origin}/login"));
+            d["frames"][0]["frameOrigin"] = json!(origin);
+            d["frames"][0]["fields"][0]["inputType"] = json!("text");
+            d["frames"][0]["fields"][0]["autocomplete"] = json!([token]);
+            let fill = device_assignment(d.clone(), kind, value, now).ok().expect("explicit HTTP(S) fill");
+            assert_eq!(fill["topOrigin"], origin);
+            assert_eq!(fill["frames"][0]["assignments"][0]["overwrite"], false);
+            for (pointer, replacement) in [
+                ("/targetPageUrl", "https://other.test/login"),
+                ("/targetOrigin", "https://other.test"),
+                ("/frames/0/frameOrigin", "https://other.test"),
+                ("/topOrigin", "file:///tmp/form.html"),
+            ] {
+                let mut bad = d.clone(); *bad.pointer_mut(pointer).unwrap() = json!(replacement);
+                assert!(device_assignment(bad, kind, value, now).is_err(), "{origin} {pointer}");
+            }
+        }
+    }
+}
+
+#[test]
+fn device_assist_phone_accounts_are_not_sms_targets() {
+    use vaultmesh_lan_pairing::assist::Kind;
+    let now = DateTime::parse_from_rfc3339("2027-01-15T08:00:01.000Z").unwrap().timestamp_millis();
+    for (label, autocomplete) in [("联系电话", vec![]), ("登录手机号", vec!["username"]), ("收货联系电话", vec!["shipping", "tel"])] {
+        let mut d = native_plan_fixture()["discovery"].clone();
+        d.as_object_mut().unwrap().remove("selectedItem");
+        let f = &mut d["frames"][0]["fields"][0];
+        f["inputType"] = json!("text");
+        f["label"] = json!(label);
+        f["autocomplete"] = json!(autocomplete);
+        f["context"] = json!("otp");
+        assert!(validate_device_discovery(&d, Kind::Phone, now).is_ok(), "{label}");
+        assert!(validate_device_discovery(&d, Kind::Sms, now).is_err(), "{label}");
+    }
+    for (name, label, autocomplete, phone, sms) in [
+        ("password_login_phone", "登录手机号", vec!["username"], true, false),
+        ("login_phone_code", "短信验证码", vec!["one-time-code"], false, true),
+        ("quantity", "数量", vec![], false, false),
+        ("account", "账号", vec!["username"], false, false),
+    ] {
+        let mut d = native_plan_fixture()["discovery"].clone();
+        d.as_object_mut().unwrap().remove("selectedItem");
+        let f = &mut d["frames"][0]["fields"][0];
+        f["inputType"] = json!("text"); f["name"] = json!(name);
+        f["label"] = json!(label); f["autocomplete"] = json!(autocomplete);
+        f["context"] = json!("otp");
+        assert_eq!(validate_device_discovery(&d, Kind::Phone, now).is_ok(), phone, "{name}");
+        assert_eq!(validate_device_discovery(&d, Kind::Sms, now).is_ok(), sms, "{name}");
+    }
+}
+
+#[test]
+fn device_assist_preserves_original_binding_and_rejects_unsafe_fields() {
+    use vaultmesh_lan_pairing::assist::Kind;
+    let now = DateTime::parse_from_rfc3339("2027-01-15T08:00:01.000Z").unwrap().timestamp_millis();
+    let mut d = native_plan_fixture()["discovery"].clone();
+    d.as_object_mut().unwrap().remove("selectedItem");
+    d["frames"][0]["fields"][0]["inputType"] = json!("tel");
+    d["frames"][0]["fields"][0]["autocomplete"] = json!(["tel"]);
+    let fill = device_assignment(d.clone(), Kind::Phone, "+12025550123", now).ok().unwrap();
+    assert_eq!(fill["frames"][0]["documentId"], d["frames"][0]["documentId"]);
+    assert_eq!(fill["frames"][0]["assignments"][0]["handle"], d["frames"][0]["fields"][0]["handle"]);
+    assert_eq!(fill["frames"][0]["assignments"][0]["overwrite"], false);
+    assert_eq!(fill["tabId"], d["tabId"]);
+    assert!(device_assignment(d.clone(), Kind::Phone, "+12025550123", now + 120_000).is_err());
+    for (path, value) in [
+        ("/frames/0/fields/0/isEmpty", json!(false)),
+        ("/frames/0/fields/0/inputType", json!("password")),
+        ("/frames/0/fields/0/label", json!("credit-card")),
+        ("/frames/0/frameOrigin", json!("https://other.test")),
+        ("/topOrigin", json!("https://other.test")),
+    ] {
+        let mut bad = d.clone(); *bad.pointer_mut(path).unwrap() = value;
+        assert!(device_assignment(bad, Kind::Phone, "+12025550123", now).is_err(), "{path}");
+    }
+    d["frames"][0]["fields"][0]["autocomplete"] = json!(["one-time-code"]);
+    d["frames"][0]["fields"][0]["maxLength"] = json!(1);
+    let field = d["frames"][0]["fields"][0].clone();
+    d["frames"][0]["fields"] = json!((0..6).map(|_| { let mut f = field.clone(); f["handle"] = json!(Uuid::new_v4()); f }).collect::<Vec<_>>());
+    assert!(device_assignment(d.clone(), Kind::Sms, "12345", now).is_err());
+    let fill = device_assignment(d.clone(), Kind::Sms, "123456", now).ok().unwrap();
+    assert_eq!(fill["frames"][0]["assignments"].as_array().unwrap().len(), 6);
+    d["frames"][0]["fields"][0]["label"] = json!("Authenticator TOTP");
+    assert!(device_assignment(d, Kind::Sms, "123456", now).is_err());
+}
+
+#[test]
+fn ct_autofill_otp_splits_totp_across_single_character_cells() {
+    let code = "943000";
+    let cells = |count: usize| (0..count).map(|index| json!({"handle": index, "value": code, "overwrite": false})).collect::<Vec<_>>();
+    let mut six = cells(6);
+    segment_totp_assignments(&mut six, &[Some(1); 6], code);
+    assert_eq!(six.iter().map(|a| a["value"].as_str().unwrap()).collect::<String>(), code);
+
+    // A whole code never lands in a single-character cell when the group size differs.
+    let mut four = cells(4);
+    segment_totp_assignments(&mut four, &[Some(1); 4], code);
+    assert!(four.is_empty());
+
+    // Ordinary single-box OTP fields and other login values stay untouched.
+    let mut single = vec![json!({"handle": 0, "value": "synthetic-user", "overwrite": false}), json!({"handle": 1, "value": code, "overwrite": false})];
+    segment_totp_assignments(&mut single, &[None, Some(8)], code);
+    assert_eq!(single[1]["value"], code);
+    assert_eq!(single.len(), 2);
+}

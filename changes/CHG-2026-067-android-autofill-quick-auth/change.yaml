@@ -1,0 +1,33 @@
+schema: "2"
+id: "CHG-2026-067-android-autofill-quick-auth"
+title: "Android 自动填充快捷授权"
+type: "feature"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "生物识别与 PIN 授权系统自动填充跨越一次性权限和 Native JNI 边界，需保存决策与真机验收状态"
+requirements:
+  - "REQ-ANDROID-023"
+  - "REQ-ANDROID-024"
+tests:
+  - "CT-ANDROID-AUTOFILL-001"
+  - "CT-ANDROID-AUTOFILL-002"
+  - "AT-ANDROID-023"
+adrs:
+  - "ADR-0041"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-ANDROID-023 Android 系统自动填充"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md#系统自动填充与识别保存"
+related_changes:
+  - "CHG-2026-066-android-autofill"
+  - "CHG-2026-061-android-biometric-quick-unlock"
+  - "CHG-2026-062-android-pin-quick-unlock"
+boundaries:
+  - "快捷认证只建立绑定当前系统填充或保存请求的短时 Rust 授权，不发布主保险库解锁会话"
+  - "固定 JNI 方法复用现有 Keystore 包装秘密和 PIN 失败计数；受主密码再次验证保护的条目仍需主密码"
+risks:
+  - "第三方应用未提供可识别的 Autofill 输入结构时，系统可能无法展示填充建议"
+next: []

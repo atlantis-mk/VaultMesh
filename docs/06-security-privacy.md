@@ -10,7 +10,7 @@
 
 ## LAN peer pairing
 
-LAN peer discovery 默认关闭且只在用户显式开启的有限窗口内运行。mDNS 记录是未认证输入，不能包含用户、主机、Vault、配对码或秘密数据，也不能单独授予信任。每次发现窗口的随机六码只在生成端 UI 与 LAN service 内存中存在；输入端通过 bounded typed operation 提交后，双方必须在首次 TLS 内完成 SPAKE2 与绑定 TLS exporter、设备身份、证书、实例和 nonce 的双向 key confirmation，网络中不得直接发送配对码。错误码和重放必须失败，失败尝试有界；停止、超时、锁定、睡眠或退出立即清除配对码。双方同时发起时只保留按临时实例 ID 确定的规范 TLS 会话。双方还必须交换本地持久化成功状态，任一端失败时不得进入 connected。已配对身份固定到 OS-protected proof，证书漂移、记录损坏、取消、超时或撤销均拒绝。配对 transport 不承载 Vault 数据。独立同步 service 只通过 Rust typed API 访问当前已授权 Vault；版本清单和秘密记录仅经固定证书 mutual TLS 传输，主密码、Vault Key、本地授权、邮件连接凭据与 SSH 部署绑定不传输。锁定立即清除对应解密权限；已授权密文搬运与解锁合并分离，方向密钥仅在加密 Vault 内保存，密文缓存与 OS-protected 路由证明边界见 ADR-0020。renderer、日志和持久化非秘密 settings 不得包含同步记录。
+LAN peer discovery 默认关闭且只在用户显式开启的有限窗口内运行。mDNS 记录是未认证输入，不能包含用户、主机、Vault、配对码或秘密数据，也不能单独授予信任。每次发现窗口的随机六码只在生成端 UI 与 LAN service 内存中存在；输入端通过 bounded typed operation 提交后，双方必须在首次 TLS 内完成 SPAKE2 与绑定 TLS exporter、设备身份、证书、实例和 nonce 的双向 key confirmation，网络中不得直接发送配对码。错误码和重放必须失败，失败尝试有界；停止、超时、锁定、睡眠或退出立即清除配对码。双方同时发起时只保留按临时实例 ID 确定的规范 TLS 会话。双方还必须交换本地持久化成功状态，任一端失败时不得进入 connected。已配对身份固定到 OS-protected proof，Android proof 必须由 Keystore 密钥封存；证书漂移、记录损坏、取消、超时或撤销均拒绝。Android 本地网络权限拒绝或撤销时必须停止配对和同步 listener。Android 同步前台服务在后台仅搬运密文，Keystore 只保护设备凭据与路由证明，不授予 Vault 解密能力，见 ADR-0039。配对 transport 不承载 Vault 数据。独立同步 service 只通过 Rust typed API 访问当前已授权 Vault；版本清单和秘密记录仅经固定证书 mutual TLS 传输，主密码、Vault Key、本地授权、邮件连接凭据与 SSH 部署绑定不传输。锁定立即清除对应解密权限；已授权密文搬运与解锁合并分离，方向密钥仅在加密 Vault 内保存，密文缓存与 OS-protected 路由证明边界见 ADR-0020。renderer、日志和持久化非秘密 settings 不得包含同步记录。
 
 ## Vault 与文件边界
 
@@ -69,11 +69,49 @@ Email token/app password 是 encrypted internal record。Main 只读邮件、内
 
 ## Android 边界
 
-Android UI 与系统框架均不得拥有 Vault Key 或 `vault-core` 对象。主密码和 Login 新密码只作为当前 JNI 调用输入，Kotlin 与 Compose 不得把它写入 saved state、Bundle、日志、崩溃数据、剪贴板或持久化 store；调用完成或失败后必须清空 UI 输入。JNI Login 与回收站列表只包含安全摘要，禁止返回密码、notes、TOTP、恢复码和 custom field 值；搜索只在内存摘要上执行。永久删除和清空必须明确确认；其他返回值只包含稳定错误码和非秘密状态，不包含解密 payload、路径、KDF 参数或内部错误详情。
+系统 Autofill 仅在 `REQ-ANDROID-023/024` 的当次用户授权下，将所选 Login 用户名/密码交付系统 Dataset。捕获值只在系统 SaveRequest 后进入短期特权内存，既有应用关联精确绑定包名、签名与网页 origin；未经关联的目标必须额外确认。独立授权与捕获必须在期限、取消、后台或锁定时清除；不得放宽主 Activity 后台锁定，见 `ADR-0040`。
+
+Android 锁定态 Autofill 可以读取 `ADR-0044` 的本机加密候选预览，并向当前系统候选展示少量相关用户名。预览只在已授权读取后生成，不含秘密或授权，使用独立 Android Keystore AES-GCM 密钥、私有不备份文件及加密 Vault 指纹绑定；Vault 改变、记录损坏或签名/origin 不一致时不得把缓存当作可信关联。最终填充必须重新授权并由 Rust 重新验证；同一请求的有效授权只能消费一次。
+
+Android UI 与系统框架均不得拥有 Vault Key 或 `vault-core` 对象。主密码及 Item 新秘密值只作为当前 JNI mutation 输入，Kotlin 与 Compose 不得把它写入 saved state、Bundle、日志、崩溃数据、剪贴板或持久化 store；调用完成或失败后必须清空 UI 输入。JNI Login、Card、SSH、Identity、Secret 与适用回收站列表只包含安全摘要，禁止返回密码、完整卡号、安全码、PIN、SSH 认证值、Secret 值、Login notes/TOTP/恢复码和 custom field 值；搜索只在内存摘要上执行。Passkey 不进入普通 Secret 列表或 mutation，桌面管理的 SSH alias 不由 Android 修改。永久删除和清空必须明确确认；其他返回值只包含稳定错误码和非秘密状态，不包含解密 payload、路径、KDF 参数或内部错误详情。
 
 Vault 只保存在应用私有目录，禁止 Android Auto Backup、device transfer backup 与 cleartext traffic。主 Activity 从创建起启用 `FLAG_SECURE`；进入后台、系统锁定、显式锁定和进程退出必须使解锁会话不可继续使用。进程终止不是持久化秘密清理机制，任何解锁权限都不得写盘。
 
-首个 Android 切片不注册网络、WebView、Autofill、Credential Manager、Passkey、外部存储或后台服务权限。Keystore/生物识别 quick unlock 和系统级填充以后续 ADR 与独立 Requirement 所有；不得以保存主密码、将秘密返回 Compose 或复用桌面 broker 作为实现捷径。
+Android 主密码轮换须重新验证旧密码，并在候选会话完成原子提交后才替换当前 session；旧密码错误或提交失败不能改变旧文件及当前会话。旧、新主密码的 Compose 输入在提交前解除引用，不写入持久化状态或日志。
+
+Android 受保护值复制仅由用户主动选择条目/字段并重新验证主密码后执行。JNI 响应只包含单个有界字段值，Kotlin 特权服务直接写入标记 sensitive 的系统剪贴板；列表和持久状态不得持有该值。到期清理必须核对本应用的非秘密 clip 标签，无法确认所有权不得清除其他应用随后复制的内容；后台剪贴板访问差异必须在真机验收。
+
+Android 受保护字段查看是单独显式动作，沿用逐字段 JNI 和当次主密码验证。成功值只可存在当前前台弹窗 30 秒；关闭、切换、后台、锁定和迟到响应立即清除，不得存入普通详情、持久 UI 状态或剪贴板。窗口继续受 `FLAG_SECURE` 保护，但屏幕可见期间的旁观与辅助功能暴露须真机验收。
+
+Android 条目历史只返回安全摘要，旧密码、卡号、SSH 密钥和身份受保护字段不得进入 Kotlin；恢复必须由 core 验证版本归属并原子提交。受管 SSH alias 的历史 mutation 在 Android 封闭拒绝，切换、锁定和后台化清除历史列表与确认。
+
+Android SSH 编辑详情仅由用户明确打开普通条目时读取备注、文件夹、收藏和复验设置，不能含认证值或托管 alias 绑定。完整编辑的认证值输入与补充字段在单次 core mutation 中提交；取消、后台、锁定和迟到响应不得保留草稿。
+
+Android Identity 完整详情包含个人资料，仅可在用户明确打开编辑器后短时进入前台 Compose 状态。邮箱、电话与地址的 UUID 和首选标志须原样保留；严格有界完整更新由 core 验证并原子提交。普通列表、持久 UI 状态和日志不得含完整资料，取消、后台、锁定与迟到结果必须清理。
+
+Android Login 补充详情只在明确编辑时读取附加网址、自定义字段、备注、文件夹及填充策略，不得返回密码、TOTP seed 或恢复码。完整更新留空密码及未触碰的二次验证资料必须由 core 保留；自定义字段值和备注不得进入普通列表，后台、锁定或迟到详情必须清除编辑草稿。
+
+Android Login TOTP seed 只可经固定 mutation 输入 core，列表只含存在性；当前代码只在用户明确复制且 core 重新验证主密码后生成。seed 不得作为详情、历史摘要或剪贴板值返回 Kotlin；验证码沿用 sensitive clip 的所有权清理。
+
+Android Login 恢复码列表只含存在性；粘贴或一次性文档导入只作为当前编辑输入，core 解析并原子提交。每次查看和逐码复制都必须重新验证主密码，查看值只存在当前前台弹窗；复制值沿用 sensitive clip 清理。文件选择时必须锁定，重新解锁后才读取有界 `content:` UTF-8 文本，不落明文 staging。只有内容原样保存成功并经用户再次确认、复读比对且提供者允许时，才可删除源文档；失败保留源文档。
+
+Android 文档备份/恢复只搬运加密 format 4 envelope。外部文档仅由 Kotlin `ContentResolver` 按用户一次性 `content:` 授权读写；Rust 只访问应用私有固定 staging 路径。恢复在 core 验证密码并重置同步授权后原子写盘，成功前不得替换当前会话。导入 staging 在取消、锁定或恢复完成时删除；导出 staging 在文件选择返回后删除，文件选择期间后台锁定不延长解密会话；残留文件在下次启动清理。Android backup 继续禁用。format 3 在没有独立迁移与原始备份策略前封闭拒绝。
+
+Android 密码健康响应仅包含分数和 Login ID。算法只在 core 访问解密密码；Kotlin 用已解锁列表的安全标题呈现，关闭、切换或锁定后清除报告，不能把报告存入分析或持久化状态。
+
+Android 生成器结果只留在当前 Compose/ViewModel 内存，不保存历史、分析或日志。用户显式复制时由 Kotlin 特权服务标记 sensitive 并按剪贴板所有权清理；填入 Login 草稿不等于保存，锁定或离开时清除。
+
+Android 卡片补充字段仅在用户明确编辑时进入当前草稿；固定详情不返回完整卡号、安全码或 PIN。严格类型化、有界补充输入与基础字段在同次 core mutation 中原子提交，防止部分保存；账单地址和备注不得进入列表、日志或持久化 UI 状态，取消、导航、后台与锁定必须清除。
+
+Android 普通 Secret 补充字段只在用户明确编辑时进入当前草稿；固定详情不返回值并拒绝 Passkey。严格类型化、有界 Scope 和元数据与基础字段在同次 core mutation 中提交；core 保留内部生命周期 Scope，Android 不得伪造或丢弃。秘密值和备注不得进入普通列表、日志或持久化 UI 状态，取消、导航、后台与锁定清除草稿。
+
+Android 生物识别只用 Keystore 逐次强认证密钥封存随机包装秘密；Vault Key 始终留在 Rust/core，包装秘密不得进入 Compose 状态或 backup。无认证或注册变化时不能解封；错误包装、当前 Vault 不匹配、取消、锁定和后台化均不能发布 session，主密码回退始终可用。
+
+Android PIN 只作为六位用户因素，Keystore 另行封存随机设备秘密；两者经 Rust scrypt 派生包装密钥，失败次数在 Rust 原子写入且五次后禁止 PIN。设备秘密与 PIN 只短时穿过 JNI，不得写入 Compose 持久状态；恶意输入、写盘失败、后台或迟到结果不得发布 session。主密码成功解锁可重置失败次数并始终保留回退入口。
+
+Android 系统 Autofill 由 `REQ-ANDROID-023/024` 与 `ADR-0040/0043` 限定；不得以保存主密码、将秘密返回 Compose 或复用桌面 broker 作为实现捷径。`READ_PHONE_NUMBERS` 仅在用户从设置中主动授权后供 Kotlin 读取默认 SIM 号码，拒绝后不得继续查询；手动备用号码只存 Android Keystore 加密的私有不备份文件。号码仅作为用户名字段的独立系统候选，只有用户点选才交付目标应用，不得进入日志、普通 settings、Vault Login 或密码字段。Credential Manager、Passkey、外部存储和通用 WebView 权限仍不注册。
+
+Android 短信验证码 Autofill 由 `REQ-ANDROID-025` 与 `ADR-0046` 限定。仅 Google Play 服务的 SMS Code Autofill API 可以为用户点选的当前验证码字段取得一次性代码；动态接收器要求 Google Play 服务发送方权限，代码不得进入 Vault、日志、持久化 UI、普通 Intent、登录捕获或其他字段。不申请 `READ_SMS`、`RECEIVE_SMS`，并在目标应用已有 SMS Retriever 请求时让其自行处理。
 
 ## Agent Capability Broker 边界
 
@@ -168,3 +206,13 @@ Vault 只保存在应用私有目录，禁止 Android Auto Backup、device trans
 - 独立密码学、格式和 unlocked-key lifecycle 审计（`OPEN-003`）。
 - Windows DPAPI/Hello、screen capture、clipboard、lock、backup 审查（`OPEN-001`）。
 - Signing、notarization、updater integrity、native-host installation、dependency/supply-chain 审查。
+
+## 已配对设备填充互通
+
+REQ-DEVICE-ASSIST-001 / REQ-ANDROID-026 与 [独立互通规格](../specs/device-fill-assist.md) 定义逐设备一次授权、锁屏号码/短信交付及短时秘密生命周期。既有禁止 RECEIVE_SMS 的条款限于手机本地 Autofill；独立互通服务仅在用户主动启用后可以请求 RECEIVE_SMS，不使用 READ_SMS。短信正文仅本机瞬态解析，验证码不进入 Vault、备份、日志、同步或普通 DTO。系统限制自动读取时使用显式手动交付。
+
+互通恢复只使用平台凭据库封存的 Vault/副本及当前密文指纹证明，不拥有 Vault 解锁凭据。常驻开关仅保存布尔意愿且不备份；各恢复入口必须检查开关，显式关闭与系统强制停止不得绕过。恢复证明损坏或绑定不匹配时要求重新解锁建立，不能以持久偏好替代设备授权。
+
+按 ADR-0047 接受 HTTP 目标网页的显式设备填充风险：用户点选不保证页面未被网络篡改，也不阻止目标脚本读取填入值；HTTP 与 HTTPS 目标必须按完整 origin 区分。页面协议不影响手机到电脑 mutual TLS，既有秘密生命周期与最终字段绑定继续生效。
+
+已授权号码的桌面持久注册仅进入平台凭据库，按本机 Vault/副本与手机证书隔离，不属于普通设置或同步内容。v2 验证码通过 mutual TLS 推送到授权电脑 Rust 内存，按用户追加决定允许每台电脑本地消费一次，不能再承诺跨电脑全局唯一使用；保持原始两分钟 TTL、正文不传输、日志/DTO/storage 不含值。离线注册号码与远程撤销延迟由互通专项规格所有。

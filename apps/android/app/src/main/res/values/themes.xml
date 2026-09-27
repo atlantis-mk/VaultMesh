@@ -6,4 +6,11 @@
         <item name="android:navigationBarColor">#F7F7FA</item>
         <item name="android:statusBarColor">#F7F7FA</item>
     </style>
+    <style name="Theme.VaultMesh.AutofillSheet" parent="Theme.VaultMesh">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.45</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+    </style>
 </resources>

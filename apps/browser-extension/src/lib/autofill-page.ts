@@ -1,3 +1,5 @@
+import { openDeviceAssist } from "@/lib/device-assist-overlay";
+import { deviceAssistKindForControl } from "@/lib/form-discovery";
 import { accessibleShadowRoot, analyzeControlSemantics, credentialFieldRole, discoverFields, classifyControl, formControls, semanticCluster, hasLoginFields, isEmailAccountControl, isNewPasswordControl, loginFormSignature, passwordFieldGroup, selectAutofillPageContext, shouldPreserveExistingLoginAccount } from "@/lib/form-discovery";
 import { InlineAutofillMenu } from "@/lib/inline-autofill";
 import { InlineAutofillTrigger } from "@/lib/inline-autofill-trigger";
@@ -18,6 +20,7 @@ type DocumentIdSource = string | (() => string);
 export function startAutofillPage(document: Document, documentId: DocumentIdSource, sendMessage: SendMessage, captureTarget?: (target: HTMLElement) => AutofillTarget | undefined) {
   const currentDocumentId = typeof documentId === "function" ? documentId : () => documentId;
   let disposed = false;
+  let closeAssist: (() => void) | undefined;
   let scanTimer: ReturnType<typeof setTimeout> | null = null;
   let unlockPollTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingCaptureResumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -38,6 +41,12 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
   const shadowEventRoots = new Set<ShadowRoot>();
   const handledEvents = new WeakSet<Event>();
   const menu = new InlineAutofillMenu(document, (candidate, target) => {
+    if (candidate.kind === "device-assist") {
+      if (!captureTarget?.(target)) return;
+      closeAssist?.();
+      closeAssist = openDeviceAssist(document, target, () => captureTarget?.(target), candidate.assistKind, sendMessage, candidate.assistKind === "sms" ? segmentedOtpAnchor(target) : target);
+      return;
+    }
     if (candidate.kind === "email-otp") {
       const scope = captureTarget?.(target);
       if (captureTarget && !scope) return;
@@ -227,6 +236,14 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     }
   }
 
+  async function deviceAssistEntries(target: HTMLElement): Promise<InlineAutofillCandidate[]> {
+    const assistKind = deviceAssistKindForControl(target);
+    if (!assistKind) return [];
+    const support = await sendMessage({ kind: "vaultmesh.device-assist-capabilities" }).catch(() => null) as { supported?: boolean } | null;
+    if (!support?.supported) return [];
+    return [{ kind: "device-assist", id: "device-assist", assistKind, title: assistKind === "phone" ? "从手机填入号码" : "从手机获取验证码", subtitle: "已配对设备 · 在电脑点选填充" }];
+  }
+
   async function openCandidates(target: HTMLElement) {
     const fieldKind = classifyControl(target);
     if (!fieldKind) { menu.hide(); trigger.hide(); return; }
@@ -253,6 +270,8 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
         passwordGeneratorOptions,
         usernameGeneratorOptions,
       });
+      const deviceEntries = await deviceAssistEntries(target);
+      if (deviceEntries.length && !disposed && request === focusRequest && trigger.target === target && target.isConnected) menu.show(target, deviceEntries, "login", {generatedEmailRequired: isEmailAccountControl(target), passwordGeneratorOptions, usernameGeneratorOptions});
       return;
     }
     const request = ++focusRequest;
@@ -280,6 +299,8 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     // random account/password generator for a verification-code field.
     const generatedMode = fieldKind === "login" && pageContext !== "otp" ? "login" : "none";
     menu.show(target, candidates, generatedMode, { anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target });
+    const deviceEntries = await deviceAssistEntries(target);
+    if (deviceEntries.length && !disposed && request === focusRequest && trigger.target === target && target.isConnected) menu.show(target, [...candidates, ...deviceEntries], generatedMode, {anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target});
   }
 
   async function refreshOtpCandidates() {
@@ -507,6 +528,7 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
   function dispose() {
     if (disposed) return;
     disposed = true;
+    closeAssist?.();
     if (scanTimer) clearTimeout(scanTimer);
     shadowHosts.reset();
     if (unlockPollTimer) clearTimeout(unlockPollTimer);
@@ -611,9 +633,14 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
 function segmentedOtpAnchor(target: HTMLElement) {
   if (!(target instanceof HTMLInputElement)) return target;
   for (let container = target.parentElement; container; container = container.parentElement) {
-    const otpInputs = Array.from(container.querySelectorAll<HTMLInputElement>("input"))
-      .filter((input) => analyzeControlSemantics(input).context === "otp");
-    if (otpInputs.length >= 2 && otpInputs.includes(target)) return container;
+    const inputs = Array.from(container.querySelectorAll<HTMLInputElement>("input"));
+    const otpInputs = inputs.filter((input) => analyzeControlSemantics(input).context === "otp");
+    // Only a group of digit cells is one logical code field. A phone number
+    // and a single code box share the "otp" page context but must keep their
+    // own anchors, otherwise the menu opens below the neighbouring field.
+    const cells = otpInputs.length === inputs.length && otpInputs.includes(target)
+      && (otpInputs.length >= 4 || otpInputs.every((input) => input.maxLength > 0 && input.maxLength <= 2));
+    if (cells && otpInputs.length >= 2) return container;
     if (container.matches('form,[role="form"],body,html')) break;
   }
   return target;

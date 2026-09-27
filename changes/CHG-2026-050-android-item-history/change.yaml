@@ -1,0 +1,35 @@
+schema: "2"
+id: "CHG-2026-050-android-item-history"
+title: "Android 条目历史与恢复"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "四类条目历史跨固定 JNI 边界且真机验收需跨任务保留"
+requirements:
+  - "REQ-ANDROID-007"
+  - "REQ-RECOVERY-001"
+tests:
+  - "CT-ANDROID-JNI-007"
+  - "AT-ANDROID-007"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0025"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-ANDROID-007 Compose 条目历史"
+  - "docs/03-functional-requirements.md#REQ-RECOVERY-001 Trash 与 history"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "Login、Card、SSH、Identity 使用各自固定 JNI 历史操作；只投影不含秘密的版本摘要，恢复和清空由 core 经原子提交执行"
+  - "历史确认绑定当前条目与版本；切换、锁定及后台化清除历史列表和迟到响应"
+risks:
+  - "恢复旧版本会替换当前条目字段；必须在真机确认破坏性提示及新版本保留行为"
+next:
+  - "固定历史 JNI、Compose 历史浏览与确认、Host/contract 测试和 Debug/Release 构建已通过本地检查"
+  - "arm64 真机验收四类历史的恢复、清空、锁定和重启"

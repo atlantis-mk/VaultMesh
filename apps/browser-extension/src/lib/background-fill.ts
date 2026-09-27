@@ -272,7 +272,7 @@ export function isTrustedExtensionPage(sender: Browser.runtime.MessageSender): b
   return sender.id === browser.runtime.id && sender.tab == null && sender.url?.startsWith(extensionRoot) === true;
 }
 
-async function applyApprovedFill(approval: import("@/lib/protocol").ApprovedFill, tabId: number, topOrigin: string, selectedItem?: FillRequest["selectedItem"], clearBeforeFill = false) {
+export async function applyApprovedFill(approval: import("@/lib/protocol").ApprovedFill, tabId: number, topOrigin: string, selectedItem?: FillRequest["selectedItem"], clearBeforeFill = false, deviceAssistKind?: "phone" | "sms") {
   if (approval.tabId !== tabId || approval.topOrigin !== topOrigin || Date.parse(approval.expiresAt) <= Date.now()) {
     return { status: "approval-rejected" as const, filledCount: 0 };
   }
@@ -288,6 +288,7 @@ async function applyApprovedFill(approval: import("@/lib/protocol").ApprovedFill
         expiresAt: approval.expiresAt,
         ...(selectedItem ? { selectedItem } : {}),
         ...(clearBeforeFill ? { clearBeforeFill: true } : {}),
+        ...(deviceAssistKind ? { deviceAssistKind } : {}),
         assignments: frame.assignments,
       }, { frameId: frame.frameId });
     } catch { return null; }
@@ -295,8 +296,10 @@ async function applyApprovedFill(approval: import("@/lib/protocol").ApprovedFill
   const filledCount = results.reduce((count, result) => count + (result && typeof result === "object" && "results" in result && Array.isArray(result.results)
     ? result.results.filter((entry: unknown) => Boolean(entry && typeof entry === "object" && (entry as { status?: unknown }).status === "filled")).length
     : 0), 0);
-  return filledCount > 0
-    ? { status: "filled" as const, filledCount }
+  if (filledCount > 0) return { status: "filled" as const, filledCount };
+  const entries = results.flatMap((result) => result && typeof result === "object" && "results" in result && Array.isArray(result.results) ? result.results : []);
+  return entries.length > 0 && entries.every((entry: unknown) => (entry as { status?: unknown } | null)?.status === "skipped-non-empty")
+    ? { status: "preserved-existing" as const, filledCount: 0 }
     : { status: "document-changed" as const, filledCount: 0 };
 }
 
@@ -305,7 +308,7 @@ async function getSameOriginFrameIds(tabId: number, topOrigin: string) {
   return sameOriginFrameIds(frames, topOrigin);
 }
 
-async function discoverFrame(tabId: number, frameId: number, requestId: string, waitForLoginForm = false, target?: AutofillTarget) {
+export async function discoverFrame(tabId: number, frameId: number, requestId: string, waitForLoginForm = false, target?: AutofillTarget) {
   const deadline = Date.now() + (waitForLoginForm ? LOGIN_DISCOVERY_TIMEOUT_MS : 0);
   let latest: DiscoveryFrame | null = null;
 

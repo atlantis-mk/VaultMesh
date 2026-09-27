@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="autofill_text_primary">#1B2030</color>
+    <color name="autofill_text_secondary">#747986</color>
+    <color name="autofill_icon_muted">#696F7B</color>
+    <color name="autofill_brand">#3137A3</color>
+</resources>

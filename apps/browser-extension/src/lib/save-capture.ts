@@ -130,7 +130,7 @@ function captureLogin(controls: SupportedControl[], context: PageContext): Pick<
   if (!preferred?.value) return {};
   const newPasswords = passwords.filter((control) => autocompleteTokens(control).includes("new-password") || isNewPasswordControl(control));
   if (newPasswords.includes(preferred) && newPasswords.some((control) => control.value !== preferred.value)) return {};
-  return { login: { username: accountValue(controls), password: preferred.value } };
+  return { login: { username: accountValue(controls, preferred), password: preferred.value } };
 }
 
 function captureIdentity(controls: SupportedControl[], pageUrl: string, context: PageContext): Pick<CapturedSaveData, "identity"> | {} {
@@ -243,12 +243,19 @@ function inferContext(controls: SupportedControl[]): PageContext {
   return representative ? analyzeFormSemantics(representative).context : "unknown";
 }
 
-function accountValue(controls: SupportedControl[]): string {
-  const account = controls.find((control) => {
+function accountValue(controls: SupportedControl[], password?: HTMLInputElement): string {
+  const accounts = controls.filter((control) => {
     if (control instanceof HTMLInputElement && control.type === "password") return false;
     const tokens = autocompleteTokens(control);
     return tokens.includes("username") || tokens.includes("email") || /user(name)?|e-?mail|account|login|phone|mobile|用户名|账号|邮箱|手机/i.test(metadata(control));
   });
+  // A page can hold several sign-in forms. Prefer the filled account that
+  // belongs to the submitted password's form, then any filled account.
+  const form = password?.form ?? password?.closest("form,[role='form']") ?? null;
+  const sameForm = (control: SupportedControl) => Boolean(form) && ((control as HTMLInputElement).form ?? control.closest("form,[role='form']")) === form;
+  const account = accounts.find((control) => sameForm(control) && controlValue(control))
+    ?? accounts.find((control) => controlValue(control))
+    ?? accounts[0];
   return account ? controlValue(account).slice(0, 2_048) : "";
 }
 

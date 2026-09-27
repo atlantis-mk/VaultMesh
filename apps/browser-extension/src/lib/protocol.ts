@@ -116,6 +116,7 @@ export const ContentMessageSchema = z.discriminatedUnion("kind", [
     expiresAt: z.string().datetime(),
     selectedItem: z.object({ kind: AutofillItemKindSchema, id: z.string().uuid(), title: boundedText(256) }).optional(),
     clearBeforeFill: z.boolean().optional(),
+    deviceAssistKind: z.enum(["phone", "sms"]).optional(),
     assignments: z.array(FillAssignmentSchema).min(1).max(MAX_ASSIGNMENTS_PER_FRAME),
   }),
 ]);
@@ -260,6 +261,9 @@ export const PageInformationSaveResponseSchema = z.object({
 });
 
 export const PopupMessageSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("vaultmesh.device-assist-capabilities") }),
+  z.object({ kind: z.literal("vaultmesh.device-assist-start"), assistKind: z.enum(["phone","sms"]), target: AutofillTargetSchema.optional() }),
+  z.object({ kind: z.literal("vaultmesh.device-assist-action"), action: z.enum(["poll","select","cancel"]), id: z.string().regex(/^[a-f0-9]{32}$/), candidateId: z.string().max(128).optional() }),
   z.object({ kind: z.literal("vaultmesh.popup-workspace-cache.get") }),
   z.object({ kind: z.literal("vaultmesh.popup-suggestions.get") }),
   z.object({ kind: z.literal("vaultmesh.save-capture-popup.get") }),
@@ -363,7 +367,7 @@ export type FillRequest = z.infer<typeof FillRequestSchema>;
 export type ApprovedFill = z.infer<typeof ApprovedFillSchema>;
 export type AutofillCandidate = z.infer<typeof AutofillCandidateSchema>;
 export type EmailOtpCandidate = z.infer<typeof EmailOtpCandidateSchema>;
-export type InlineAutofillCandidate = AutofillCandidate | (EmailOtpCandidate & {
+export type InlineAutofillCandidate = { kind: "device-assist"; id: string; title: string; subtitle: string; assistKind: "phone" | "sms"; matchScope?: "path" | "origin" | "domain" } | AutofillCandidate | (EmailOtpCandidate & {
   kind: "email-otp";
   title: string;
   subtitle: string;

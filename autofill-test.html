@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VaultMesh 自动填入测试台</title>
   <script>
@@ -34,8 +35,9 @@
     }
 
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
 
-    html { scroll-behavior: smooth; }
+    html { scroll-behavior: auto; }
 
     body {
       margin: 0;
@@ -116,8 +118,8 @@
     .dot.online { background: #12b76a; box-shadow: 0 0 0 5px rgba(18, 183, 106, .12); }
 
     .toolbar {
-      position: sticky;
-      top: 12px;
+      position: relative;
+      top: 0;
       z-index: 20;
       display: flex;
       flex-wrap: wrap;
@@ -146,6 +148,7 @@
       text-decoration: none;
     }
 
+    .button:disabled { opacity: .45; cursor: not-allowed; }
     .button:hover { border-color: #b8b2f0; background: #faf9ff; }
     .button.primary { border-color: var(--brand); color: #fff; background: var(--brand); }
     .button.primary:hover { background: #5648c4; }
@@ -378,6 +381,14 @@
       word-break: break-all;
     }
 
+    .qa-seed { grid-column: 1 / -1; }
+    .qa-seed-secret { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
+    .qa-seed-secret code { font: 600 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; color: var(--text, #101828); word-break: break-all; }
+    .qa-seed-live { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-top: 12px; color: var(--muted); font-size: 13px; }
+    .qa-seed-live b { color: var(--text, #101828); font-variant-numeric: tabular-nums; }
+    .qa-seed-live #qa-seed-code { font: 700 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; color: var(--brand); }
+    .qa-seed-steps { margin: 12px 0 0; padding-left: 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+
     .save-test-actions {
       display: flex;
       flex-wrap: wrap;
@@ -511,6 +522,10 @@
       .otp-group { grid-template-columns: repeat(3, minmax(42px, 1fr)); }
       .section-head { align-items: flex-start; }
     }
+    #acceptance-checks label { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    #acceptance-checks select { max-width: 160px; flex-shrink: 0; padding: 8px; }
+    #qr-preview img { width: 240px; max-width: 100%; margin: 12px; }
+    [contenteditable="true"] { min-height: 60px; }
   </style>
 </head>
 <body>
@@ -535,10 +550,12 @@
       <button class="button" type="button" id="copy-command">复制启动命令</button>
       <div class="suite-completion" id="suite-completion" hidden>
         <span class="suite-completion-note">完成本页所有人工步骤后</span>
-        <button class="button good" type="button" id="manual-pass-button">确认本页测试已通过</button>
+        <button class="button good" type="button" id="manual-pass-button" data-confirm-suite>确认本页测试已通过</button>
       </div>
-      <span class="toolbar-note">先聚焦字段，再点击字段右侧的 VaultMesh “V” 按钮选择条目。</span>
+      <span class="toolbar-note">提交事件：<b id="submit-count">0</b>；formdata：<b id="formdata-count">0</b>。只填充时提交次数应保持 0。</span>
+      <span class="toolbar-note" id="toolbar-guidance">先聚焦字段，再点击字段右侧的 VaultMesh “V” 按钮选择条目。</span>
     </nav>
+
 
     <section class="metrics" aria-label="实时统计">
       <div class="metric"><span>纳入检查</span><strong id="metric-total">0</strong></div>
@@ -551,10 +568,10 @@
       <div class="callout">
         <strong>1 · 必须通过 HTTP(S) 打开</strong>
         在项目根目录运行 <code>python3 -m http.server 4173</code>，再访问
-        <code>http://localhost:4173/autofill-test.html</code> 或 <code>http://[::1]:4173/autofill-test.html</code>。服务器监听地址 <code>[::]</code> 会自动规范化为 IPv6 回环地址 <code>[::1]</code>；插件不会注入 <code>file://</code> 页面。
+        <code>http://localhost:4173/autofill-test.html</code> 或 <code>http://[::1]:4173/autofill-test.html</code>。服务器监听地址 <code>[::]</code> 会自动规范化为 IPv6 回环地址 <code>[::1]</code>；插件不会注入 <code>file://</code> 页面。此 HTTP 启动方式仅覆盖允许 HTTP 的路径；支付卡、SSH 和 Secret 的正向测试请使用受信任的 HTTPS 测试站点。
       </div>
       <div class="callout">
-        <strong>2 · 建议准备五类完整测试数据</strong>
+        <strong>2 · 准备隔离的测试保险库</strong>
         登录条目的 URL 使用本页地址；如需测页面加载时自动填入，启用该开关并保证只有一条匹配登录。
         <details>
           <summary>查看建议字段范围</summary>
@@ -573,9 +590,9 @@
       <div class="suite-menu-head">
         <div>
           <h2 id="suite-menu-title">测试页面</h2>
-          <p>每张卡片对应一组独立验收；自动检查全部通过或人工确认后，主页会显示通过标识。</p>
+          <p>每张卡片对应一组独立验收；完成真实操作、逐项验收并人工确认后，主页才会显示通过标识。</p>
         </div>
-        <div class="suite-progress" id="suite-progress" aria-live="polite">0 / 9 已通过</div>
+        <div class="suite-progress" id="suite-progress" aria-live="polite">0 / 10 已通过</div>
       </div>
       <div class="suite-grid">
         <a class="suite-card" href="?suite=save-capture-tests" data-suite-card="save-capture-tests">
@@ -614,6 +631,12 @@
           <div class="suite-card-top"><span class="suite-number">TEST 09</span><span class="suite-status" data-suite-status>待测试</span></div>
           <h3>运行时与边界</h3><p>动态 DOM、Shadow DOM、iframe 和排除项。</p><span class="suite-card-arrow">进入测试 →</span>
         </a>
+        <a class="suite-card" href="?suite=device-assist-tests" data-suite-card="device-assist-tests">
+          <div class="suite-card-top"><span class="suite-number">TEST 10</span><span class="suite-status" data-suite-status>待测试</span></div>
+          <h3>手机号码与短信验证码</h3><p>注册、登录、资料、收货、绑定手机号及单框/六格短信验证码。</p><span class="suite-card-arrow">进入测试 →</span>
+        </a>
+
+<a class="suite-card" href="?suite=secret-types-tests" data-suite-card="secret-types-tests"><div class="suite-card-top"><span class="suite-number">TEST 11</span><span class="suite-status" data-suite-status>待测试</span></div><h3>Secret 全部子类型</h3><p>13 个 Secret 子类型的显式填充、捕获与更新。</p><span class="suite-card-arrow">进入测试 →</span></a><a class="suite-card" href="?suite=capture-path-tests" data-suite-card="capture-path-tests"><div class="suite-card-top"><span class="suite-number">TEST 12</span><span class="suite-status" data-suite-status>待测试</span></div><h3>特殊提交与表单隔离</h3><p>Enter、formdata、外置控件、Shadow DOM 与 SPA 销毁。</p><span class="suite-card-arrow">进入测试 →</span></a><a class="suite-card" href="?suite=advanced-fields-tests" data-suite-card="advanced-fields-tests"><div class="suite-card-top"><span class="suite-number">TEST 13</span><span class="suite-status" data-suite-status>待测试</span></div><h3>扩展字段与生成器</h3><p>自定义字段、contenteditable、多步骤、重置密码与生成器。</p><span class="suite-card-arrow">进入测试 →</span></a><a class="suite-card" href="?suite=lifecycle-tests" data-suite-card="lifecycle-tests"><div class="suite-card-top"><span class="suite-number">TEST 14</span><span class="suite-status" data-suite-status>待测试</span></div><h3>授权与保存生命周期</h3><p>忽略、重复、更新、锁定、过期、导航与断开。</p><span class="suite-card-arrow">进入测试 →</span></a><a class="suite-card" href="?suite=authenticator-tests" data-suite-card="authenticator-tests"><div class="suite-card-top"><span class="suite-number">TEST 15</span><span class="suite-status" data-suite-status>待测试</span></div><h3>验证器二维码</h3><p>本地测试二维码扫描、草稿保存、覆盖及拒绝路径。</p><span class="suite-card-arrow">进入测试 →</span></a>
       </div>
     </section>
 
@@ -755,6 +778,14 @@
           </div>
           <div class="model-readout" data-model-for="login-webauthn">受控模型：等待 input / change 事件</div>
         </form>
+        <form class="test-form" data-test-form="login-phone-sms" autocomplete="on">
+          <h3>手机号登录</h3><p>手机号码和短信验证码应分别提示对应的手机来源；HTTP 与 HTTPS 均支持手动点选填充。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="login-phone-account">登录手机号</label><input class="control" id="login-phone-account" type="text" autocomplete="username" name="login-phone-account" data-vm-test="登录手机号 / login-phone-account" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field wide"><label for="login-phone-code">短信验证码</label><input class="control" id="login-phone-code" name="login-phone-code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" data-vm-test="短信验证码 / login-phone-code" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="login-phone-sms">受控模型：等待 input / change 事件</div>
+        </form>
       </div>
     </section>
 
@@ -764,6 +795,32 @@
         <span class="kind">OTP / TOTP</span>
       </header>
       <div class="forms">
+        <form class="test-form qa-seed" id="qa-seed" autocomplete="off">
+          <h3>准备测试数据：登录 + TOTP</h3>
+          <p>本页生成仅供测试的合成账号、密码和 TOTP 密钥（保存在本浏览器的本页存储中，刷新不变）。先把它保存到 VaultMesh，再在下方验证码框选择该登录测试填入。</p>
+          <div class="field-grid">
+            <div class="field"><label for="qa-seed-username">测试账号</label><input class="control" id="qa-seed-username" name="qa_seed_username" autocomplete="username"></div>
+            <div class="field"><label for="qa-seed-password">测试密码</label><input class="control" id="qa-seed-password" name="qa_seed_password" type="password" autocomplete="current-password"></div>
+          </div>
+          <p class="qa-seed-secret">验证器密钥（Base32 · SHA1 · 6 位 · 30 秒）：<code id="qa-seed-secret"></code></p>
+          <div class="qa-seed-live">
+            <a id="qa-seed-uri" href="#" title="otpauth 链接，供 VaultMesh 识别当前网页的验证器密钥">otpauth 链接</a>
+            <span>当前应为 <b id="qa-seed-code">------</b> · 剩余 <b id="qa-seed-remaining">--</b> 秒</span>
+          </div>
+          <ol class="qa-seed-steps">
+            <li><b>推荐：</b>点浏览器工具栏的 VaultMesh →「识别当前网页」，确认预览中的登录显示“已识别验证器密钥”后保存。</li>
+            <li><b>或：</b>点「提交并保存登录」，在 VaultMesh 保存窗口中保存；再在插件中编辑该登录，用「扫描当前网页二维码」添加 TOTP。</li>
+            <li>保存后在下方验证码框点 V 选择该登录；“填入核对”会与本页算出的验证码比对（允许上一时间窗）。</li>
+          </ol>
+          <div class="save-test-actions">
+            <button class="button primary" type="submit">提交并保存登录</button>
+            <button class="button" type="button" id="qa-seed-regenerate">重新生成测试数据</button>
+            <button class="button" type="button" id="qa-seed-copy">复制 otpauth 链接</button>
+            <span class="save-test-status" id="qa-seed-status" role="status">尚未保存</span>
+          </div>
+          <div class="model-readout" id="qa-seed-verify">填入核对：等待在下方验证码框填入</div>
+        </form>
+
         <form class="test-form" data-test-form="otp-standard" autocomplete="on">
           <h3>单框验证码</h3>
           <p>聚焦验证码框并选择带 TOTP 的登录条目；填入过程应触发 input 与 change，且不会自动提交。</p>
@@ -798,6 +855,85 @@
             <label class="field otp-digit-field"><span class="sr-only">验证码第 6 位</span><input class="control otp-digit" name="code_6" type="tel" inputmode="numeric" maxlength="1" aria-label="验证码数字 6" data-vm-test="验证码 / 分段第 6 位" data-expect="fill"><i class="field-state" aria-hidden="true">·</i></label>
           </div>
           <div class="model-readout" data-model-for="otp-segmented">受控模型：等待 input / change 事件</div>
+        </form>
+      </div>
+    </section>
+
+    <section class="section" id="device-assist-tests">
+      <header class="section-head"><div><h2>手机号码与短信验证码</h2><p>覆盖注册、登录、资料、收货、联系和绑定手机号；在输入框内点 V 后选择手机来源。</p></div><span class="kind">PHONE / SMS</span></header>
+      <div class="callout" style="margin:22px" role="status" id="assist-transport-status"></div>
+      <div class="callout" style="margin:22px"><strong>验收准备与操作</strong>电脑与 Android 在同一局域网且已配对；手机开启“保持设备互通”，并在本电脑的设备设置里分别授权手机号与短信。插件须单独解锁。号码首次授权后会注册到电脑；验证码先推送到电脑，再由用户点选。
+        <ol><li>点明确的手机号框，再点 V，选择“从手机填入号码”及设备；候选只显示号码末四位。</li><li>使用新收到的合成测试短信，或在手机当前请求中手动发送测试代码；两分钟内在电脑验证码框点 V，选择“从手机获取验证码”。本页不会发送短信。</li><li>先点选手机来源完成填入，再运行检查，确认 input/change、字段隔离及未自动提交。手工输入也会触发事件，自动检查不能证明手机链路通过。</li><li>接收后断开手机网络，再分别点选号码和验证码，验证从电脑本地填入；验证码仍须在原两分钟内，各电脑可分别使用一次。还应连续打开/关闭候选十次，确认入口不消失，并检查“刷新候选”。本页结果和日志不显示完整号码或验证码；最后人工确认真实手机链路已通过。</li></ol>
+      </div>
+      <div class="forms">
+        <form class="test-form" data-test-form="assist-register" autocomplete="on">
+          <h3>手机号注册</h3><p>点手机号框中的 V，选择“从手机填入号码”；验证码框应提供“从手机获取验证码”。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="assist-register-phone">手机号</label><input class="control" id="assist-register-phone" type="tel" autocomplete="tel" name="assist-register-phone" data-vm-test="手机号 / assist-register-phone" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field wide"><label for="assist-register-code">短信验证码</label><input class="control" id="assist-register-code" name="assist-register-code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" data-vm-test="短信验证码 / assist-register-code" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="assist-register">受控模型：等待 input / change 事件</div>
+        </form>
+        <form class="test-form" data-test-form="assist-login" autocomplete="on">
+          <h3>手机号与短信登录</h3><p>手机号即账号；使用短信登录时，两种手机来源必须分别进入对应字段。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="assist-login-phone">登录手机号</label><input class="control" id="assist-login-phone" type="text" inputmode="tel" autocomplete="username" name="assist-login-phone" data-vm-test="登录手机号 / assist-login-phone" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field wide"><label for="assist-login-code">短信验证码</label><input class="control" id="assist-login-code" name="assist-login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" data-vm-test="短信验证码 / assist-login-code" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="assist-login">受控模型：等待 input / change 事件</div>
+        </form>
+        <form class="test-form" data-test-form="assist-password-login" autocomplete="on">
+          <h3>手机号与密码登录</h3><p>本项只点选手机号码；不得向密码框提供号码或短信。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="assist-password-phone">账号（手机号或邮箱）</label><input class="control" id="assist-password-phone" type="text" autocomplete="username" name="assist-password-phone" data-vm-test="账号（手机号或邮箱） / assist-password-phone" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field wide"><label for="assist-current-password">密码隔离</label><input class="control" id="assist-current-password" type="password" autocomplete="current-password" data-vm-test="密码隔离 / assist-current-password" data-expect="empty" ><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="assist-password-login">受控模型：等待 input / change 事件</div>
+        </form>
+        <form class="test-form" data-test-form="assist-profile" autocomplete="on">
+          <h3>个人资料联系电话</h3><p>没有 autocomplete，仅通过中文“联系电话”识别，仍应提供手机号入口。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="assist-profile-contact">联系电话</label><input class="control" id="assist-profile-contact" type="text" name="assist-profile-contact" data-vm-test="联系电话 / assist-profile-contact" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="assist-profile">受控模型：等待 input / change 事件</div>
+        </form>
+        <form class="test-form" data-test-form="assist-shipping" autocomplete="on">
+          <h3>收货地址联系电话</h3><p>非登录表单的联系电话也应提供手机号码候选。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="assist-shipping-phone">收货联系电话</label><input class="control" id="assist-shipping-phone" type="tel" autocomplete="shipping tel" name="assist-shipping-phone" data-vm-test="收货联系电话 / assist-shipping-phone" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="assist-shipping">受控模型：等待 input / change 事件</div>
+        </form>
+        <form class="test-form" data-test-form="assist-contact" autocomplete="on">
+          <h3>联系与预约</h3><p>预约、回访等明确电话用途不依赖注册或登录场景。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="assist-callback">回访电话号码</label><input class="control" id="assist-callback" type="text" autocomplete="tel-national" name="assist-callback" data-vm-test="回访电话号码 / assist-callback" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="assist-contact">受控模型：等待 input / change 事件</div>
+        </form>
+        <form class="test-form" data-test-form="assist-bind" autocomplete="on">
+          <h3>绑定新手机号</h3><p>绑定手机号与验证码使用各自来源，不应自动提交。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="assist-bind-phone">绑定手机号</label><input class="control" id="assist-bind-phone" type="tel" autocomplete="tel" name="assist-bind-phone" data-vm-test="绑定手机号 / assist-bind-phone" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field wide"><label for="assist-bind-code">短信验证码</label><input class="control" id="assist-bind-code" name="assist-bind-code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" data-vm-test="短信验证码 / assist-bind-code" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="assist-bind">受控模型：等待 input / change 事件</div>
+        </form>
+        <form class="test-form" data-test-form="assist-segmented"><h3>六格短信验证码</h3><p>点击任一格中的 V，点选一个六位手机验证码后应填满六格，并触发各格的 input 与 change。</p><div class="otp-group" role="group" aria-label="六位短信验证码">            <div class="field otp-digit-field"><label class="sr-only" for="assist-digit-1">短信验证码第 1 位</label><input class="control otp-digit" id="assist-digit-1" name="assist_digit_1" type="tel" inputmode="numeric" maxlength="1" aria-label="短信验证码数字 1" data-vm-test="短信验证码第 1 位 / assist-digit-1" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field otp-digit-field"><label class="sr-only" for="assist-digit-2">短信验证码第 2 位</label><input class="control otp-digit" id="assist-digit-2" name="assist_digit_2" type="tel" inputmode="numeric" maxlength="1" aria-label="短信验证码数字 2" data-vm-test="短信验证码第 2 位 / assist-digit-2" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field otp-digit-field"><label class="sr-only" for="assist-digit-3">短信验证码第 3 位</label><input class="control otp-digit" id="assist-digit-3" name="assist_digit_3" type="tel" inputmode="numeric" maxlength="1" aria-label="短信验证码数字 3" data-vm-test="短信验证码第 3 位 / assist-digit-3" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field otp-digit-field"><label class="sr-only" for="assist-digit-4">短信验证码第 4 位</label><input class="control otp-digit" id="assist-digit-4" name="assist_digit_4" type="tel" inputmode="numeric" maxlength="1" aria-label="短信验证码数字 4" data-vm-test="短信验证码第 4 位 / assist-digit-4" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field otp-digit-field"><label class="sr-only" for="assist-digit-5">短信验证码第 5 位</label><input class="control otp-digit" id="assist-digit-5" name="assist_digit_5" type="tel" inputmode="numeric" maxlength="1" aria-label="短信验证码数字 5" data-vm-test="短信验证码第 5 位 / assist-digit-5" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field otp-digit-field"><label class="sr-only" for="assist-digit-6">短信验证码第 6 位</label><input class="control otp-digit" id="assist-digit-6" name="assist_digit_6" type="tel" inputmode="numeric" maxlength="1" aria-label="短信验证码数字 6" data-vm-test="短信验证码第 6 位 / assist-digit-6" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div></div><div class="model-readout" data-model-for="assist-segmented">受控模型：等待 input / change 事件</div></form>
+        <form class="test-form" data-test-form="assist-exclusions" autocomplete="on">
+          <h3>不应提供手机来源</h3><p>本组只检查手机来源，不选择其他 Vault 候选。普通数字、仅邮箱、验证器 TOTP 和已有手机号不应提供手机填充入口，现有内容保持不变。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="assist-unrelated">普通数字</label><input class="control" id="assist-unrelated" type="number" data-vm-test="普通数字 / assist-unrelated" data-expect="empty" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field wide"><label for="assist-email">仅邮箱</label><input class="control" id="assist-email" type="email" autocomplete="email" data-vm-test="仅邮箱 / assist-email" data-expect="empty" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field wide"><label for="assist-totp">验证器 TOTP</label><input class="control" id="assist-totp" type="text" autocomplete="one-time-code" data-vm-test="验证器 TOTP / assist-totp" data-expect="empty" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field wide"><label for="assist-occupied-phone">已有手机号（合成）</label><input class="control" id="assist-occupied-phone" type="tel" autocomplete="tel" data-vm-test="已有手机号（合成） / assist-occupied-phone" data-expect="preserve" value="+12025550123" data-original="+12025550123"><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="assist-exclusions">受控模型：等待 input / change 事件</div>
         </form>
       </div>
     </section>
@@ -882,7 +1018,7 @@
               <i class="field-state" aria-hidden="true">·</i>
             </div>
           </div>
-          <div class="model-readout" data-model-for="card-standard">受控模型：等待 input / change 事件</div>
+          <div class="field wide"><label for="cc-type">Card network</label><input class="control" id="cc-type" name="cc-type" type="text" autocomplete="cc-type" data-vm-test="Card network" data-expect="fill"><i class="field-state">·</i></div><div class="field wide"><label for="billing-address">Billing address</label><input class="control" id="billing-address" name="billing-address" type="text" autocomplete="billing street-address" data-vm-test="Billing address" data-expect="fill"><i class="field-state">·</i></div><div class="model-readout" data-model-for="card-standard">受控模型：等待 input / change 事件</div>
         </form>
 
         <form class="test-form" data-test-form="card-edge" autocomplete="on">
@@ -990,11 +1126,77 @@
             <div class="field"><label for="ssh-port">SSH port</label><input class="control" id="ssh-port" name="ssh_port" type="number" data-vm-test="SSH / 端口" data-expect="fill"><i class="field-state">·</i></div>
             <div class="field"><label for="ssh-user">SSH username</label><input class="control" id="ssh-user" name="ssh_username" data-vm-test="SSH / 用户名" data-expect="fill"><i class="field-state">·</i></div>
             <div class="field"><label for="ssh-password">SSH password</label><input class="control" id="ssh-password" name="ssh_password" type="password" data-vm-test="SSH / 密码" data-expect="fill"><i class="field-state">·</i></div>
-            <div class="field wide"><label for="ssh-private-key">SSH private key</label><textarea class="control" id="ssh-private-key" name="ssh_private_key" data-vm-test="SSH / 私钥" data-expect="fill"></textarea><i class="field-state">·</i></div>
+            <div class="field wide"><label for="ssh-public-key">SSH public key</label><textarea class="control" id="ssh-public-key" name="ssh-public-key" data-vm-test="SSH public key" data-expect="fill"></textarea><i class="field-state">·</i></div><div class="field wide"><label for="ssh-private-key">SSH private key</label><textarea class="control" id="ssh-private-key" name="ssh_private_key" data-vm-test="SSH / 私钥" data-expect="fill"></textarea><i class="field-state">·</i></div>
             <div class="field wide"><label for="ssh-passphrase">Private key passphrase</label><input class="control" id="ssh-passphrase" name="key_passphrase" type="password" data-vm-test="SSH / 私钥口令" data-expect="fill"><i class="field-state">·</i></div>
           </div>
           <div class="model-readout" data-model-for="ssh-console">受控模型：等待 input / change 事件</div>
         </form>
+      <form class="test-form" id="save-ssh-password" data-case="save-ssh-password" data-save-test="save-ssh-password" autocomplete="off" >
+      <h3>SSH 账号密码保存</h3>
+      <p>仅 HTTPS。手工输入临时测试材料后提交，核对 SSH 类型；保存后重新填充、修改并更新。缺必填字段或混合多个来源时应拒绝。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="save-ssh-password-host">SSH host</label>
+      <input class="control" id="save-ssh-password-host" name="save-ssh-password-host" type="text" autocomplete="off">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="save-ssh-password-port">SSH port</label>
+      <input class="control" id="save-ssh-password-port" name="save-ssh-password-port" type="number" autocomplete="off">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="save-ssh-password-username">SSH username</label>
+      <input class="control" id="save-ssh-password-username" name="save-ssh-password-username" type="text" autocomplete="off">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="save-ssh-password-password">SSH password</label>
+      <input class="control" id="save-ssh-password-password" name="save-ssh-password-password" type="password" autocomplete="off">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="save-ssh-key" data-case="save-ssh-key" data-save-test="save-ssh-key" autocomplete="off" >
+      <h3>SSH 密钥保存</h3>
+      <p>仅 HTTPS。手工输入临时测试材料后提交，核对 SSH 类型；保存后重新填充、修改并更新。缺必填字段或混合多个来源时应拒绝。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="save-ssh-key-host">SSH host</label>
+      <input class="control" id="save-ssh-key-host" name="save-ssh-key-host" type="text" autocomplete="off">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="save-ssh-key-port">SSH port</label>
+      <input class="control" id="save-ssh-key-port" name="save-ssh-key-port" type="number" autocomplete="off">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="save-ssh-key-username">SSH username</label>
+      <input class="control" id="save-ssh-key-username" name="save-ssh-key-username" type="text" autocomplete="off">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="save-ssh-key-private-key">SSH private key</label>
+      <textarea class="control" id="save-ssh-key-private-key" name="save-ssh-key-private-key"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="save-ssh-key-public-key">SSH public key</label>
+      <textarea class="control" id="save-ssh-key-public-key" name="save-ssh-key-public-key"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="save-ssh-key-passphrase">Private key passphrase</label>
+      <input class="control" id="save-ssh-key-passphrase" name="save-ssh-key-passphrase" type="password" autocomplete="off">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
       </div>
     </section>
 
@@ -1016,10 +1218,18 @@
         <form class="test-form" autocomplete="off">
           <h3>修改密码</h3>
           <div class="field-grid">
-            <div class="field"><label for="change-current">当前密码</label><input class="control" id="change-current" name="current_password" type="password" autocomplete="current-password"><i class="field-state">·</i></div>
+            <div class="field wide"><label for="change-user">Username</label><input class="control" id="change-user" name="change-user" type="text" autocomplete="username"><i class="field-state">·</i></div><div class="field"><label for="change-current">当前密码</label><input class="control" id="change-current" name="current_password" type="password" autocomplete="current-password"><i class="field-state">·</i></div>
             <div class="field"><label for="change-next">新密码</label><input class="control" id="change-next" name="new_password" type="password" autocomplete="new-password"><i class="field-state">·</i></div>
           </div>
-          <button class="button" type="submit">模拟提交并触发更新提示</button>
+<div class="field wide"><label for="change-confirm">确认新密码</label><input class="control" id="change-confirm" name="change-confirm" type="password" autocomplete="new-password"><i class="field-state">·</i></div>          <button class="button" type="submit">模拟提交并触发更新提示</button>
+        </form>
+        <form class="test-form" data-test-form="signup-phone-sms" autocomplete="on">
+          <h3>手机号注册</h3><p>注册手机号与短信验证码都应提供手机来源；不要将已有登录密码填入新密码。</p>
+          <div class="field-grid">
+            <div class="field wide"><label for="signup-phone-account">手机号</label><input class="control" id="signup-phone-account" type="tel" autocomplete="tel" name="signup-phone-account" data-vm-test="手机号 / signup-phone-account" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+            <div class="field wide"><label for="signup-phone-code">短信验证码</label><input class="control" id="signup-phone-code" name="signup-phone-code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" data-vm-test="短信验证码 / signup-phone-code" data-expect="fill" ><i class="field-state" aria-hidden="true">·</i></div>
+          </div>
+          <div class="model-readout" data-model-for="signup-phone-sms">受控模型：等待 input / change 事件</div>
         </form>
       </div>
     </section>
@@ -1066,21 +1276,476 @@
           <div class="edge-list">
             <div class="field"><label for="disabled-email">禁用邮箱</label><input class="control" id="disabled-email" name="email_disabled" type="email" autocomplete="email" disabled value="disabled@example.test" data-vm-test="排除 / disabled" data-expect="preserve" data-original="disabled@example.test"><i class="field-state">·</i></div>
             <div class="field"><label for="readonly-phone">只读电话</label><input class="control" id="readonly-phone" name="phone_readonly" type="tel" autocomplete="tel" readonly value="+86 000 0000" data-vm-test="排除 / readonly" data-expect="preserve" data-original="+86 000 0000"><i class="field-state">·</i></div>
-            <div class="field"><label for="ssn-field">Social Security Number</label><input class="control" id="ssn-field" name="ssn" data-vm-test="排除 / SSN" data-expect="empty"><i class="field-state">·</i></div>
+            <div class="field wide"><label for="exclude-search">Search</label><input data-vm-test="排除 / Search" data-expect="empty" class="control" id="exclude-search" name="exclude-search" type="search" autocomplete="off"><i class="field-state">·</i></div><div class="field wide"><label for="exclude-coupon">优惠码</label><input data-vm-test="排除 / 优惠码" data-expect="empty" class="control" id="exclude-coupon" name="exclude-coupon" type="text" autocomplete="off"><i class="field-state">·</i></div><div class="field wide"><label for="exclude-captcha">图形验证码</label><input data-vm-test="排除 / 图形验证码" data-expect="empty" class="control" id="exclude-captcha" name="exclude-captcha" type="text" autocomplete="off"><i class="field-state">·</i></div><div class="field"><label for="ssn-field">Social Security Number</label><input class="control" id="ssn-field" name="ssn" data-vm-test="排除 / SSN" data-expect="empty"><i class="field-state">·</i></div>
           </div>
         </form>
       </div>
     </section>
 
+      <section class="section" id="secret-types-tests">
+      <header class="section-head">
+      <div>
+      <h2>Secret 子类型填充与保存</h2>
+      <p>逐项完成后填写本页验收清单；未测试、失败或环境不满足均不代表通过。</p>
+      </div>
+      </header>
+      <div class="forms">
+      <div class="callout">
+      <strong>HTTPS 与合成数据</strong>
+      <p>每次只测试一个表单，从插件明确选择同类型条目填充；再手动修改该表单并提交，核对捕获类型与内容。无页内候选时从 popup 显式选择/识别当前页面，分别记录两种入口。证书、密钥与恢复码请使用临时生成的无效业务用途测试材料，勿填真实秘密。authenticator-key 此处仅测普通认证秘密，Passkey 必须走 WebAuthn。HTTP 下受保护操作被拒绝应记录为环境受限，不能作为正向通过。</p>
+      </div>
+      <form class="test-form" id="secret-case-api-key" data-case="secret-case-api-key" data-save-test="secret-case-api-key" autocomplete="off" data-secret-kind="api-key">
+      <h3>API Key</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-api-key">API Key</label>
+      <textarea class="control" id="qa-api-key" name="qa-api-key" data-vm-test="API Key" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-access-token" data-case="secret-case-access-token" data-save-test="secret-case-access-token" autocomplete="off" data-secret-kind="access-token">
+      <h3>Access token</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-access-token">Access token</label>
+      <textarea class="control" id="qa-access-token" name="qa-access-token" data-vm-test="Access token" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-authenticator-key" data-case="secret-case-authenticator-key" data-save-test="secret-case-authenticator-key" autocomplete="off" data-secret-kind="authenticator-key">
+      <h3>Authenticator key</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-authenticator-key">Authenticator key</label>
+      <textarea class="control" id="qa-authenticator-key" name="qa-authenticator-key" data-vm-test="Authenticator key" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-client-secret" data-case="secret-case-client-secret" data-save-test="secret-case-client-secret" autocomplete="off" data-secret-kind="client-secret">
+      <h3>Client secret</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-client-secret">Client secret</label>
+      <textarea class="control" id="qa-client-secret" name="qa-client-secret" data-vm-test="Client secret" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-webhook-secret" data-case="secret-case-webhook-secret" data-save-test="secret-case-webhook-secret" autocomplete="off" data-secret-kind="webhook-secret">
+      <h3>Webhook secret</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-webhook-secret">Webhook secret</label>
+      <textarea class="control" id="qa-webhook-secret" name="qa-webhook-secret" data-vm-test="Webhook secret" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-database-credential" data-case="secret-case-database-credential" data-save-test="secret-case-database-credential" autocomplete="off" data-secret-kind="database-credential">
+      <h3>Database connection string</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-database-credential">Database connection string</label>
+      <textarea class="control" id="qa-database-credential" name="qa-database-credential" data-vm-test="Database connection string" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-recovery-codes" data-case="secret-case-recovery-codes" data-save-test="secret-case-recovery-codes" autocomplete="off" data-secret-kind="recovery-codes">
+      <h3>Recovery codes</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-recovery-codes">Recovery codes</label>
+      <textarea class="control" id="qa-recovery-codes" name="qa-recovery-codes" data-vm-test="Recovery codes" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-certificate" data-case="secret-case-certificate" data-save-test="secret-case-certificate" autocomplete="off" data-secret-kind="certificate">
+      <h3>Certificate PEM</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-certificate">Certificate PEM</label>
+      <textarea class="control" id="qa-certificate" name="qa-certificate" data-vm-test="Certificate PEM" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-software-license" data-case="secret-case-software-license" data-save-test="secret-case-software-license" autocomplete="off" data-secret-kind="software-license">
+      <h3>Software license</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-software-license">Software license</label>
+      <textarea class="control" id="qa-software-license" name="qa-software-license" data-vm-test="Software license" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-identity-document" data-case="secret-case-identity-document" data-save-test="secret-case-identity-document" autocomplete="off" data-secret-kind="identity-document">
+      <h3>Identity document</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-identity-document">Identity document</label>
+      <textarea class="control" id="qa-identity-document" name="qa-identity-document" data-vm-test="Identity document" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-secure-note" data-case="secret-case-secure-note" data-save-test="secret-case-secure-note" autocomplete="off" data-secret-kind="secure-note">
+      <h3>Secure note</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-secure-note">Secure note</label>
+      <textarea class="control" id="qa-secure-note" name="qa-secure-note" data-vm-test="Secure note" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-crypto-wallet" data-case="secret-case-crypto-wallet" data-save-test="secret-case-crypto-wallet" autocomplete="off" data-secret-kind="crypto-wallet">
+      <h3>Wallet seed phrase</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-crypto-wallet">Wallet seed phrase</label>
+      <textarea class="control" id="qa-crypto-wallet" name="qa-crypto-wallet" data-vm-test="Wallet seed phrase" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="secret-case-other" data-case="secret-case-other" data-save-test="secret-case-other" autocomplete="off" data-secret-kind="other">
+      <h3>Other secret</h3>
+      <p>核对相同子类型；保存新建后再填充并修改，确认更新保留 website、scopes 与二次验证设置。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="qa-other">Other secret</label>
+      <textarea class="control" id="qa-other" name="qa-other" data-vm-test="Other secret" data-expect="fill"></textarea>
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      </div>
+      </section>
+      <section class="section" id="capture-path-tests">
+      <header class="section-head">
+      <div>
+      <h2>特殊提交与表单隔离</h2>
+      <p>逐项完成后填写本页验收清单；未测试、失败或环境不满足均不代表通过。</p>
+      </div>
+      </header>
+      <div class="forms">
+      <form class="test-form" id="external-form" data-case="external-form" data-save-test="external-form" autocomplete="off" >
+      <h3>外置 form= 控件</h3>
+      <p>输入框在 form 外，必须仍归属此表单。</p>
+      <div class="field-grid">
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <div class="test-form">
+      <div class="field wide">
+      <label for="external-user">Username</label>
+      <input class="control" id="external-user" name="external-user" form="external-form" type="text" autocomplete="username">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="external-password">Password</label>
+      <input class="control" id="external-password" name="external-password" form="external-form" type="password" autocomplete="current-password">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <form class="test-form" id="formdata-case" data-case="formdata-case" data-save-test="formdata-case" autocomplete="off" >
+      <h3>formdata 观察</h3>
+      <p>点击下方按钮仅构造 FormData；可出现待确认捕获，但不代表网站登录成功。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="formdata-user">Username</label>
+      <input class="control" id="formdata-user" name="formdata-user" type="text" autocomplete="username">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="formdata-password">Password</label>
+      <input class="control" id="formdata-password" name="formdata-password" type="password" autocomplete="current-password">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <div class="test-form">
+      <button type="button" class="button" id="formdata-action">构造 FormData（不发送）</button><button type="button" class="button" id="native-submit-action">原生 form.submit（禁止网络）</button><p>页面 CSP 禁止所有表单网络提交；原生 submit 绕过 submit 事件，观察 formdata 计数与插件候选。不会发送表单内容。</p>
+      </div>
+      <form class="test-form" id="enter-case" data-case="enter-case" data-save-test="enter-case" autocomplete="off" >
+      <h3>Enter 与输入法</h3>
+      <p>账号使用合成邮箱，密码至少八位。在密码框按 Enter；空值/无效邮箱应被原生校验阻止。输入法组合确认不得误触发保存。再使用下方 input 型按钮。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="enter-user">Username</label>
+      <input class="control" id="enter-user" name="enter-user" required type="email" autocomplete="username">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="enter-password">Password</label>
+      <input class="control" id="enter-password" name="enter-password" required minlength="8" type="password" autocomplete="current-password">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <input class="button" type="submit" form="enter-case" value="保存登录">
+      <div class="test-form" id="spa-remove-case" role="form">
+      <h3>SPA 同步销毁字段</h3>
+      <p>手动填写后保存；点击处理器会立即移除输入框。插件须在移除前捕获。刷新页面可重试。</p>
+      <div class="field wide">
+      <label for="spa-remove-user">Username</label>
+      <input class="control" id="spa-remove-user" name="spa-remove-user" type="text" autocomplete="username">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="spa-remove-password">Password</label>
+      <input class="control" id="spa-remove-password" name="spa-remove-password" type="password" autocomplete="current-password">
+      <i class="field-state">·</i>
+      </div>
+      <button class="button" type="button" id="spa-remove-action">保存登录</button>
+      <p id="spa-remove-status" role="status">等待保存</p>
+      </div>
+      <div class="test-form">
+      <h3>Shadow DOM 内非 composed submit</h3>
+      <p>在内部表单手动填写后提交，必须仍可触发保存确认。</p>
+      <div id="capture-shadow-host">
+      </div>
+      </div>
+      <form class="test-form" id="isolation-a" data-case="isolation-a" data-save-test="isolation-a" autocomplete="off" >
+      <h3>相邻表单 A</h3>
+      <p>只提交 A；不得捕获 B 的账号/密码。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="isolation-a-user">Username</label>
+      <input class="control" id="isolation-a-user" name="isolation-a-user" type="text" autocomplete="username">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="isolation-a-password">Password</label>
+      <input class="control" id="isolation-a-password" name="isolation-a-password" type="password" autocomplete="current-password">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <form class="test-form" id="isolation-b" data-case="isolation-b" data-save-test="isolation-b" autocomplete="off" >
+      <h3>相邻表单 B</h3>
+      <p>填入不同账号，再回到 A 提交；反向重复一次。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="isolation-b-user">Username</label>
+      <input class="control" id="isolation-b-user" name="isolation-b-user" type="text" autocomplete="username">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="isolation-b-password">Password</label>
+      <input class="control" id="isolation-b-password" name="isolation-b-password" type="password" autocomplete="current-password">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      </div>
+      </section>
+      <section class="section" id="advanced-fields-tests">
+      <header class="section-head">
+      <div>
+      <h2>扩展字段与生成器</h2>
+      <p>逐项完成后填写本页验收清单；未测试、失败或环境不满足均不代表通过。</p>
+      </div>
+      </header>
+      <div class="forms">
+      <form class="test-form" id="custom-fields" data-case="custom-fields" data-save-test="custom-fields" autocomplete="off" >
+      <h3>Login 自定义字段</h3>
+      <p>在测试 Login 中添加匹配 tenant_code 的自定义字段；从 popup 显式选择。未知字段不应仅因在登录表单内就自动获得图标。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="custom-user">Username</label>
+      <input class="control" id="custom-user" name="custom-user" type="text" autocomplete="username" data-vm-test="Username" data-expect="fill">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="custom-password">Password</label>
+      <input class="control" id="custom-password" name="custom-password" type="password" autocomplete="current-password" data-vm-test="Password" data-expect="fill">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="tenant_code">Tenant code</label>
+      <input class="control" id="tenant_code" name="tenant_code" type="text" autocomplete="off" data-vm-test="Tenant code" data-expect="fill">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <div class="test-form" role="form">
+      <h3>contenteditable</h3>
+      <p>选择身份条目，验证可编辑地址与事件；只读区域保持不变。</p>
+      <label id="editable-label">Street address</label>
+      <div class="control" id="editable-address" role="textbox" contenteditable="true" aria-labelledby="editable-label" autocomplete="street-address" data-vm-test="可编辑地址" data-expect="fill">
+      </div>
+      </div>
+      <div class="test-form">
+      <h3>真实分步登录</h3>
+      <p>先填写账号并继续；账号控件会移除，再提交密码。核对保存候选仍关联刚才的账号。</p>
+      <div id="multistep-slot">
+      <form id="account-step">
+      <label for="step-user">Username</label>
+      <input class="control" id="step-user" autocomplete="username">
+      <button class="button" type="submit">继续</button>
+      </form>
+      </div>
+      </div>
+      <form class="test-form" id="reset-password-case" data-case="reset-password-case" data-save-test="reset-password-case" autocomplete="off" >
+      <h3>重置密码</h3>
+      <p>分别验证生成密码同步确认框、生成后手工编辑实际值、确认不一致/留空拒绝。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="reset-user">Username</label>
+      <input class="control" id="reset-user" name="reset-user" type="text" autocomplete="username">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="reset-new">New password</label>
+      <input class="control" id="reset-new" name="reset-new" type="password" autocomplete="new-password">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="reset-confirm">Confirm password</label>
+      <input class="control" id="reset-confirm" name="reset-confirm" type="password" autocomplete="new-password">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">重置密码</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <div class="test-form" role="form">
+      <h3>用户名 / UUID / 密码生成器</h3>
+      <p>逐次显式选择生成器目标。用户名只进账号框，UUID 只进指定空文本框；已有内容不被覆盖。密码生成使用上方重置表单。</p>
+      <div class="field wide">
+      <label for="generator-user">Username</label>
+      <input class="control" id="generator-user" name="generator-user" type="text" autocomplete="username">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="generator-uuid">Request UUID</label>
+      <input class="control" id="generator-uuid" name="generator-uuid" type="text" autocomplete="off">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      </div>
+      </section>
+      <section class="section" id="lifecycle-tests">
+      <header class="section-head">
+      <div>
+      <h2>授权与保存生命周期</h2>
+      <p>逐项完成后填写本页验收清单；未测试、失败或环境不满足均不代表通过。</p>
+      </div>
+      </header>
+      <div class="forms">
+      <form class="test-form" id="lifecycle-login" data-case="lifecycle-login" data-save-test="lifecycle-login" autocomplete="off" >
+      <h3>登录生命周期测试</h3>
+      <p>按本页清单逐次执行，每轮刷新恢复空白；所有写入必须由保存确认触发。</p>
+      <div class="field-grid">
+      <div class="field wide">
+      <label for="lifecycle-user">Username</label>
+      <input class="control" id="lifecycle-user" name="lifecycle-user" type="text" autocomplete="username">
+      <i class="field-state">·</i>
+      </div>
+      <div class="field wide">
+      <label for="lifecycle-password">Password</label>
+      <input class="control" id="lifecycle-password" name="lifecycle-password" type="password" autocomplete="current-password">
+      <i class="field-state">·</i>
+      </div>
+      </div>
+      <button class="button primary" type="submit">保存并观察提示</button>
+      <p data-save-status role="status">等待手动填写测试数据</p>
+      </form>
+      <div class="test-form">
+      <h3>目标失效操作</h3>
+      <p>先打开候选或授权等待，再执行一次操作。旧目标不得收到迟到填充；重新聚焦后可新建请求。</p>
+      <button class="button" type="button" id="invalidate-target">移除并重建登录字段</button> <button class="button" type="button" id="readonly-target">切换账号只读</button> <button class="button" type="button" id="navigate-target">同文档导航</button>
+      <p>锁定、撤销、断开与保存失败需在隔离测试保险库/插件环境中触发；本页不直接修改这些状态。</p>
+      </div>
+      </div>
+      </section>
+      <section class="section" id="authenticator-tests">
+      <header class="section-head">
+      <div>
+      <h2>TOTP 二维码捕获</h2>
+      <p>逐项完成后填写本页验收清单；未测试、失败或环境不满足均不代表通过。</p>
+      </div>
+      </header>
+      <div class="forms">
+      <div class="test-form">
+      <h3>本地合成验证器二维码</h3>
+      <p>选择仅供测试的 PNG/JPEG/WebP 二维码图片，最多两张，每张不超过 2 MB。只在当前页面内存预览，不上传、不解码或持久化；刷新/重置即清除。用插件 popup 主动扫描，核对进入 Login 草稿而非直接保存。</p>
+      <input id="qr-files" type="file" accept="image/png,image/jpeg,image/webp" multiple>
+      <button class="button" id="qr-clear" type="button">清除二维码</button>
+      <button class="button" id="qr-hide" type="button">隐藏 / 显示二维码</button>
+      <div id="qr-preview">
+      </div>
+      <p id="qr-status" role="status">等待本地测试图片</p>
+      </div>
+      </div>
+      </section>
+    <section id="acceptance-panel" class="callout" hidden><h2>逐项验收</h2><p>先操作真实插件，再记录结果。字段检查仅证明 DOM 状态；保存必须重新从保险库读取核对。全部项目人工通过后才能确认本页通过。仅使用合成测试数据。</p><p id="environment-status" role="status"></p><div id="acceptance-checks"></div><p id="acceptance-status" role="status">尚未完成</p><p>记录全部结果后确认；未满足的项目请保留失败或环境受限。</p><button class="button good" type="button" data-confirm-suite disabled>确认本页测试已通过</button></section>
+
     <section class="section" id="results">
       <header class="section-head">
-        <div><h2>检查结果</h2><p>“应填入”同时要求字段非空，并收到原生 input 与 change 事件。</p></div>
+        <div><h2>检查结果</h2><p>“应填入”检查非空及 input/change；不比较秘密值，也不能判断来源。必须人工核对正确内容与实际插件链路。</p></div>
         <span class="kind" id="result-summary">NOT RUN</span>
       </header>
       <div class="results-wrap">
         <div class="results-empty" id="results-empty">完成实际填入后，点击“运行检查”。</div>
         <table id="results-table" hidden>
-          <thead><tr><th>结果</th><th>测试项</th><th>期望</th><th>当前值</th><th>事件</th></tr></thead>
+          <thead><tr><th>结果</th><th>测试项</th><th>期望</th><th>脱敏状态</th><th>事件</th></tr></thead>
           <tbody id="results-body"></tbody>
         </table>
       </div>
@@ -1094,7 +1759,7 @@
       <div style="padding:22px"><div class="event-log" id="event-log" aria-live="polite"><div class="muted">等待测试字段事件…</div></div></div>
     </section>
 
-    <footer>VaultMesh Autofill Compatibility Harness · 页面不会上传表单数据；只有在保存弹窗中确认后，VaultMesh 才会写入本地保险库</footer>
+    <footer>VaultMesh Autofill Compatibility Harness · 本页不发送表单数据；浏览器扩展填充/捕获必须真实验收。Android 原生 Autofill、服务端登录成功与故障注入另行测试。</footer>
   </main>
 
   <script>
@@ -1102,15 +1767,26 @@
       const events = new WeakMap();
       const initializedRoots = new WeakSet();
       let eventTotal = 0;
+      let submitCount = 0;
+      let formdataCount = 0;
+      const observedSubmissions = new WeakSet();
       let dynamicCreated = false;
       let resetting = false;
       let passkeyCredentialId = null;
+      let passkeyVerificationKey = null;
       let passkeyBusy = false;
 
-      const suiteStorageKey = "vaultmesh.qa.autofill.suite-status.v1";
+      const suiteStorageKey = "vaultmesh.qa.autofill.suite-status.v2";
       const suites = [
+        { id: "secret-types-tests", title: "Secret 全部子类型", lede: "13 个 Secret 子类型的显式填充、捕获与更新。", mode: "manual-audit" },
+        { id: "capture-path-tests", title: "特殊提交与表单隔离", lede: "Enter、formdata、外置控件、Shadow DOM 与 SPA 销毁。", mode: "manual" },
+        { id: "advanced-fields-tests", title: "扩展字段与生成器", lede: "自定义字段、contenteditable、多步骤、重置密码与生成器。", mode: "manual-audit" },
+        { id: "lifecycle-tests", title: "授权与保存生命周期", lede: "忽略、重复、更新、锁定、过期、导航与断开。", mode: "manual" },
+        { id: "authenticator-tests", title: "验证器二维码", lede: "本地测试二维码扫描、草稿保存、覆盖及拒绝路径。", mode: "manual" },
+
         { id: "save-capture-tests", title: "自动保存确认", lede: "验证登录、身份、支付卡与单页应用提交后的保存确认。", mode: "manual" },
         { id: "login-tests", title: "登录自动填入", lede: "验证标准、启发式、多步骤登录与 WebAuthn 排除字段。", mode: "audit" },
+        { id: "device-assist-tests", title: "手机号码与短信验证码", lede: "验证注册、登录和其他电话字段的手机来源，以及单框与六格短信填充。", mode: "manual-audit" },
         { id: "otp-tests", title: "一次性验证码", lede: "验证单字段 TOTP 与分段验证码输入。", mode: "audit" },
         { id: "passkey-tests", title: "Passkey", lede: "验证通过 VaultMesh 完成本地 Passkey 注册与签名认证。", mode: "passkey" },
         { id: "card-tests", title: "支付卡", lede: "验证卡片字段、有效期控件和已有值保护。", mode: "audit" },
@@ -1125,8 +1801,9 @@
 
       const $ = (selector, root = document) => root.querySelector(selector);
       const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
-      const isSensitive = (control) => control.type === "password" || /card|csc|cvc|password|secret|otp|totp|one-time-code|verification[_-]?code|code_[1-6]/i.test([control.id, control.name, control.autocomplete].join(" "));
-      const safeValue = (control) => !control.value ? "空" : isSensitive(control) ? `已填（${control.value.length} 字符）` : control.value;
+      const controlValue = (control) => control.isContentEditable || control.getAttribute("contenteditable") === "true" ? control.textContent || "" : control.value || "";
+      // All field values are redacted, including unknown custom fields and key material.
+      const safeValue = (control) => controlValue(control) ? `已填（${controlValue(control).length} 字符）` : "空";
 
       function readSuiteStatus() {
         try {
@@ -1158,15 +1835,13 @@
       }
 
       function setSuitePassed(suiteId) {
-        if (!suiteId) return;
+        if (!suiteId || !acceptanceComplete()) return;
         const status = readSuiteStatus();
         status[suiteId] = new Date().toISOString();
         writeSuiteStatus(status);
         updateSuiteCards();
         if (currentSuite?.id === suiteId) {
-          const button = $("#manual-pass-button");
-          button.textContent = "本页已通过 ✓";
-          button.disabled = true;
+          $$('[data-confirm-suite]').forEach((button) => { button.textContent = "本页已通过 ✓"; button.disabled = true; });
         }
       }
 
@@ -1176,12 +1851,13 @@
         delete status[suiteId];
         writeSuiteStatus(status);
         updateSuiteCards();
-        const button = $("#manual-pass-button");
-        button.textContent = "确认本页测试已通过";
-        button.disabled = false;
+        $$('[data-confirm-suite]').forEach((button) => { button.textContent = "确认本页测试已通过"; button.disabled = !acceptanceComplete(); });
       }
 
       function renderPageMode() {
+        $("#assist-transport-status").textContent = ["http:", "https:"].includes(location.protocol)
+          ? `当前为 ${location.protocol.slice(0, -1).toUpperCase()}：可测试完整手机填充链路。请在已解锁插件中逐次点选设备候选；不会自动填入或提交。`
+          : "请通过 HTTP 或 HTTPS 打开本页后测试手机填充。";
         const isHome = !currentSuite;
         $("#suite-menu").hidden = !isHome;
         $(".guide").hidden = !isHome;
@@ -1208,9 +1884,9 @@
         $("#page-lede").textContent = currentSuite.lede;
         $("#audit-button").hidden = !["audit", "manual-audit"].includes(currentSuite.mode);
         $("#dynamic-button").hidden = currentSuite.id !== "runtime-tests";
-        $("#suite-completion").hidden = !["manual", "manual-audit"].includes(currentSuite.mode);
-        $(".toolbar-note").textContent = currentSuite.mode === "audit"
-          ? "完成实际填入后运行检查；全部通过会自动记录到主页。"
+        $("#suite-completion").hidden = false;
+        $("#toolbar-guidance").textContent = currentSuite.mode === "audit"
+          ? "完成实际填入后运行字段检查，再逐项核对内容与来源并人工确认。"
           : "本页通过状态仅记录测试结果，不会保存任何表单值。";
         if (readSuiteStatus()[currentSuite.id]) {
           $("#manual-pass-button").textContent = "本页已通过 ✓";
@@ -1250,20 +1926,11 @@
       }
 
       function updateControlState(control) {
-        const expectation = control.dataset.expect;
-        const original = control.dataset.original ?? "";
+        const pass = evaluate(control);
         const state = eventState(control);
-        const untouched = state.input === 0 && state.change === 0;
-        let pass = false;
-        if (expectation === "fill") pass = control.value.length > 0 && state.input > 0 && state.change > 0;
-        if (expectation === "empty") pass = control.value === "" && untouched;
-        if (expectation === "preserve") pass = control.value === original && untouched;
-        control.dataset.state = expectation === "fill" && control.value ? "filled" : !untouched ? "changed" : "";
+        control.dataset.state = controlValue(control) ? "filled" : state.input || state.change ? "changed" : "";
         const marker = fieldMarker(control);
-        if (marker) {
-          marker.textContent = pass ? "✓" : "·";
-          marker.className = `field-state${pass ? " pass" : ""}`;
-        }
+        if (marker) { marker.textContent = pass ? "✓" : "·"; marker.className = `field-state${pass ? " pass" : ""}`; }
         return pass;
       }
 
@@ -1288,10 +1955,23 @@
       function attachRoot(root) {
         if (!root || initializedRoots.has(root)) return;
         initializedRoots.add(root);
+        root.addEventListener("submit", (event) => {
+          event.preventDefault();
+          if (!observedSubmissions.has(event)) {
+            observedSubmissions.add(event);
+            $("#submit-count").textContent = String(++submitCount);
+          }
+        }, true);
+        root.addEventListener("formdata", (event) => {
+          if (!observedSubmissions.has(event)) {
+            observedSubmissions.add(event);
+            $("#formdata-count").textContent = String(++formdataCount);
+          }
+        }, true);
         for (const type of ["focus", "input", "change"]) {
           root.addEventListener(type, (event) => {
-            const control = event.composedPath().find((item) => item instanceof Element && item.matches?.("[data-vm-test]"));
-            if (control) logEvent(type, control);
+            const control = event.composedPath().find((item) => item?.nodeType === 1 && item.matches?.("[data-vm-test]"));
+            if (control && control.getRootNode() === root) logEvent(type, control);
           }, true);
         }
       }
@@ -1315,9 +1995,9 @@
         const expectation = control.dataset.expect;
         const state = eventState(control);
         const untouched = state.input === 0 && state.change === 0;
-        if (expectation === "fill") return control.value.length > 0 && state.input > 0 && state.change > 0;
-        if (expectation === "empty") return control.value === "" && untouched;
-        if (expectation === "preserve") return control.value === (control.dataset.original ?? "") && untouched;
+        if (expectation === "fill") return controlValue(control).length > 0 && state.input > 0 && state.change > 0;
+        if (expectation === "empty") return controlValue(control) === "" && untouched;
+        if (expectation === "preserve") return controlValue(control) === (control.dataset.original ?? "") && untouched;
         return false;
       }
 
@@ -1361,77 +2041,39 @@
         summary.textContent = `${passed} / ${controls.length} PASS`;
         summary.style.color = passed === controls.length ? "var(--good)" : "var(--bad)";
         summary.style.background = passed === controls.length ? "var(--good-soft)" : "var(--bad-soft)";
-        if (controls.length > 0 && passed === controls.length && currentSuite?.mode === "audit") {
-          setSuitePassed(currentSuite.id);
-          summary.textContent += " · 已记录";
-        }
+        summary.textContent += " · 仅字段检查，仍需人工验收";
         updateMetrics();
         $("#results").scrollIntoView({ behavior: "smooth", block: "start" });
       }
 
-      function resetControl(control) {
-        control.value = control.dataset.expect === "preserve" ? (control.dataset.original ?? "") : "";
-        events.set(control, { focus: 0, input: 0, change: 0 });
-        control.dataset.state = "";
-        const marker = fieldMarker(control);
-        if (marker) { marker.textContent = "·"; marker.className = "field-state"; }
-      }
-
       function resetAll() {
-        resetting = true;
-        allControls().forEach(resetControl);
-        eventTotal = 0;
-        $("#metric-events").textContent = "0";
-        $("#event-log").innerHTML = '<div class="muted">等待测试字段事件…</div>';
-        $$('[data-model-for]').forEach((node) => node.textContent = "受控模型：等待 input / change 事件");
-        $("#results-empty").hidden = false;
-        $("#results-table").hidden = true;
-        $("#result-summary").textContent = "NOT RUN";
-        $("#result-summary").removeAttribute("style");
-        $$('[data-save-test]').forEach((container) => {
-          if (container instanceof HTMLFormElement) container.reset();
-          else $$('input,textarea,select', container).forEach((control) => { control.value = ""; });
-          const status = $('[data-save-status]', container);
-          if (status) {
-            status.textContent = container.dataset.saveTest === "spa" ? "等待填写并保存" : "等待填写并提交";
-            status.className = "save-test-status";
-          }
-        });
-        if ($("#passkey-account")) $("#passkey-account").value = "";
-        passkeyCredentialId = null;
-        if (currentSuite?.mode === "passkey") initializePasskeyTest();
         clearSuitePassed(currentSuite?.id);
-        resetting = false;
-        updateMetrics();
+        clearQrImages();
+        // Reload also restores removed SPA/multistep controls, shadows and frame state.
+        location.reload();
       }
 
+      let saveObservation = 0;
       function markSaveTestPending(container) {
         const status = $('[data-save-status]', container);
         if (!status) return;
-        const extensionHost = document.querySelector('[data-vaultmesh-autofill-trigger]');
-        if (!extensionHost) {
-          status.textContent = "未检测到 VaultMesh 内容脚本；请在 pnpm browser:dev 打开的专用 Chrome 中测试";
-          status.className = "save-test-status failed";
-          return;
-        }
-        const promptHost = document.querySelector('[data-vaultmesh-save-prompt]');
-        if (promptHost && getComputedStyle(promptHost).display !== "none") {
-          status.textContent = "VaultMesh 保存弹窗已显示在页面右下角";
-          status.className = "save-test-status visible";
-          return;
-        }
-        status.textContent = "已捕获提交，正在等待 VaultMesh 保存弹窗…";
+        const observation = ++saveObservation;
+        status.textContent = "已观察到页面提交动作；正在检查提示，尚未验证保存。";
         status.className = "save-test-status pending";
-        setTimeout(() => {
-          const delayedPrompt = document.querySelector('[data-vaultmesh-save-prompt]');
-          if (delayedPrompt && getComputedStyle(delayedPrompt).display !== "none") {
-            status.textContent = "VaultMesh 保存弹窗已显示在页面右下角";
+        let attempts = 0;
+        const timer = setInterval(() => {
+          if (observation !== saveObservation) { clearInterval(timer); return; }
+          const host = document.querySelector('[data-vaultmesh-save-prompt]');
+          if (host && getComputedStyle(host).display !== "none") {
+            status.textContent = "检测到保存提示容器；请核对类型与内容，并在确认后重新读取保险库验证。";
             status.className = "save-test-status visible";
-          } else {
-            status.textContent = "未显示弹窗；请打开扩展管理页检查 VaultMesh 内容脚本错误";
-            status.className = "save-test-status failed";
+            clearInterval(timer);
+          } else if (++attempts >= 32) {
+            status.textContent = "页面内未观察到提示。VaultMesh 会在独立的小窗口中显示保存确认，请在该窗口核对；若没有出现，检查授权、HTTPS 与重复数据。本页不能判定保存结果。";
+            status.className = "save-test-status pending";
+            clearInterval(timer);
           }
-        }, 800);
+        }, 250);
       }
 
       function setPasskeyStatus(message, state = "") {
@@ -1451,7 +2093,7 @@
         } else if (!("PublicKeyCredential" in window) || !navigator.credentials?.create || !navigator.credentials?.get) {
           setPasskeyStatus("当前浏览器不支持所需的 WebAuthn API；请使用 Chromium 127+。", "failed");
         } else {
-          setPasskeyStatus("WebAuthn 环境可用。填写测试账户后可新建 Passkey，也可直接验证此 RP 下已有的 Passkey。");
+          setPasskeyStatus("WebAuthn 环境可用。先新建测试 Passkey，再使用本页公钥验证认证签名；仍需人工核对实际提供方。");
         }
         const disabled = !passkeySupported();
         $("#passkey-create").disabled = disabled;
@@ -1474,8 +2116,58 @@
 
       function passkeyFailure(action, error) {
         const name = error instanceof DOMException ? error.name : "Error";
-        const detail = error instanceof Error && error.message ? `：${error.message}` : "";
+        const detail = ""; // Browser/provider errors may contain account information.
         setPasskeyStatus(`${action}失败（${name}）${detail}`, "failed");
+      }
+
+      // Pure verification helpers are also exercised by the harness regression tests.
+      function base64url(bytes) {
+        return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      }
+      function sameBytes(left, right) {
+        const a = new Uint8Array(left), b = new Uint8Array(right);
+        return a.length === b.length && a.every((byte, index) => byte === b[index]);
+      }
+      function verifyClientData(response, challenge, type) {
+        const client = JSON.parse(new TextDecoder().decode(response.clientDataJSON));
+        if (client.type !== type || client.challenge !== base64url(challenge) || client.origin !== location.origin || client.crossOrigin === true) {
+          throw new Error("WebAuthn client data mismatch");
+        }
+      }
+      async function verifyAuthenticatorData(buffer) {
+        const data = new Uint8Array(buffer);
+        const rpHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(location.hostname));
+        if (data.length < 37 || !sameBytes(data.slice(0, 32), rpHash) || !(data[32] & 1)) throw new Error("WebAuthn RP or presence mismatch");
+      }
+      function es256Signature(derBuffer) {
+        const der = new Uint8Array(derBuffer);
+        if (der.length < 8 || der[0] !== 0x30 || der[1] !== der.length - 2) throw new Error("Invalid ES256 signature");
+        let offset = 2;
+        const out = new Uint8Array(64);
+        for (let part = 0; part < 2; part += 1) {
+          if (der[offset++] !== 2) throw new Error("Invalid ES256 integer");
+          const size = der[offset++];
+          let value = der.slice(offset, offset + size); offset += size;
+          if (!size || value.length !== size || value[0] & 0x80) throw new Error("Invalid ES256 integer");
+          if (value.length > 1 && value[0] === 0) {
+            if (!(value[1] & 0x80)) throw new Error("Nonminimal ES256 integer");
+            value = value.slice(1);
+          }
+          if (value.length > 32) throw new Error("Invalid ES256 integer");
+          out.set(value, (part + 1) * 32 - value.length);
+        }
+        if (offset !== der.length) throw new Error("Invalid ES256 signature length");
+        return out;
+      }
+      async function verifyAssertion(credential, challenge) {
+        if (!passkeyVerificationKey || !sameBytes(credential.rawId, passkeyCredentialId)) throw new Error("Unknown credential");
+        verifyClientData(credential.response, challenge, "webauthn.get");
+        await verifyAuthenticatorData(credential.response.authenticatorData);
+        const auth = new Uint8Array(credential.response.authenticatorData);
+        const clientHash = new Uint8Array(await crypto.subtle.digest("SHA-256", credential.response.clientDataJSON));
+        const signed = new Uint8Array(auth.length + clientHash.length); signed.set(auth); signed.set(clientHash, auth.length);
+        const valid = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, passkeyVerificationKey, es256Signature(credential.response.signature), signed);
+        if (!valid) throw new Error("Invalid assertion signature");
       }
 
       async function createPasskey() {
@@ -1487,6 +2179,7 @@
           return;
         }
         setPasskeyBusy(true);
+        passkeyCredentialId = null; passkeyVerificationKey = null;
         setPasskeyStatus("正在请求新建 Passkey；请检查并批准 VaultMesh 桌面端确认…", "pending");
         try {
           const publicKey = {
@@ -1505,6 +2198,11 @@
           };
           const credential = await navigator.credentials.create({ publicKey });
           if (!(credential instanceof PublicKeyCredential)) throw new Error("浏览器没有返回 PublicKeyCredential。");
+          verifyClientData(credential.response, publicKey.challenge, "webauthn.create");
+          await verifyAuthenticatorData(credential.response.getAuthenticatorData());
+          const spki = credential.response.getPublicKey();
+          if (!spki || credential.response.getPublicKeyAlgorithm() !== -7) throw new Error("ES256 public key unavailable");
+          passkeyVerificationKey = await crypto.subtle.importKey("spki", spki, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
           passkeyCredentialId = credential.rawId.slice(0);
           setPasskeyStatus("Passkey 注册成功。凭据响应仅保留在本页内存中；现在可继续执行认证测试。", "success");
         } catch (error) {
@@ -1516,6 +2214,7 @@
 
       async function getPasskey() {
         if (passkeyBusy || !passkeySupported()) return;
+        if (!passkeyVerificationKey) { setPasskeyStatus("请先在本页新建测试 Passkey，以取得公钥并验证认证签名。", "pending"); return; }
         setPasskeyBusy(true);
         setPasskeyStatus("正在请求 Passkey 认证；请检查并批准 VaultMesh 桌面端确认…", "pending");
         try {
@@ -1528,8 +2227,9 @@
           };
           const credential = await navigator.credentials.get({ publicKey });
           if (!(credential instanceof PublicKeyCredential)) throw new Error("浏览器没有返回 PublicKeyCredential。");
-          setPasskeyStatus("Passkey 认证成功，VaultMesh 已返回签名响应；测试页未将响应发送到服务器。", "success");
-          setSuitePassed(currentSuite?.id);
+          await verifyAssertion(credential, publicKey.challenge);
+          setPasskeyStatus("本地验证通过：challenge、origin、RP、用户在场标志、凭据 ID 与 ES256 签名正确。请人工确认提供方为 VaultMesh；无服务器请求。", "success");
+          // Provider attribution and confirmation still require the manual checklist.
         } catch (error) {
           passkeyFailure("Passkey 认证", error);
         } finally {
@@ -1586,6 +2286,7 @@
             <label>Closed Shadow username <input name="closed_shadow_username" autocomplete="username"></label>
             <label>Closed Shadow password <input name="closed_shadow_password" type="password" autocomplete="current-password"></label>
           </form>`;
+        attachRoot(root);
       }
 
       function createIframeTest() {
@@ -1638,7 +2339,7 @@
       $("#reset-button").addEventListener("click", resetAll);
       $("#dynamic-button").addEventListener("click", createDynamicForm);
       $("#clear-log").addEventListener("click", () => { $("#event-log").innerHTML = '<div class="muted">日志已清空；事件计数不会重置。</div>'; });
-      $("#manual-pass-button").addEventListener("click", () => setSuitePassed(currentSuite?.id));
+      $$('[data-confirm-suite]').forEach((button) => button.addEventListener("click", () => setSuitePassed(currentSuite?.id)));
       $("#passkey-create").addEventListener("click", (event) => { event.stopPropagation(); void createPasskey(); });
       $("#passkey-get").addEventListener("click", (event) => { event.stopPropagation(); void getPasskey(); });
       $("#copy-command").addEventListener("click", async (event) => {
@@ -1647,7 +2348,206 @@
         setTimeout(() => event.currentTarget.textContent = "复制启动命令", 1400);
       });
 
+      const acceptanceCases = {
+        "save-capture-tests": [
+          "登录、身份、支付卡、SPA：分别手动填写并提交，核对提示类型与内容",
+          "各类型点保存后，刷新并从保险库重新填充，逐字段核对",
+          "各类型填充后手工改一个字段再提交：更新原条目，保留未改字段",
+          "逐类型点忽略：不得新建或更新；未编辑的自动填充值不得反复提示",
+        ],
+        "login-tests": ["标准/启发式/手机号账号显式选择正确，不填相邻表单", "单一匹配登录且已启用页面加载填充时，只填空字段一次且不提交", "关闭页面加载填充后刷新，不自动填充；多个账号显式选择正确", "已有值与新密码保持隔离，username webauthn 仅填用户名"],
+        "otp-tests": ["分别选择 TOTP、邮件 OTP：单框和六格值及顺序正确", "邮件 OTP：点击获取/重发后刷新候选；不同发件域的有效候选仍可选", "过期、已填字段、关闭候选、导航和锁定后不可复用旧候选", "六格只填同组，不填相邻账号；无自动提交或验证码保存提示"],
+        "device-assist-tests": ["逐个表单实际选择已配对手机：号码与短信来源正确且字段隔离", "单框/六格完整值正确，HTTP 与 HTTPS 分别验证", "无授权、取消、设备断开、两分钟过期及已有值均安全拒绝", "只显示号码末四位；验证码不进入保存候选或日志"],
+        "passkey-tests": ["在 Chromium 的 VaultMesh 桌面确认中核对 RP、origin 与账户，确认实际提供方", "本页新建后认证：本地 challenge、origin、RP 与签名验证通过", "取消注册/认证、插件锁定后请求不能被 VaultMesh 静默批准", "在 VaultMesh 中核对归属 Login，普通 Secret 填充列表不得提供 Passkey"],
+        "card-tests": ["标准字段、品牌、账单地址、下拉月年与两种有效期正确", "每次填充必须验证当前主密码；错误密码/取消不交付卡片", "已有值保持原状，不自动提交；不因刷新而自动填卡"],
+        "identity-tests": ["标准与中文字段、国家代码/名称正确，多个联系方式使用预期值", "护照/身份证不得作为普通身份字段自动填入", "已有值不静默覆盖，不自动提交或填其他表单"],
+        "sensitive-item-tests": ["开发者密钥与 SSH 填充每个受支持字段正确，包含公钥与私钥口令", "SSH 密码与密钥两种保存表单：提示类型正确，保存后读取核对", "SSH 更新保留未编辑资料；缺主机/账号或密钥、混合来源拒绝", "忽略/取消不写入，HTTP 拒绝受保护路径；启用二次验证时必须执行"],
+        "account-lifecycle-tests": ["注册不自动使用旧密码；生成密码只填本表单新密码及确认框", "显式选择当前登录后，改密表单自动生成一次新密码并同步确认框", "已有新密码不得被覆盖；确认为空/不一致不得产生密码更新候选", "生成后修改实际密码，保存使用修改后值；注册新建与改密更新均正确"],
+        "runtime-tests": ["动态插入、open/可访问 closed Shadow DOM、同源 iframe 正确填充", "跨源 iframe：核对顶层与目标来源，不向其他 frame 泄露或转发值", "不支持访问的 closed root 安全降级，不能标为正向通过", "禁用/只读/搜索/优惠码/图形验证码/证件无图标且保持原状", "小 frame 菜单可滚动；Escape、Tab、方向键、输入法与缩放可用"],
+        "secret-types-tests": [],
+        "capture-path-tests": ["外置 form= 控件归属正确；A/B 表单提交互不串值", "原生 submit 与 input 型提交按钮各触发一次正确候选", "构造 FormData 与原生 form.submit 均观察候选；CSP 禁止网络，不代表服务端成功", "Enter 可提交；输入法组合、无效表单、已取消事件不得误捕获", "SPA 同步销毁前捕获正确；Shadow 内非 composed submit 被捕获且不重复", "各路径保存后重新读取核对；忽略不写入"],
+        "advanced-fields-tests": ["自定义字段与 contenteditable 的值和事件正确，未知字段不乱显示图标", "分步登录账号移除后仍能在密码提交时正确关联；不串其他账号", "用户名、密码/口令、UUID 生成器分别只填显式目标，不覆盖已有值", "重置密码保存正确；确认不一致/留空拒绝；生成后编辑使用实际值"],
+        "lifecycle-tests": ["新建、更新、忽略各执行一次；更新保留未编辑资料", "不修改自动填充值再提交：无重复捕获；重复确认不产生重复条目/历史", "锁定、撤销、断开、到期后旧候选/保存提示不可继续执行", "候选打开后移除/只读/同文档导航：旧目标失效；重新聚焦可新请求", "保存失败明确提示、旧数据不变；未知结果不自动重试（需隔离故障环境）", "卡片或启用二次验证条目：错误主密码及取消不泄露、不写入"],
+        "authenticator-tests": ["显示二维码不自动出现扫描入口；只有 popup 主动扫描才读取", "单个有效 TOTP 进入 Login 草稿；取消不保存；显式保存后可填 OTP", "两张有效码要求选择；已有 TOTP 需覆盖确认并保留其他字段", "非 TOTP/不支持的 profile/隐藏二维码拒绝；不新建普通 Secret", "关闭 popup、锁定、断开后草稿与候选清理"],
+      };
+      const qrObjectUrls = [];
+      function acceptanceComplete() {
+        const controls = $$("[data-acceptance]");
+        return controls.length > 0 && controls.every((control) => control.value === "passed");
+      }
+      function refreshAcceptance() {
+        const controls = $$("[data-acceptance]");
+        const passed = controls.filter((control) => control.value === "passed").length;
+        $("#acceptance-status").textContent = `${passed} / ${controls.length} 项人工通过；字段检查不替代真实链路验收。`;
+        $$('[data-confirm-suite]').forEach((button) => { button.disabled = !acceptanceComplete() || Boolean(readSuiteStatus()[currentSuite?.id]); });
+      }
+      function initializeAcceptance() {
+        if (!currentSuite) return;
+        $("#acceptance-panel").hidden = false;
+        const secureRequired = ["card-tests", "sensitive-item-tests", "secret-types-tests", "save-capture-tests"].includes(currentSuite.id);
+        $("#environment-status").textContent = secureRequired && location.protocol !== "https:"
+          ? "当前不是 HTTPS：受保护正向用例环境不满足。先切换到受信任 HTTPS 再记录通过。"
+          : "使用已配对且解锁的实际扩展。Firefox 不支持 VaultMesh Passkey proxy；不可用环境请记录环境受限。";
+        const cases = [...(acceptanceCases[currentSuite.id] || [])];
+        if (currentSuite.id === "secret-types-tests") {
+          for (const form of $$('[data-secret-kind]', activeSuiteSection)) {
+            const kind = form.dataset.secretKind;
+            cases.push(`${kind}：显式填充值正确，只填本表单且不自动提交`);
+            cases.push(`${kind}：手动编辑后保存新建/更新，类型与回读正确；忽略不写入`);
+          }
+          cases.push("各子类型更新保留 website、scopes、二次验证；多个秘密来源歧义拒绝，Passkey 排除");
+        }
+        for (const [index, description] of cases.entries()) {
+          const label = document.createElement("label");
+          const span = document.createElement("span"); span.textContent = description;
+          const select = document.createElement("select");
+          select.dataset.acceptance = `${currentSuite.id}:${index}`;
+          select.innerHTML = '<option value="pending">未测试</option><option value="passed">通过</option><option value="failed">失败</option><option value="blocked">环境受限</option>';
+          select.addEventListener("change", () => { clearSuitePassed(currentSuite.id); refreshAcceptance(); });
+          label.append(span, select); $("#acceptance-checks").append(label);
+        }
+        refreshAcceptance();
+      }
+      function clearQrImages() {
+        qrObjectUrls.splice(0).forEach((url) => URL.revokeObjectURL(url));
+        $("#qr-preview").replaceChildren(); $("#qr-preview").hidden = false; $("#qr-files").value = "";
+        $("#qr-status").textContent = "测试图片已清除";
+      }
+      function initializeExtraFixtures() {
+        if (currentSuite?.id === "capture-path-tests") {
+          const shadow = $("#capture-shadow-host").attachShadow({ mode: "open" });
+          shadow.innerHTML = '<style>form{display:grid;gap:12px;font:14px system-ui}label{display:grid;gap:6px}input,button{box-sizing:border-box;max-width:100%;padding:10px;border:1px solid #cfd4dc;border-radius:8px}button{cursor:pointer}</style><form><label>Username <input autocomplete="username" name="shadow_capture_user"></label><label>Password <input type="password" autocomplete="current-password" name="shadow_capture_password"></label><button type="submit">保存登录</button><p role="status"></p></form>';
+          shadow.addEventListener("submit", (event) => { event.preventDefault(); shadow.querySelector("p").textContent = "已观察内部提交；请核对插件提示并回读验证。"; });
+        }
+        $("#formdata-action").addEventListener("click", () => {
+          new FormData($("#formdata-case"));
+          markSaveTestPending($("#formdata-case"));
+        });
+        $("#native-submit-action").addEventListener("click", () => {
+          HTMLFormElement.prototype.submit.call($("#formdata-case"));
+          markSaveTestPending($("#formdata-case"));
+        });
+        $("#spa-remove-action").addEventListener("click", () => {
+          $$("input", $("#spa-remove-case")).forEach((control) => { control.value = ""; control.remove(); });
+          $("#spa-remove-status").textContent = "字段已同步销毁；请在插件核对提交前捕获的内容。";
+        });
+        $("#account-step").addEventListener("submit", (event) => {
+          event.preventDefault();
+          // Let extension submission observers finish before moving to the next document stage.
+          setTimeout(() => {
+            $("#multistep-slot").innerHTML = '<form id="password-step"><label for="step-password">Password</label><input class="control" id="step-password" type="password" autocomplete="current-password"><button type="submit" class="button">登录</button></form>';
+          }, 0);
+        });
+        $("#invalidate-target").addEventListener("click", () => {
+          const form = $("#lifecycle-login");
+          const replacement = form.cloneNode(true);
+          $$("input", replacement).forEach((control) => { control.value = ""; control.readOnly = false; });
+          form.replaceWith(replacement);
+        });
+        $("#readonly-target").addEventListener("click", () => { const control = $("#lifecycle-user"); control.readOnly = !control.readOnly; });
+        $("#navigate-target").addEventListener("click", () => { location.hash = `qa-navigation-${Date.now()}`; });
+        $("#qr-clear").addEventListener("click", clearQrImages);
+        $("#qr-hide").addEventListener("click", () => { $("#qr-preview").hidden = !$("#qr-preview").hidden; });
+        $("#qr-files").addEventListener("change", (event) => {
+          const files = Array.from(event.target.files || []);
+          clearQrImages();
+          if (files.length > 2 || files.some((file) => file.size > 2 * 1024 * 1024 || !["image/png", "image/jpeg", "image/webp"].includes(file.type))) {
+            $("#qr-status").textContent = "请选择最多两张 PNG/JPEG/WebP，每张不超过 2 MB。"; return;
+          }
+          for (const file of files) {
+            const url = URL.createObjectURL(file); qrObjectUrls.push(url);
+            const img = document.createElement("img"); img.alt = "本地合成测试二维码"; img.src = url;
+            $("#qr-preview").append(img);
+          }
+          $("#qr-status").textContent = `已显示 ${files.length} 张测试图；请从插件主动扫描。`;
+        });
+        window.addEventListener("pagehide", clearQrImages);
+      }
+
+      // Synthetic TOTP fixture for the OTP suite. Everything stays on this page:
+      // the secret is random test data kept in localStorage for repeatable fills.
+      const qaSeedKey = "vaultmesh.qa.qa-seed.v1";
+      const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+      function randomBase32(bytes) {
+        return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (byte) => base32Alphabet[byte & 31]).join("");
+      }
+      function base32Bytes(secret) {
+        let bits = 0, value = 0; const out = [];
+        for (const char of secret.replace(/=+$/, "").toUpperCase()) {
+          const index = base32Alphabet.indexOf(char); if (index < 0) continue;
+          value = (value << 5) | index; bits += 5;
+          if (bits >= 8) { out.push((value >>> (bits - 8)) & 255); bits -= 8; }
+        }
+        return new Uint8Array(out);
+      }
+      async function totpAt(secret, counter) {
+        const key = await crypto.subtle.importKey("raw", base32Bytes(secret), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+        const message = new ArrayBuffer(8); new DataView(message).setBigUint64(0, BigInt(counter));
+        const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, message));
+        const offset = mac[19] & 15;
+        const code = ((mac[offset] & 127) << 24 | mac[offset + 1] << 16 | mac[offset + 2] << 8 | mac[offset + 3]) % 1_000_000;
+        return String(code).padStart(6, "0");
+      }
+      function readQaSeed() {
+        try { const stored = JSON.parse(localStorage.getItem(qaSeedKey) || "null"); if (stored?.secret && stored.username && stored.password) return stored; } catch {}
+        const fixture = { username: `qa-otp-${randomBase32(3).toLowerCase()}@vaultmesh.test`, password: `QA-${randomBase32(10)}`, secret: randomBase32(32) };
+        try { localStorage.setItem(qaSeedKey, JSON.stringify(fixture)); } catch {}
+        return fixture;
+      }
+      function initializeQaSeed() {
+        if (currentSuite?.id !== "otp-tests" || !window.isSecureContext || !crypto.subtle) {
+          if (currentSuite?.id === "otp-tests") $("#qa-seed-status").textContent = "需要通过 localhost 或 HTTPS 打开本页才能计算 TOTP。";
+          return;
+        }
+        let fixture = readQaSeed();
+        const uriFor = (value) => `otpauth://totp/${encodeURIComponent(`VaultMesh QA:${value.username}`)}?secret=${value.secret}&issuer=${encodeURIComponent("VaultMesh QA")}&algorithm=SHA1&digits=6&period=30`;
+        const render = () => {
+          $("#qa-seed-username").value = fixture.username;
+          $("#qa-seed-password").value = fixture.password;
+          $("#qa-seed-secret").textContent = fixture.secret;
+          $("#qa-seed-uri").href = uriFor(fixture);
+        };
+        const verify = async () => {
+          const counter = Math.floor(Date.now() / 30_000);
+          const [current, previous] = await Promise.all([totpAt(fixture.secret, counter), totpAt(fixture.secret, counter - 1)]);
+          $("#qa-seed-code").textContent = `${current.slice(0, 3)} ${current.slice(3)}`;
+          $("#qa-seed-remaining").textContent = String(30 - Math.floor(Date.now() / 1000) % 30);
+          const matches = (value) => value === current || value === previous;
+          const single = $("#login-otp").value.trim();
+          const cells = $$('[data-test-form="otp-segmented"] .otp-digit').map((input) => input.value.trim());
+          const segmented = cells.join("");
+          const describe = (label, value) => !value ? `${label}：等待填入` : matches(value) ? `${label}：✓ 与测试密钥一致` : `${label}：✗ 与测试密钥不一致`;
+          const segmentedResult = cells.some((value) => value.length > 1) ? "六格：✗ 有格子被填入多位字符" : describe("六格", segmented);
+          $("#qa-seed-verify").textContent = `填入核对：${describe("单框", single)}；${segmentedResult}`;
+        };
+        render();
+        void verify();
+        setInterval(() => void verify(), 1_000);
+        document.addEventListener("input", () => void verify(), true);
+        $("#qa-seed-regenerate").addEventListener("click", () => {
+          try { localStorage.removeItem(qaSeedKey); } catch {}
+          fixture = readQaSeed(); render(); void verify();
+          $("#qa-seed-status").textContent = "已生成新的测试数据；需要重新保存到 VaultMesh。";
+        });
+        $("#qa-seed-copy").addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(uriFor(fixture)); $("#qa-seed-status").textContent = "已复制 otpauth 链接（合成测试密钥）。"; }
+          catch { $("#qa-seed-status").textContent = "无法写入剪贴板；可在插件编辑登录时扫描当前网页。"; }
+        });
+        $("#qa-seed").addEventListener("submit", () => {
+          $("#qa-seed-status").textContent = "已提交；请在 VaultMesh 保存窗口中确认保存，然后为该登录添加 TOTP。";
+        });
+        // The inputs are fixtures, not user edits; keep them in sync with the stored fixture.
+        ["#qa-seed-username", "#qa-seed-password"].forEach((selector) => $(selector).addEventListener("change", (event) => {
+          fixture = { ...fixture, [selector.endsWith("username") ? "username" : "password"]: event.target.value };
+          try { localStorage.setItem(qaSeedKey, JSON.stringify(fixture)); } catch {}
+          render();
+        }));
+      }
+
       renderPageMode();
+      initializeQaSeed();
+      initializeAcceptance();
+      initializeExtraFixtures();
       if (currentSuite?.id === "runtime-tests") {
         createShadowTest();
         createClosedShadowTest();

@@ -128,13 +128,19 @@ function GeneratedLoginOption({
 
 export function candidateGroups(candidates: InlineAutofillCandidate[], currentHost: string, currentHostname: string): CandidateGroup[] {
   const emailOtp = candidates.filter((candidate) => candidate.kind === "email-otp");
-  const vault = candidates.filter((candidate) => candidate.kind !== "email-otp");
+  // Paired-phone sources are not vault matches for this site; keep them apart.
+  const device = candidates.filter((candidate) => candidate.kind === "device-assist");
+  const vault = candidates.filter((candidate) => candidate.kind !== "email-otp" && candidate.kind !== "device-assist");
+  const deviceGroup: CandidateGroup[] = device.length > 0 ? [{ key: "device-assist", label: "已配对手机", candidates: device }] : [];
   const groups: CandidateGroup[] = emailOtp.length > 0
     ? [{ key: "email-otp", label: "邮箱验证码", candidates: emailOtp }]
     : [];
 
   if (!vault.some((candidate) => candidate.kind === "login")) {
-    return vault.length > 0 ? [...groups, { key: "available", label: null, candidates: vault }] : groups;
+    const available: CandidateGroup[] = vault.length > 0 ? [{ key: "available", label: null, candidates: vault }] : [];
+    // A lone phone entry needs no heading; next to other groups it gets one.
+    const phone = deviceGroup.map((group) => groups.length || available.length ? group : { ...group, label: null });
+    return [...groups, ...available, ...phone];
   }
 
   const exact = [
@@ -145,5 +151,6 @@ export function candidateGroups(candidates: InlineAutofillCandidate[], currentHo
   return [...groups,
     { key: "origin", label: `当前站点 · ${currentHost}`, candidates: exact },
     { key: "domain", label: `同域名 · ${currentHostname}`, candidates: domain },
+    ...deviceGroup,
   ].filter((group) => group.candidates.length > 0);
 }

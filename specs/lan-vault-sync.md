@@ -2,7 +2,7 @@
 
 ## LAN-SYNC-001 数据与合并
 
-仅已授权的同链路 macOS/Windows 客户端可以同步；锁定仅收发密文，解锁才验证合并。Login/TOTP/恢复码、card、SSH、identity、Secret、Service、API environment 及其 trash/history 必须按 kind + UUID 同步。旧 BE=0 Passkey、邮件连接凭据、审计、设备设置、Agent/Browser 权限、内部 connector、SSH 本机部署绑定不得同步。不同 UUID 保留独立条目。
+仅已授权的同链路 macOS/Windows/Android 客户端可以同步；锁定仅收发密文，解锁才验证合并。Login/TOTP/恢复码、card、SSH、identity、Secret、Service、API environment 及其 trash/history 必须按 kind + UUID 同步。旧 BE=0 Passkey、邮件连接凭据、审计、设备设置、Agent/Browser 权限、内部 connector、SSH 本机部署绑定不得同步。不同 UUID 保留独立条目。
 
 Core 必须为每个同步记录持久化 HLC 和副本 ID，整记录采用确定性 LWW，败者保留在加密冲突历史。同版本重复收取必须幂等；编辑、永久删除、历史清理必须同事务记录版本和不含秘密的 tombstone，首版不得自动回收墓碑。历史清理还必须持久化按条目的 HLC 清理版本，丢弃版本不高于它的历史，覆盖清理时尚未见过的离线历史；冲突历史使用全局清理版本。回收站与活动记录必须共享同一逻辑条目键，避免复活。引用失效时必须 fail closed，不能继续沿用旧 target 或已批准计划。
 

@@ -77,6 +77,7 @@ mod browser_host_registration;
 mod browser_integration_windows;
 mod browser_pairing;
 mod browser_platform;
+mod device_assist;
 mod desktop_api_request;
 mod desktop_email;
 mod desktop_import;
@@ -86,7 +87,7 @@ mod desktop_startup;
 mod electron_migration;
 mod email_otp;
 mod import_service;
-mod lan_pairing;
+use vaultmesh_lan_pairing as lan_pairing;
 mod passkey_service;
 mod pin_service;
 mod recovery_code_command;
@@ -94,6 +95,7 @@ mod recovery_code_file;
 mod ssh_external;
 mod ssh_host_setup;
 mod ssh_scan;
+mod socket_wait;
 mod ssh_service;
 mod ssh_tools;
 #[cfg(any(target_os = "windows", test))]
@@ -242,7 +244,7 @@ struct RuntimeState {
     biometric: Arc<Mutex<BiometricQuickUnlockService>>,
     pin: Arc<Mutex<PinQuickUnlockService>>,
     lan_pairing: Arc<Mutex<LanPairingService>>,
-    lan_sync: Arc<Mutex<LanSyncService>>,
+    lan_sync: Arc<Mutex<LanSyncService<DesktopRuntime>>>,
     vault_path_record: PathBuf,
 }
 
@@ -809,21 +811,19 @@ fn handle_lan_pairing(
     match operation {
         "lan.pairing.status" | "lan.discovery.scan" => {
             require_empty_object(&input)?;
-            let status = service.status(std::time::Instant::now(), unix_millis());
-            for (vault, peer, fingerprint) in service.take_sync_authorizations() {
-                let mut runtime = state.runtime.lock().map_err(|_| "保险库不可用。")?;
-                if runtime
-                    .sync_state()
-                    .map_err(|_| "请先解锁保险库。")?
-                    .vault_id
-                    != vault
-                {
-                    return Err("保险库已切换，请重新授权同步。".into());
-                }
-                runtime
-                    .sync_authorize(&peer, &fingerprint, true)
-                    .map_err(|_| "设备已配对，但同步授权保存失败，请重新授权同步。")?;
-            }
+            let status = service.status_with_authorization(
+                std::time::Instant::now(),
+                unix_millis(),
+                |vault, peer, fingerprint, enabled| {
+                    state.runtime.lock().ok().is_some_and(|mut runtime| {
+                        runtime
+                            .sync_state()
+                            .is_ok_and(|sync| sync.vault_id == vault)
+                            && runtime.sync_authorize(peer, fingerprint, enabled).is_ok()
+                    })
+                },
+            );
+            let _ = service.take_sync_authorizations();
             serde_json::to_value(status).map_err(|_| "局域网配对服务暂时不可用。".to_owned())
         }
         "lan.discovery.start" => {
@@ -835,13 +835,29 @@ fn handle_lan_pairing(
                 .sync_state()
                 .map_err(|_| "请先解锁保险库。")?
                 .vault_id;
-            service.start_for_vault(std::time::Instant::now(), vault)?;
+            service.start_for_vault_with_authorization(
+                std::time::Instant::now(),
+                vault,
+                |id, peer, fingerprint, enabled| {
+                    state.runtime.lock().ok().is_some_and(|mut runtime| {
+                        runtime.sync_state().is_ok_and(|sync| sync.vault_id == id)
+                            && runtime.sync_authorize(peer, fingerprint, enabled).is_ok()
+                    })
+                },
+            )?;
             serde_json::to_value(service.status(std::time::Instant::now(), unix_millis()))
                 .map_err(|_| "局域网配对服务暂时不可用。".to_owned())
         }
         "lan.discovery.stop" => {
             require_empty_object(&input)?;
-            service.stop();
+            service.stop_with_authorization(|vault, peer, fingerprint, enabled| {
+                state.runtime.lock().ok().is_some_and(|mut runtime| {
+                    runtime
+                        .sync_state()
+                        .is_ok_and(|sync| sync.vault_id == vault)
+                        && runtime.sync_authorize(peer, fingerprint, enabled).is_ok()
+                })
+            });
             serde_json::to_value(service.status(std::time::Instant::now(), unix_millis()))
                 .map_err(|_| "局域网配对服务暂时不可用。".to_owned())
         }

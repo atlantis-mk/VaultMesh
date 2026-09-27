@@ -44,7 +44,7 @@ export default defineConfig({
       },
     },
     permissions: [
-      "activeTab", "alarms", "clipboardRead", "clipboardWrite", "contextMenus", "idle",
+      "alarms", "clipboardRead", "contextMenus", "idle",
       "nativeMessaging", "notifications", "storage", "webNavigation",
       ...(!isFirefox ? ["webAuthenticationProxy" as const] : []),
     ],

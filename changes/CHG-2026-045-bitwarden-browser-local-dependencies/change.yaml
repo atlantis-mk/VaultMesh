@@ -14,7 +14,6 @@ adrs: []
 context_refs:
   - "docs/03-functional-requirements.md#REQ-BROWSER-004"
   - "docs/07-test-release-plan.md#GATE-4 Browser"
-  - "apps/bitwarden-browser/VAULTMESH-FORK.md"
 related_changes: []
 boundaries:
   - "实验目录独立 npm 依赖和 GPL 共享源码；不更改生产依赖、桌面授权或发布身份"

@@ -4,6 +4,8 @@ members = [
   "crates/vault-android-runtime",
   "crates/vault-core",
   "crates/vault-ffi",
+  "crates/vault-lan-pairing",
+  "crates/vault-sync",
   "apps/tauri-desktop/src-tauri",
 ]
 resolver = "2"

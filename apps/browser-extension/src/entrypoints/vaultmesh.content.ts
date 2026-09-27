@@ -17,6 +17,16 @@ export default defineContentScript({
     let pageUrl = document.location.href;
     const frameOrigin = documentHttpOrigin(document);
     let fields = new Map<string, SupportedControl>();
+    // Each discovery keeps its own handle set, keyed by its requestId. A
+    // long-lived request (a paired-phone choice can wait up to a minute) must
+    // not lose its handles because another fill discovered the page meanwhile.
+    const discoveries = new Map<string, Map<string, SupportedControl>>();
+    const MAX_PENDING_DISCOVERIES = 16;
+    const discardDiscoveries = () => {
+      discardFieldHandles(fields);
+      for (const handles of discoveries.values()) discardFieldHandles(handles);
+      discoveries.clear();
+    };
     const targets = new AutofillTargets();
     const fieldTargets = new WeakMap<Map<string, SupportedControl>, AutofillTarget>();
     const sendMessage = createContentScriptMessageSender(
@@ -28,7 +38,7 @@ export default defineContentScript({
     const invalidateDocument = () => {
       documentId = createUuid();
       pageUrl = document.location.href;
-      discardFieldHandles(fields);
+      discardDiscoveries();
       targets.clear();
       autofillPage.invalidatePageContext();
     };
@@ -36,7 +46,7 @@ export default defineContentScript({
       if (document.location.href !== pageUrl) invalidateDocument();
       return documentId;
     };
-    const onPageHide = () => { documentId = createUuid(); discardFieldHandles(fields); targets.clear(); };
+    const onPageHide = () => { documentId = createUuid(); discardDiscoveries(); targets.clear(); };
     window.addEventListener("popstate", checkDocument);
     window.addEventListener("hashchange", checkDocument);
     window.addEventListener("pagehide", onPageHide);
@@ -85,7 +95,9 @@ export default defineContentScript({
       }
 
       const requestDocumentId = documentId;
-      const requestFields = fields;
+      const requestFields = parsed.data.kind === "vaultmesh.apply-assignments"
+        ? discoveries.get(parsed.data.requestId) ?? fields
+        : fields;
       const requestTarget = fieldTargets.get(requestFields);
       const checkAssignmentScope = () => {
         const current = checkDocument();
@@ -95,11 +107,22 @@ export default defineContentScript({
       };
       // Consume the handle set before the first await. A replay must not join
       // an in-flight fill, and its completion must not erase a newer discovery.
-      if (parsed.data.kind === "vaultmesh.apply-assignments") fields = new Map();
+      if (parsed.data.kind === "vaultmesh.apply-assignments") {
+        discoveries.delete(parsed.data.requestId);
+        if (requestFields === fields) fields = new Map();
+      }
       return handleMessage(parsed.data, requestDocumentId, requestFields, frameOrigin, checkAssignmentScope, targets).then(async (result) => {
         if (parsed.data.kind === "vaultmesh.discover-fields") {
           if (parsed.data.target) fieldTargets.set(result.fields, parsed.data.target);
-          if (requestDocumentId === documentId) fields = result.fields;
+          if (requestDocumentId === documentId) {
+            fields = result.fields;
+            discoveries.delete(parsed.data.requestId);
+            discoveries.set(parsed.data.requestId, result.fields);
+            for (const stale of discoveries.keys()) {
+              if (discoveries.size <= MAX_PENDING_DISCOVERIES) break;
+              discoveries.delete(stale);
+            }
+          }
           return result.response;
         }
 
@@ -124,7 +147,7 @@ export default defineContentScript({
     ctx.onInvalidated(() => {
       documentId = createUuid();
       autofillPage.dispose();
-      fields.clear();
+      discardDiscoveries();
       targets.clear();
       window.removeEventListener("popstate", checkDocument);
       window.removeEventListener("hashchange", checkDocument);

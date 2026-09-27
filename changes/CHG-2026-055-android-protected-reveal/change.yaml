@@ -1,0 +1,40 @@
+schema: "2"
+id: "CHG-2026-055-android-protected-reveal"
+title: "Android 受保护字段查看"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "受保护值从特权复制进入短时 Compose 查看需要跨任务平台验收"
+requirements:
+  - "REQ-ANDROID-013"
+  - "REQ-ITEM-001"
+  - "REQ-ITEM-002"
+  - "REQ-ITEM-003"
+  - "REQ-ITEM-005"
+tests:
+  - "CT-ANDROID-REVEAL-001"
+  - "AT-ANDROID-013"
+adrs:
+  - "ADR-0021"
+  - "ADR-0024"
+  - "ADR-0030"
+context_refs:
+  - "docs/02-scope-matrix.md#Vault 能力"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-013 Compose 受保护字段查看"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-006 Compose 受保护值复制"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+  - "CHG-2026-049-android-protected-item-access"
+boundaries:
+  - "复用已按字段鉴权的固定 JNI 值访问，显式主密码复验后短时展示单个值"
+  - "查看值不进入列表、保存状态或日志；关闭、切换、后台、锁定及超时必须解除引用"
+risks:
+  - "屏幕可见值仍可被用户周围人员观察，设备辅助功能与窗口行为须真机验收"
+next:
+  - "按次验证查看、30 秒清除、Compose 入口、contract/仪器化测试包及 Debug/Release 构建已通过本地检查"
+  - "arm64 真机验证后台、截屏保护、辅助功能与超时清理"

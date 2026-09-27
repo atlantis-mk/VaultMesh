@@ -16,11 +16,26 @@ use thiserror::Error;
 use uuid::Uuid;
 use vaultmesh_core::{LoginItemUpdate, NewLoginItem, VaultError, VaultSession};
 
+mod assist_resume;
+mod autofill;
+mod health;
+mod history;
+mod items;
 #[cfg(target_os = "android")]
 mod jni_bridge;
+mod lan_credentials;
+mod lan_pairing;
+mod lan_sync;
+mod login_fields;
+mod pin_unlock;
+mod protected;
+mod quick_unlock;
+mod recovery;
 
 const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 pub const VAULT_FILE_NAME: &str = "vaultmesh.vault";
+pub const BACKUP_EXPORT_STAGE_FILE_NAME: &str = "vaultmesh-backup-export.vault";
+pub const BACKUP_IMPORT_STAGE_FILE_NAME: &str = "vaultmesh-backup-import.vault";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeStatus {
@@ -49,10 +64,22 @@ pub enum AndroidRuntimeError {
     Locked,
     #[error("unlock_failed")]
     UnlockFailed,
+    #[error("pin_failed")]
+    PinFailed,
+    #[error("pin_locked")]
+    PinLocked,
     #[error("invalid_vault")]
     InvalidVault,
     #[error("io_error")]
     Io,
+    #[error("lan_listener_unavailable")]
+    LanListenerUnavailable,
+    #[error("lan_discovery_unavailable")]
+    LanDiscoveryUnavailable,
+    #[error("lan_scan_unavailable")]
+    LanScanUnavailable,
+    #[error("lan_identity_unavailable")]
+    LanIdentityUnavailable,
     #[error("invalid_input")]
     InvalidInput,
     #[error("item_not_found")]
@@ -61,6 +88,10 @@ pub enum AndroidRuntimeError {
     NotInitialized,
     #[error("trash_item_not_found")]
     TrashItemNotFound,
+    #[error("value_unavailable")]
+    ValueUnavailable,
+    #[error("revision_not_found")]
+    RevisionNotFound,
 }
 
 impl AndroidRuntimeError {
@@ -70,12 +101,20 @@ impl AndroidRuntimeError {
             Self::Missing => "missing",
             Self::Locked => "locked",
             Self::UnlockFailed => "unlock_failed",
+            Self::PinFailed => "pin_failed",
+            Self::PinLocked => "pin_locked",
             Self::InvalidVault => "invalid_vault",
             Self::Io => "io_error",
+            Self::LanListenerUnavailable => "lan_listener_unavailable",
+            Self::LanDiscoveryUnavailable => "lan_discovery_unavailable",
+            Self::LanScanUnavailable => "lan_scan_unavailable",
+            Self::LanIdentityUnavailable => "lan_identity_unavailable",
             Self::InvalidInput => "invalid_input",
             Self::ItemNotFound => "item_not_found",
             Self::NotInitialized => "not_initialized",
             Self::TrashItemNotFound => "trash_item_not_found",
+            Self::ValueUnavailable => "value_unavailable",
+            Self::RevisionNotFound => "revision_not_found",
         }
     }
 }
@@ -87,13 +126,27 @@ impl From<VaultError> for AndroidRuntimeError {
             VaultError::Locked => Self::Locked,
             VaultError::ItemNotFound => Self::ItemNotFound,
             VaultError::TrashItemNotFound => Self::TrashItemNotFound,
+            VaultError::RevisionNotFound => Self::RevisionNotFound,
+            VaultError::CardSecretUnavailable
+            | VaultError::SshSecretUnavailable
+            | VaultError::TotpUnavailable
+            | VaultError::RecoveryCodesUnavailable => Self::ValueUnavailable,
             VaultError::UnsupportedFormat
             | VaultError::InvalidPayload
             | VaultError::Crypto
             | VaultError::Serialization => Self::InvalidVault,
             VaultError::InvalidUrl
             | VaultError::InvalidTotpSecret
-            | VaultError::InvalidRecoveryCodes => Self::InvalidInput,
+            | VaultError::InvalidRecoveryCodes
+            | VaultError::InvalidCardNumber
+            | VaultError::InvalidCardExpiration
+            | VaultError::InvalidCardSecurityCode
+            | VaultError::InvalidCardPin
+            | VaultError::InvalidSshCredential
+            | VaultError::InvalidSshPublicKey
+            | VaultError::InvalidSshPrivateKey
+            | VaultError::InvalidIdentity
+            | VaultError::InvalidSecretItem => Self::InvalidInput,
             _ => Self::InvalidVault,
         }
     }
@@ -107,6 +160,8 @@ pub struct AndroidLoginSummary {
     pub username: String,
     pub url: Option<String>,
     pub has_password: bool,
+    pub has_totp_secret: bool,
+    pub has_recovery_codes: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -121,7 +176,12 @@ pub struct AndroidTrashSummary {
 
 pub struct AndroidVaultRuntime {
     vault_path: PathBuf,
+    autofill_grant: Option<autofill::AutofillGrant>,
     session: Option<VaultSession>,
+    persisted_fingerprint: Option<[u8; 32]>,
+    assist_binding: Option<String>,
+    assist_resume_credentials: Option<std::sync::Arc<lan_credentials::AndroidLanCredentials>>,
+    relay: std::sync::Arc<vaultmesh_sync::relay::RelayHub>,
 }
 
 impl AndroidVaultRuntime {
@@ -133,6 +193,11 @@ impl AndroidVaultRuntime {
         Ok(Self {
             vault_path: app_data_dir.join(VAULT_FILE_NAME),
             session: None,
+            autofill_grant: None,
+            persisted_fingerprint: None,
+            assist_binding: None,
+            assist_resume_credentials: None,
+            relay: vaultmesh_sync::relay::RelayHub::for_path(&app_data_dir.join(VAULT_FILE_NAME)),
         })
     }
 
@@ -166,13 +231,85 @@ impl AndroidVaultRuntime {
         let encrypted = read_vault(&self.vault_path)?;
         let candidate = VaultSession::unlock(master_password, &encrypted)?;
         self.replace_session(candidate);
+        let _ = self.reset_pin_failures();
+        Ok(())
+    }
+
+    pub fn change_master_password(
+        &mut self,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<(), AndroidRuntimeError> {
+        if self.session.as_ref().is_none_or(VaultSession::is_locked) {
+            return Err(AndroidRuntimeError::Locked);
+        }
+        if current_password.is_empty() || new_password.is_empty() {
+            return Err(AndroidRuntimeError::InvalidInput);
+        }
+        let encrypted = read_vault(&self.vault_path)?;
+        let mut candidate = VaultSession::unlock(current_password, &encrypted)?;
+        candidate.change_master_password(current_password, new_password)?;
+        let replacement = candidate.save()?;
+        write_vault(&self.vault_path, &replacement)?;
+        self.replace_session(candidate);
+        Ok(())
+    }
+
+    pub fn prepare_encrypted_backup(&self) -> Result<(), AndroidRuntimeError> {
+        let session = self.session.as_ref().ok_or(AndroidRuntimeError::Locked)?;
+        let encrypted = zeroize::Zeroizing::new(session.save()?);
+        write_vault(
+            &self
+                .vault_path
+                .with_file_name(BACKUP_EXPORT_STAGE_FILE_NAME),
+            &encrypted,
+        )
+    }
+
+    pub fn restore_staged_backup(
+        &mut self,
+        master_password: &str,
+    ) -> Result<(), AndroidRuntimeError> {
+        if master_password.is_empty() {
+            return Err(AndroidRuntimeError::InvalidInput);
+        }
+        let encrypted = zeroize::Zeroizing::new(read_vault(
+            &self
+                .vault_path
+                .with_file_name(BACKUP_IMPORT_STAGE_FILE_NAME),
+        )?);
+        let mut candidate = VaultSession::unlock(master_password, &encrypted)?;
+        candidate.sync_reset_after_restore()?;
+        candidate.sync_checkpoint(0)?;
+        let replacement = zeroize::Zeroizing::new(candidate.save()?);
+        write_vault(&self.vault_path, &replacement)?;
+        self.replace_session(candidate);
         Ok(())
     }
 
     pub fn lock(&mut self) {
+        self.autofill_grant = None;
         if let Some(mut session) = self.session.take() {
             session.lock();
         }
+    }
+
+    pub fn sync_vault_id(&self) -> Result<Uuid, AndroidRuntimeError> {
+        self.session
+            .as_ref()
+            .ok_or(AndroidRuntimeError::Locked)?
+            .sync_state()
+            .map(|state| state.vault_id)
+            .map_err(AndroidRuntimeError::from)
+    }
+
+    pub fn sync_authorize_peer(
+        &mut self,
+        peer: &str,
+        fingerprint: &str,
+        enabled: bool,
+    ) -> Result<(), AndroidRuntimeError> {
+        self.mutate_and_commit(|session| session.sync_authorize(peer, fingerprint, enabled))
     }
 
     pub fn list_logins(&self) -> Result<Vec<AndroidLoginSummary>, AndroidRuntimeError> {
@@ -186,6 +323,8 @@ impl AndroidVaultRuntime {
                 username: item.username,
                 url: item.url,
                 has_password: item.has_password,
+                has_totp_secret: item.has_totp_secret,
+                has_recovery_codes: item.has_recovery_codes,
             })
             .collect())
     }
@@ -256,6 +395,41 @@ impl AndroidVaultRuntime {
         })
     }
 
+    pub fn set_login_totp(
+        &mut self,
+        id: &str,
+        secret: Option<String>,
+        clear: bool,
+    ) -> Result<(), AndroidRuntimeError> {
+        let mut secret = zeroize::Zeroizing::new(secret);
+        if clear == secret.is_some() {
+            return Err(AndroidRuntimeError::InvalidInput);
+        }
+        let id = Uuid::parse_str(id).map_err(|_| AndroidRuntimeError::InvalidInput)?;
+        self.mutate_and_commit(|session| {
+            let current = session.item_detail(id)?;
+            session.update_item(LoginItemUpdate {
+                id,
+                title: current.title,
+                username: current.username,
+                password: None,
+                url: current.url,
+                notes: current.notes,
+                folder: current.folder,
+                favorite: current.favorite,
+                totp_secret: std::mem::take(&mut *secret),
+                clear_totp_secret: clear,
+                recovery_codes: None,
+                clear_recovery_codes: false,
+                additional_urls: current.additional_urls,
+                autofill_on_page_load: current.autofill_on_page_load,
+                master_password_reprompt: current.master_password_reprompt,
+                custom_fields: current.custom_fields,
+            })?;
+            Ok(())
+        })
+    }
+
     pub fn delete_login(&mut self, id: &str) -> Result<(), AndroidRuntimeError> {
         let id = Uuid::parse_str(id).map_err(|_| AndroidRuntimeError::InvalidInput)?;
         self.mutate_and_commit(|session| {
@@ -307,8 +481,13 @@ impl AndroidVaultRuntime {
         mutation: impl FnOnce(&mut VaultSession) -> Result<T, VaultError>,
     ) -> Result<T, AndroidRuntimeError> {
         let session = self.session.as_mut().ok_or(AndroidRuntimeError::Locked)?;
+        use sha2::{Digest, Sha256};
+        let disk = read_vault(&self.vault_path)?;
+        if self.persisted_fingerprint.as_ref().is_none_or(|f| Sha256::digest(&disk).as_slice() != f) {
+            return Err(AndroidRuntimeError::Io);
+        }
         let snapshot = session.payload_snapshot()?;
-        let result = mutation(session).map_err(AndroidRuntimeError::from);
+        let result = mutation(session).and_then(|value| { session.sync_checkpoint(lan_sync::now())?; Ok(value) }).map_err(AndroidRuntimeError::from);
         let value = match result {
             Ok(value) => value,
             Err(error) => {
@@ -319,17 +498,30 @@ impl AndroidVaultRuntime {
         let commit = session
             .save()
             .map_err(AndroidRuntimeError::from)
-            .and_then(|bytes| write_vault(&self.vault_path, &bytes));
+            .and_then(|bytes| {
+                write_vault(&self.vault_path, &bytes)?;
+                self.persisted_fingerprint = Some(Sha256::digest(&bytes).into());
+                Ok(())
+            });
         if let Err(error) = commit {
             session.restore_payload_snapshot(snapshot)?;
             return Err(error);
         }
+        self.assist_binding = session.sync_state().ok().map(|s| format!("{}:{}", s.vault_id, s.replica));
+        self.checkpoint_assist_resume();
+        self.publish_sync();
         Ok(value)
     }
 
     fn replace_session(&mut self, candidate: VaultSession) {
         self.lock();
+        use sha2::{Digest, Sha256};
+        self.persisted_fingerprint = read_vault(&self.vault_path).ok().map(|bytes| Sha256::digest(bytes).into());
+        self.assist_binding = candidate.sync_state().ok().map(|s| format!("{}:{}", s.vault_id, s.replica));
         self.session = Some(candidate);
+        self.checkpoint_assist_resume();
+        self.publish_sync();
+        let _ = vaultmesh_sync::SyncRuntime::sync_pump(self);
     }
 }
 
@@ -519,6 +711,236 @@ mod tests {
     }
 
     #[test]
+    fn login_totp_is_core_owned_reauthenticated_and_atomic() {
+        let dir = test_dir("login-totp");
+        let mut runtime = AndroidVaultRuntime::new(&dir).unwrap();
+        runtime.create("master-password").unwrap();
+        runtime
+            .add_login("Login".into(), "user".into(), "item-password".into(), None)
+            .unwrap();
+        let id = runtime.list_logins().unwrap()[0].id.clone();
+        assert!(!runtime.list_logins().unwrap()[0].has_totp_secret);
+        assert_eq!(
+            runtime
+                .copy_login_totp_code(&id, "master-password")
+                .unwrap_err(),
+            AndroidRuntimeError::ValueUnavailable
+        );
+        assert_eq!(
+            runtime
+                .set_login_totp(&id, Some("invalid!".into()), false)
+                .unwrap_err(),
+            AndroidRuntimeError::InvalidInput
+        );
+        assert!(!runtime.list_logins().unwrap()[0].has_totp_secret);
+        runtime
+            .set_login_totp(&id, Some("JBSWY3DPEHPK3PXP".into()), false)
+            .unwrap();
+        assert!(runtime.list_logins().unwrap()[0].has_totp_secret);
+        assert_eq!(
+            runtime.copy_login_totp_code(&id, "wrong").unwrap_err(),
+            AndroidRuntimeError::UnlockFailed
+        );
+        let code = runtime
+            .copy_login_totp_code(&id, "master-password")
+            .unwrap();
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|character| character.is_ascii_digit()));
+
+        runtime
+            .update_login(&id, "Renamed".into(), "user".into(), None, None)
+            .unwrap();
+        assert!(runtime.list_logins().unwrap()[0].has_totp_secret);
+        assert_eq!(
+            runtime
+                .copy_login_password(&id, "master-password")
+                .unwrap()
+                .as_str(),
+            "item-password"
+        );
+
+        let before = fs::read(dir.join(VAULT_FILE_NAME)).unwrap();
+        FAIL_NEXT_WRITE.with(|flag| flag.set(true));
+        assert_eq!(
+            runtime.set_login_totp(&id, None, true).unwrap_err(),
+            AndroidRuntimeError::Io
+        );
+        assert_eq!(fs::read(dir.join(VAULT_FILE_NAME)).unwrap(), before);
+        assert!(runtime.list_logins().unwrap()[0].has_totp_secret);
+        runtime.set_login_totp(&id, None, true).unwrap();
+        assert!(!runtime.list_logins().unwrap()[0].has_totp_secret);
+        runtime.lock();
+        assert_eq!(
+            runtime
+                .copy_login_totp_code(&id, "master-password")
+                .unwrap_err(),
+            AndroidRuntimeError::Locked
+        );
+        runtime.unlock("master-password").unwrap();
+        assert!(!runtime.list_logins().unwrap()[0].has_totp_secret);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn complete_login_fields_preserve_protected_values_and_roll_back() {
+        let dir = test_dir("login-complete");
+        let mut runtime = AndroidVaultRuntime::new(&dir).unwrap();
+        runtime.create("master-password").unwrap();
+        assert!(login_fields::parse_login_extras_json("{\"unknown\":1}").is_err());
+        assert!(login_fields::parse_login_extras_json(&" ".repeat(512 * 1024 + 1)).is_err());
+        let extras_json = serde_json::json!({
+            "notes": "Synthetic note", "folder": "Personal", "favorite": true,
+            "additionalUrls": ["https://secondary.example.test"],
+            "autofillOnPageLoad": false, "masterPasswordReprompt": true,
+            "customFields": [{"label": "account", "value": "synthetic-field"}],
+        })
+        .to_string();
+        runtime
+            .add_login_complete(
+                "Login".into(),
+                "user".into(),
+                "synthetic-password".into(),
+                Some("https://example.test".into()),
+                login_fields::parse_login_extras_json(&extras_json).unwrap(),
+            )
+            .unwrap();
+        let id = runtime.list_logins().unwrap()[0].id.clone();
+        let detail = runtime.login_editor_detail(&id).unwrap();
+        assert_eq!(detail.custom_fields[0].value, "synthetic-field");
+        assert!(
+            !serde_json::to_string(&detail)
+                .unwrap()
+                .contains("synthetic-password")
+        );
+        runtime
+            .set_login_totp(&id, Some("JBSWY3DPEHPK3PXP".into()), false)
+            .unwrap();
+        runtime
+            .set_login_recovery_codes(&id, "1234-5678".into(), false)
+            .unwrap();
+        let before = fs::read(dir.join(VAULT_FILE_NAME)).unwrap();
+        FAIL_NEXT_WRITE.with(|flag| flag.set(true));
+        assert_eq!(
+            runtime
+                .update_login_complete(
+                    &id,
+                    "Changed".into(),
+                    "user".into(),
+                    None,
+                    Some("https://example.test".into()),
+                    login_fields::AndroidLoginExtras::default(),
+                )
+                .unwrap_err(),
+            AndroidRuntimeError::Io
+        );
+        assert_eq!(runtime.list_logins().unwrap()[0].title, "Login");
+        assert_eq!(fs::read(dir.join(VAULT_FILE_NAME)).unwrap(), before);
+
+        let replacement = extras_json.replace("Synthetic note", "Updated note");
+        runtime
+            .update_login_complete(
+                &id,
+                "Changed".into(),
+                "user".into(),
+                None,
+                Some("https://example.test".into()),
+                login_fields::parse_login_extras_json(&replacement).unwrap(),
+            )
+            .unwrap();
+        runtime.lock();
+        runtime.unlock("master-password").unwrap();
+        assert_eq!(
+            runtime.login_editor_detail(&id).unwrap().notes.as_deref(),
+            Some("Updated note")
+        );
+        assert_eq!(
+            runtime
+                .copy_login_password(&id, "master-password")
+                .unwrap()
+                .as_str(),
+            "synthetic-password"
+        );
+        assert!(runtime.list_logins().unwrap()[0].has_totp_secret);
+        assert!(runtime.list_logins().unwrap()[0].has_recovery_codes);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn encrypted_backup_restore_validates_before_atomic_replacement() {
+        let source_dir = test_dir("backup-source");
+        let mut source = AndroidVaultRuntime::new(&source_dir).unwrap();
+        source.create("source-password").unwrap();
+        source
+            .add_login(
+                "Backed up".into(),
+                "user".into(),
+                "synthetic-secret".into(),
+                None,
+            )
+            .unwrap();
+        source.prepare_encrypted_backup().unwrap();
+        let backup = fs::read(source_dir.join(BACKUP_EXPORT_STAGE_FILE_NAME)).unwrap();
+        let recovered = VaultSession::unlock("source-password", &backup).unwrap();
+        assert_eq!(recovered.list_items().unwrap()[0].title, "Backed up");
+        source.lock();
+        assert_eq!(
+            source.prepare_encrypted_backup().unwrap_err(),
+            AndroidRuntimeError::Locked
+        );
+
+        let target_dir = test_dir("backup-target");
+        let mut target = AndroidVaultRuntime::new(&target_dir).unwrap();
+        target.create("target-password").unwrap();
+        target
+            .add_login(
+                "Current".into(),
+                "other".into(),
+                "current-secret".into(),
+                None,
+            )
+            .unwrap();
+        let old_file = fs::read(target_dir.join(VAULT_FILE_NAME)).unwrap();
+        fs::write(target_dir.join(BACKUP_IMPORT_STAGE_FILE_NAME), b"broken").unwrap();
+        assert_eq!(
+            target.restore_staged_backup("source-password").unwrap_err(),
+            AndroidRuntimeError::InvalidVault
+        );
+        assert_eq!(
+            fs::read(target_dir.join(VAULT_FILE_NAME)).unwrap(),
+            old_file
+        );
+        fs::write(target_dir.join(BACKUP_IMPORT_STAGE_FILE_NAME), &backup).unwrap();
+        assert_eq!(
+            target.restore_staged_backup("wrong-password").unwrap_err(),
+            AndroidRuntimeError::UnlockFailed
+        );
+        assert_eq!(target.list_logins().unwrap()[0].title, "Current");
+        FAIL_NEXT_WRITE.with(|flag| flag.set(true));
+        assert_eq!(
+            target.restore_staged_backup("source-password").unwrap_err(),
+            AndroidRuntimeError::Io
+        );
+        assert_eq!(
+            fs::read(target_dir.join(VAULT_FILE_NAME)).unwrap(),
+            old_file
+        );
+        assert_eq!(target.list_logins().unwrap()[0].title, "Current");
+
+        target.restore_staged_backup("source-password").unwrap();
+        assert_eq!(target.list_logins().unwrap()[0].title, "Backed up");
+        assert_ne!(fs::read(target_dir.join(VAULT_FILE_NAME)).unwrap(), backup);
+        target.lock();
+        assert_eq!(
+            target.unlock("target-password").unwrap_err(),
+            AndroidRuntimeError::UnlockFailed
+        );
+        target.unlock("source-password").unwrap();
+        assert_eq!(target.list_logins().unwrap()[0].title, "Backed up");
+        fs::remove_dir_all(source_dir).unwrap();
+        fs::remove_dir_all(target_dir).unwrap();
+    }
+
+    #[test]
     fn failed_login_commit_restores_memory_and_file() {
         let dir = test_dir("login-rollback");
         let mut runtime = AndroidVaultRuntime::new(&dir).unwrap();
@@ -570,6 +992,57 @@ mod tests {
 
         runtime.empty_trash().unwrap();
         assert!(runtime.list_trash().unwrap().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn password_rotation_commits_only_after_atomic_write() {
+        let dir = test_dir("password-rotation");
+        let mut runtime = AndroidVaultRuntime::new(&dir).unwrap();
+        runtime.create("old-vault-password").unwrap();
+        runtime
+            .add_login(
+                "Preserved".into(),
+                "alice".into(),
+                "item-secret".into(),
+                None,
+            )
+            .unwrap();
+        let before = fs::read(dir.join(VAULT_FILE_NAME)).unwrap();
+
+        assert_eq!(
+            runtime
+                .change_master_password("wrong", "new-vault-password")
+                .unwrap_err(),
+            AndroidRuntimeError::UnlockFailed
+        );
+        assert_eq!(fs::read(dir.join(VAULT_FILE_NAME)).unwrap(), before);
+        assert_eq!(runtime.list_logins().unwrap()[0].title, "Preserved");
+
+        FAIL_NEXT_WRITE.with(|flag| flag.set(true));
+        assert_eq!(
+            runtime
+                .change_master_password("old-vault-password", "new-vault-password")
+                .unwrap_err(),
+            AndroidRuntimeError::Io
+        );
+        assert_eq!(fs::read(dir.join(VAULT_FILE_NAME)).unwrap(), before);
+        assert_eq!(runtime.list_logins().unwrap()[0].title, "Preserved");
+
+        runtime
+            .change_master_password("old-vault-password", "new-vault-password")
+            .unwrap();
+        assert_eq!(runtime.list_logins().unwrap()[0].title, "Preserved");
+        runtime.lock();
+        assert_eq!(
+            runtime.unlock("old-vault-password").unwrap_err(),
+            AndroidRuntimeError::UnlockFailed
+        );
+        drop(runtime);
+
+        let mut restarted = AndroidVaultRuntime::new(&dir).unwrap();
+        restarted.unlock("new-vault-password").unwrap();
+        assert_eq!(restarted.list_logins().unwrap()[0].title, "Preserved");
         fs::remove_dir_all(dir).unwrap();
     }
 }

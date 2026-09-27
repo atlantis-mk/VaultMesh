@@ -1,0 +1,36 @@
+schema: "2"
+id: "CHG-2026-057-android-secret-fields"
+title: "Android 服务密钥完整字段编辑"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "服务密钥补充字段与 scopes 跨 JNI 边界且需真机验收"
+requirements:
+  - "REQ-ANDROID-015"
+  - "REQ-ITEM-005"
+tests:
+  - "CT-ANDROID-JNI-013"
+  - "AT-ANDROID-015"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0032"
+context_refs:
+  - "docs/02-scope-matrix.md#Vault 能力"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-015 Compose 服务密钥完整字段编辑"
+  - "docs/03-functional-requirements.md#REQ-ITEM-005 Developer/service secret"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "普通 Secret 显式编辑只返回非值元数据，Passkey 仍排除"
+  - "基础字段与补充字段在一次 core mutation 中提交，保留内部 lifecycle scopes"
+risks:
+  - "scopes 与网站元数据会影响桌面及浏览器匹配策略，须跨端和真机验收"
+next:
+  - "固定编辑详情、完整创建/更新、Compose 字段、Host/contract 与 Debug/Release 构建已通过本地检查"
+  - "arm64 真机验证编辑、锁定、冷启动及跨端匹配"

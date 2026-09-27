@@ -1,8 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { copyRecoveryCode, DesktopRpcError, getEmailOtpCandidates, getLoginDetail, getPasskeysForLogin, getRecoveryCodes, getUnlockHistory, getWorkspaceSnapshot, importRecoveryCodesFile } from "./desktop-rpc";
+import { copyRecoveryCode, DesktopRpcError, getEmailOtpCandidates, getLoginDetail, getPasskeysForLogin, getRecoveryCodes, getUnlockHistory, getWorkspaceSnapshot, importRecoveryCodesFile, pollDesktopEvents } from "./desktop-rpc";
 
 describe("desktop RPC client", () => {
+  it("accepts lock and vault-change events retained across an idle lock and PIN unlock", async () => {
+    const events = [
+      { sequence: 6, type: "vault-locked", occurredAt: "2026-09-18T00:00:00.000Z" },
+      { sequence: 7, type: "vault-changed", occurredAt: "2026-09-18T00:05:00.000Z" },
+    ];
+    const sendMessage = vi.spyOn(browser.runtime, "sendMessage").mockImplementation(async (message) => ({
+      kind: "vaultmesh.rpc-result", version: 2,
+      requestId: (message as unknown as { request: { requestId: string } }).request.requestId,
+      ok: true, result: { sequence: 7, events },
+    }) as never);
+
+    await expect(pollDesktopEvents(0)).resolves.toEqual({ sequence: 7, events });
+    sendMessage.mockImplementation(async (message) => ({
+      kind: "vaultmesh.rpc-result", version: 2,
+      requestId: (message as unknown as { request: { requestId: string } }).request.requestId,
+      ok: true, result: { sequence: 8, events: [{ sequence: 8, type: "unexpected-event", occurredAt: "2026-09-18T00:06:00.000Z" }] },
+    }) as never);
+    await expect(pollDesktopEvents(7)).rejects.toThrow();
+    sendMessage.mockRestore();
+  });
+
   it("rejects malformed or uncorrelated native responses", async () => {
     const sendMessage = vi.spyOn(browser.runtime, "sendMessage").mockResolvedValue({ kind: "vaultmesh.rpc-result", version: 2, requestId: crypto.randomUUID(), ok: true, result: {} } as never);
     await expect(getWorkspaceSnapshot()).rejects.toBeInstanceOf(DesktopRpcError);

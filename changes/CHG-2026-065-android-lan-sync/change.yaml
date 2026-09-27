@@ -1,0 +1,38 @@
+schema: "2"
+id: "CHG-2026-065-android-lan-sync"
+title: "Android 局域网双向与锁定密文同步"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "接入共享同步协议与 Android 前台服务，独立于配对扫描并验证跨端收敛与生命周期边界"
+requirements:
+  - "REQ-LAN-SYNC-001"
+  - "REQ-LAN-PEER-001"
+  - "REQ-ANDROID-021"
+  - "REQ-ANDROID-022"
+tests:
+  - "CT-LAN-SYNC-001"
+  - "CT-LAN-PAIRING-001"
+  - "CT-ANDROID-LAN-PAIRING-001"
+  - "CT-ANDROID-LAN-SYNC-001"
+  - "AT-ANDROID-022"
+adrs:
+  - "ADR-0020"
+  - "ADR-0021"
+  - "ADR-0038"
+  - "ADR-0039"
+context_refs:
+  - "specs/lan-vault-sync.md"
+  - "specs/android-client.md"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+related_changes:
+  - "CHG-2026-064-android-lan-pairing"
+boundaries:
+  - "共享密文 transport 与 cache，不依赖 desktop runtime；Kotlin 拥有 connectedDevice service 和网络权限"
+risks:
+  - "移动系统休眠与 OEM 后台策略可能暂停网络，恢复后必须补齐"
+  - "Android 36 真机与 macOS 共享 runtime 已验证；完整平台验收尚不构成发布就绪"
+next:
+  - "补齐 AT-ANDROID-022 的物理 Wi-Fi 切换、进程终止和 Android 37 本地网络权限拒绝/撤销验收"
+  - "执行 Windows/macOS 打包客户端互通与 Android 签名发布验收"

@@ -1,0 +1,36 @@
+schema: "2"
+id: "CHG-2026-058-android-ssh-fields"
+title: "Android SSH 凭据完整字段编辑"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "SSH 元数据跨 JNI 边界且需真机验收"
+requirements:
+  - "REQ-ANDROID-016"
+  - "REQ-ITEM-003"
+tests:
+  - "CT-ANDROID-JNI-014"
+  - "AT-ANDROID-016"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0033"
+context_refs:
+  - "docs/02-scope-matrix.md#Vault 能力"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-016 Compose SSH 凭据完整字段编辑"
+  - "docs/03-functional-requirements.md#REQ-ITEM-003 SSH credential"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "普通 SSH 显式编辑只返回非认证元数据，桌面托管 alias 继续只读"
+  - "基础字段与补充字段在一次 core mutation 中提交"
+risks:
+  - "SSH 认证值及桌面外部配置所有权需跨端和真机验收"
+next:
+  - "固定详情、完整创建/更新、Compose 字段、Host/contract 与 Debug/Release 构建已通过本地检查"
+  - "arm64 真机验证编辑、锁定、冷启动及跨端字段一致性"

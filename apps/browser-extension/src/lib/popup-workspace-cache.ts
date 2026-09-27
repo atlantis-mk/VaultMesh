@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { workspaceSchema, type WorkspaceSnapshot } from "@/lib/desktop-rpc";
+import { desktopEventBatchSchema, workspaceSchema, type WorkspaceSnapshot } from "@/lib/desktop-rpc";
 
 const workspaceRpcResponseSchema = z.object({
   kind: z.literal("vaultmesh.rpc-result"),
@@ -16,6 +16,14 @@ const statusRpcResponseSchema = z.object({
   requestId: z.string().uuid(),
   ok: z.literal(true),
   result: z.object({ unlocked: z.boolean() }),
+});
+
+const eventsRpcResponseSchema = z.object({
+  kind: z.literal("vaultmesh.rpc-result"),
+  version: z.literal(2),
+  requestId: z.string().uuid(),
+  ok: z.literal(true),
+  result: desktopEventBatchSchema,
 });
 
 export type PopupWorkspaceCacheEntry = {
@@ -49,6 +57,11 @@ export class PopupWorkspaceMemoryCache {
     if (operation === "vault.status") {
       const parsed = statusRpcResponseSchema.safeParse(response);
       if (parsed.success && !parsed.data.result.unlocked) this.clear();
+      return;
+    }
+    if (operation === "events.poll") {
+      const parsed = eventsRpcResponseSchema.safeParse(response);
+      if (parsed.success && parsed.data.result.events.some((event) => event.type === "vault-locked" || event.type === "vault-changed" || event.type === "pairing-revoked" || event.type === "desktop-shutdown")) this.clear();
     }
   }
 }

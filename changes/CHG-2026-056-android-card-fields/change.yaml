@@ -1,0 +1,36 @@
+schema: "2"
+id: "CHG-2026-056-android-card-fields"
+title: "Android 卡片完整字段编辑"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "卡片编辑详情与补充字段跨 JNI 安全边界且需真机验收"
+requirements:
+  - "REQ-ANDROID-014"
+  - "REQ-ITEM-002"
+tests:
+  - "CT-ANDROID-JNI-012"
+  - "AT-ANDROID-014"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0031"
+context_refs:
+  - "docs/02-scope-matrix.md#Vault 能力"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-014 Compose 卡片完整字段编辑"
+  - "docs/03-functional-requirements.md#REQ-ITEM-002 Payment card"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "仅显式编辑读取不含卡号/CVV/PIN 的补充字段，列表继续仅安全摘要"
+  - "完整卡片更新在单次 core mutation 中提交，避免基础字段与补充字段分步不一致"
+risks:
+  - "账单地址和备注会短时进入 Compose 编辑草稿，需检查取消、后台及迟到详情清理"
+next:
+  - "固定卡片编辑详情、完整创建/更新、Compose 表单、Host/contract 与 Debug/Release 构建已通过本地检查"
+  - "arm64 真机验证字段保留、取消、锁定和冷启动"

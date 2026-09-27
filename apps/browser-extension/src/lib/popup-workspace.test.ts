@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { WorkspaceSnapshot } from "./desktop-rpc";
-import { loadCachedPopupWorkspace, loadPopupSuggestionIds, loadPopupWorkspace, popupSessionInvalidation, shouldShowDesktopConnection } from "./popup-workspace";
+import { loadCachedPopupWorkspace, loadPopupSuggestionIds, loadPopupWorkspace, popupEventsRequireRefresh, popupSessionInvalidation, shouldShowDesktopConnection } from "./popup-workspace";
 
 const emptyWorkspace: WorkspaceSnapshot = {
   status: { unlocked: true, hasVault: true, itemCount: 0 },
@@ -82,9 +82,12 @@ describe("popup workspace loading", () => {
 
   it("invalidates the popup when desktop authority is locked, revoked, or stopped", () => {
     expect(popupSessionInvalidation({ unlocked: false }, [])).toBe("locked");
-    expect(popupSessionInvalidation({ unlocked: true }, [{ type: "vault-locked" }])).toBe("locked");
+    expect(popupSessionInvalidation({ unlocked: true }, [{ type: "vault-locked" }])).toBeNull();
     expect(popupSessionInvalidation({ unlocked: true }, [{ type: "pairing-revoked" }])).toBe("unavailable");
     expect(popupSessionInvalidation({ unlocked: true }, [{ type: "desktop-shutdown" }])).toBe("unavailable");
     expect(popupSessionInvalidation({ unlocked: true }, [{ type: "operation-expired" }])).toBeNull();
+    expect(popupSessionInvalidation({ unlocked: true }, [{ type: "vault-changed" }])).toBeNull();
+    expect(popupEventsRequireRefresh([{ type: "vault-changed" }])).toBe(true);
+    expect(popupEventsRequireRefresh([{ type: "vault-locked" }])).toBe(true);
   });
 });

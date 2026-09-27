@@ -6,6 +6,7 @@ pub struct BrowserBrokerUnixListener {
     broker: std::sync::Weak<Mutex<BrowserBrokerCore>>,
     endpoint: PathBuf,
     stopping: Arc<AtomicBool>,
+    wake_writer: std::os::unix::net::UnixStream,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -20,11 +21,23 @@ impl BrowserBrokerUnixListener {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
+        let (wake_reader, wake_writer) = std::os::unix::net::UnixStream::pair()?;
+        wake_reader.set_nonblocking(true)?;
+        wake_writer.set_nonblocking(true)?;
         let stopping = Arc::new(AtomicBool::new(false));
         let worker_stopping = Arc::clone(&stopping);
         let owned_broker = Arc::downgrade(&broker);
         let thread = thread::spawn(move || {
             while !worker_stopping.load(Ordering::Acquire) {
+                // Block in poll() instead of sleeping between nonblocking
+                // accepts: macOS App Nap throttles timers of a background app,
+                // which previously left native-host requests queued for minutes.
+                use std::os::fd::AsFd;
+                match crate::socket_wait::wait_readable(listener.as_fd(), Some(&wake_reader), None) {
+                    Ok(crate::socket_wait::Readiness::Ready) => {}
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         // Accepted sockets may inherit O_NONBLOCK from the
@@ -59,9 +72,7 @@ impl BrowserBrokerUnixListener {
                             let _ = stream.write_all(&encoded);
                         }
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
                     Err(_) => break,
                 }
             }
@@ -70,12 +81,14 @@ impl BrowserBrokerUnixListener {
             broker: owned_broker,
             endpoint,
             stopping,
+            wake_writer,
             thread: Mutex::new(Some(thread)),
         })
     }
 
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
+        let _ = (&self.wake_writer).write(&[1]);
         if let Ok(mut thread) = self.thread.lock()
             && let Some(thread) = thread.take()
         {

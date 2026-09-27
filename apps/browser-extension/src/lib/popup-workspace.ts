@@ -7,8 +7,11 @@ import {
   workspaceSchema,
   type DesktopState,
   type FillEvent,
+  type pollDesktopEvents,
   type WorkspaceSnapshot,
 } from "@/lib/desktop-rpc";
+
+type PopupEvent = Pick<Awaited<ReturnType<typeof pollDesktopEvents>>["events"][number], "type">;
 
 type PopupWorkspaceDependencies = {
   getStatus: typeof getDesktopStatus;
@@ -115,9 +118,13 @@ export function shouldShowDesktopConnection(state: DesktopState, loading: boolea
 
 export function popupSessionInvalidation(
   status: { unlocked: boolean },
-  events: Array<{ type: "vault-locked" | "pairing-revoked" | "operation-expired" | "desktop-shutdown" }>,
+  events: PopupEvent[],
 ): Extract<DesktopState, "locked" | "unavailable"> | null {
-  if (!status.unlocked || events.some((event) => event.type === "vault-locked")) return "locked";
+  if (!status.unlocked) return "locked";
   if (events.some((event) => event.type === "pairing-revoked" || event.type === "desktop-shutdown")) return "unavailable";
   return null;
+}
+
+export function popupEventsRequireRefresh(events: PopupEvent[]): boolean {
+  return events.some((event) => event.type === "vault-locked" || event.type === "vault-changed");
 }

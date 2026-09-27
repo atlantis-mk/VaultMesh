@@ -78,6 +78,7 @@ export type Operation =
   | "biometric.status" | "biometric.enable" | "biometric.disable" | "biometric.unlock" | "pin.status" | "pin.enable" | "pin.disable" | "pin.unlock" | "security.settings.get" | "security.settings.update"
   | "events.poll" | "browser.pairing.status" | "browser.pairing.revoke" | "confirmation.request"
   | "browser.autofill.candidates" | "browser.autofill.profile" | "browser.autofill.execute" | "browser.card.capture-status" | "browser.login.password-changed" | "browser.fill.record" | "browser.fill.history" | "browser.fill.request"
+  | "device.assist.capabilities" | "device.assist.start" | "device.assist.poll" | "device.assist.select" | "device.assist.finish" | "device.assist.cancel"
   | "email.otp.watch" | "email.otp.poll" | "email.otp.candidates" | "email.otp.fill"
   | "passkeys.create" | "passkeys.get"
   | "items.list" | "items.detail" | "items.add" | "items.update" | "items.delete" | "items.copy-username" | "items.copy-password" | "items.copy-totp" | "items.recovery-codes" | "items.copy-recovery-code" | "items.recovery-codes.import-file" | "items.trash.list" | "items.trash.restore" | "items.trash.purge" | "items.trash.empty" | "items.history.list" | "items.history.restore" | "items.history.clear"
@@ -172,8 +173,10 @@ export async function getEmailOtpCandidates(topOrigin: string): Promise<EmailOtp
 export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   return workspaceSchema.parse(await desktopRpc("vault.workspace"));
 }
+export const desktopEventBatchSchema = z.object({ sequence: z.number().int().nonnegative(), events: z.array(z.object({ sequence: z.number().int(), type: z.enum(["vault-locked", "vault-changed", "pairing-revoked", "operation-expired", "desktop-shutdown"]), occurredAt: z.string() })) });
+
 export async function pollDesktopEvents(after: number) {
-  return z.object({ sequence: z.number().int().nonnegative(), events: z.array(z.object({ sequence: z.number().int(), type: z.enum(["vault-locked", "pairing-revoked", "operation-expired", "desktop-shutdown"]), occurredAt: z.string() })) }).parse(await desktopRpc("events.poll", { after }));
+  return desktopEventBatchSchema.parse(await desktopRpc("events.poll", { after }));
 }
 
 export async function getLoginDetail(id: string): Promise<LoginDetail> { return loginDetailSchema.parse(await desktopRpc("items.detail", { id })); }

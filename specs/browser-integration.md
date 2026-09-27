@@ -16,13 +16,6 @@
 
 ## 开发身份与 host
 
-Bitwarden 实验副本必须使用自身 `development-identity.json` 固定开发身份和
-`com.vaultmesh.bitwarden.dev` Host，与现有 WXT Host 并存。专用 Host 配置、macOS socket /
-Windows pipe、配对/PIN/生物识别凭据和 Broker runtime handle 必须隔离；禁止复用 WXT dev
-脚本中重置旧配对的步骤。只有显式 `VAULTMESH_BITWARDEN_DEVELOPMENT=1` 的 debug desktop
-才能启动该 listener。Host 注册必须由用户显式运行专用脚本；只能写入该开发身份的注册项，
-不得替换现有 Host。公开开发 key 只用于固定 ID，不作为秘密、商店身份或配对证明。
-
 macOS 集成开发使用 `pnpm browser:dev`。该命令必须编排仓库的 `pnpm tauri:dev` 与 `pnpm extension:dev`，不得启动 `/Applications/VaultMesh.app` 代替 Tauri 开发运行时。命令必须先构建当前 workspace 的 debug Rust native host，等待 Tauri dev Broker 就绪并完成 Host 往返探测，再启动 WXT。
 
 WXT 必须使用固定的专用 development profile；Host manifest 必须同时安装到该 profile 的 `NativeMessagingHosts`，不能依赖 WXT 临时 profile 或普通浏览器 profile。Extension key 与 native-host `allowed_origins` 必须派生同一固定 ID。任一开发子进程失败、退出或收到 Ctrl+C 时，根命令必须回收 Tauri、WXT、开发浏览器和 debug Host，不得留下后台进程。
@@ -66,14 +59,13 @@ Native Messaging 使用浏览器特定 manifest，不能共享一份宽松 allow
 - Import/SSH content 保持在 expiring main-process session，只向扩展返回 opaque ID 和安全 preview；response 不含 local path。
 - 普通 list/detail metadata 必须省略 protected value。Login `items.detail` 因包含 custom-field value，明确分类为 fresh-gesture `pageDisclosure`，不是普通 metadata；其 response 只用于当前 popup 操作，不得进入 extension storage、持久化 UI state、日志或 crash data。
 - Lock、disconnect、revoke、shutdown、expiry、navigation、page hide/unload 清除相关 pending state。
+- Popup 事件轮询必须识别 Broker 的 `vault-changed` 并刷新当前已授权的安全摘要；已有锁定事件在重新解锁后可以作为历史游标读取，不能当作传输故障。
 - Version mismatch 返回 `update-required`，禁止 downgrade。
 - Tauri desktop handle 与 browser handle 必须分离；任一 surface 的 unlock/lock 不自动改变
   另一 surface。Rust route/policy 必须与本规格上方的 TypeScript owner 做可执行 parity 校验；
   未覆盖的 operation 必须 fail closed，不能声称 parity。
 
 ## Extension 偏好与瞬态状态
-
-实验性 Bitwarden 副本的 UI 迁移范围必须遵循 Scope Matrix 的桌面集中裁剪，不新增 Vault 备份/恢复、批量文件导入或 SSH 扫描导入入口，也不为这些工作流扩大文件对话框、隐藏草稿或 RPC 能力。既有桌面和原插件的兼容契约不因 UI 裁剪而删除；下述恢复码编辑辅助仍遵循单独的既有约束。
 
 Extension local storage 只可以保存 schema-validated、renderer-safe 的用户偏好：生成器最后类型与
 四类生成参数、插件锁定策略，以及按 exact origin 记住的 opaque Login ID。桌面安全设置、PIN、
@@ -85,15 +77,6 @@ Extension local storage 只可以保存 schema-validated、renderer-safe 的用�
 未知版本或不可读的偏好必须回落到安全默认值，不能阻止生成、discovery 或显式 fill。
 
 ## Recovery-code 文件导入
-
-实验副本使用独立编辑窗口和两阶段 `items.recovery-codes.import-file` 契约。Background 创建
-并登记精确 window/tab/extension URL 后才接受该窗口的 RPC；直接打开、复制 URL、导航或
-worker 重启不得继承登记。窗口只能保存组件内草稿，不得由 background 或 storage 接管。
-原生对话框造成的隐藏例外最多 45 秒且不延长原编辑截止时间；其余失效条件保持不变。
-准备阶段返回代码、basename、保留状态和短期不透明清理句柄，路径与文件摘要只由桌面持有。
-清理句柄只能在 Login 保存成功后使用，使用前消费、过期或撤销即失效；删除仍需原生确认
-并通过原文件摘要复核。代码和句柄不跨窗口迁移；对话框取消或结果迟到必须清除草稿并保留源文件。
-既有无 phase 的调用保持原兼容语义；实验副本不得调用该立即删除路径。
 
 插件 Login 编辑器可在用户明确点击后调用 `items.recovery-codes.import-file`。该 operation 必须分类为需要 browser unlock、fresh gesture 和 command-bound one-use confirmation 的 system-dialog；在打开文件框前，Tauri platform 必须恢复、显示并聚焦 `main` 窗口，然后将文件选择框和删除确认框都绑定为该窗口的原生子对话框。无法取得或聚焦主窗口时必须 fail closed，不得在浏览器后方打开无 parent 对话框。文件选择、有界 UTF-8 读取、格式识别、删除确认、摘要重验和删除全部由 Tauri Rust platform 执行。
 
@@ -127,28 +110,9 @@ Content 与 Rust 字段排除词必须共享 `apps/tauri-desktop/src/shared/auto
 
 Popup 显式选择调用 `browser.autofill.execute`；Tauri Rust broker 在返回 short-lived one-use assignment 前 revalidate item/document。Card 必须验证 current master password。Legacy `browser.fill.request` 可以打开 desktop approval dialog，但不是当前 popup selection 主路径。所有 fill 都禁止 submit。
 
-Bitwarden 实验副本的 popup Login 填充必须先使用原生 collector 和 script generator 生成无值字段计划，
-通过同一 execute 操作的 `nativeLoginPlan` 绑定 handle 与来源；契约由共享
-`browser-native-login-plan.ts` 与 Rust parser 拥有。显式分支要求 fresh gesture、selection、Login、
-单个经浏览器重验的目标 frame，禁止未知来源、缺失或重复 handle 及旧映射回退。页面现有值只在
-content 内转换成 empty bit；不得通过 discovery 传出。原生 executor 必须消费本地引用后逐动作及
-最终写入前验证 URL/document、节点身份、form/parent 归属、可见性、字段语义及 expiry；页面修改、
-锁定或撤销后的迟到响应必须丢弃。`browser.autofill.profile` 只能返回所选 Login 的规划元数据，
-自定义字段只含索引和名称，不含值；TOTP 使用固定六位规划标记，返回完整 code 或绑定位置的单个字符，
-不得向扩展披露 seed。OTP 必须为空且不能覆盖；自定义来源必须同时匹配桌面端当前索引与名称。
-不同 frame 分别 collection/execute/apply，任何页面导航必须中止相关计划，禁止向其他 frame 转发 assignment。
-自动提交始终关闭；自动和页内流程不得通过原生云服务回退。副本运行入口只能启动独立的原生
-script generator 与 VaultMesh RPC，不得 bootstrap 上游账号、SDK Vault、云同步或 analytics。
-修改密码必须在成功的显式当前密码写入后，按原生字段角色和原表单归属使用本地生成器及原生
-executor 填入空的新密码/确认框；Web Crypto 熵源不得使用带偏差的取模或 Math.random。
-
 至少一个 assignment 成功后只记录 encrypted bounded audit：time、origin、item kind/ID/title、field count。禁止 field name/value。
 
-实验副本的 card/identity 使用独立的无值来源计划，复用原生字段匹配。计划必须限定单 frame、显式选择及空字段，跨源必须确认；card 每次验证主密码。Rust 按所选类型校验封闭来源、control、handle、期限及来源绑定，只返回逐字段值，不返回整条 CipherView。content 只可在已批准的同一字段复用原生有效期、国家/地区和 select 格式化；选项改变、未知来源、非空字段、导航、取消、锁定及重放必须拒绝。
-
-SSH 与普通服务 Secret 必须使用同一封闭无值计划，但不得借用 Login/card/identity 来源。SSH 公钥与同真实表单标题复用上游 SSH 分支；无 form 的通用标题不授予资格。VaultMesh 特有 SSH 账号/私钥/口令及具体 Secret 类型通过原生 custom-field 精确匹配接入，别名由适配器代码拥有，禁止宽泛 key/token/password 子串或页面场景回退。歧义来源必须拒绝，原生 Login 隐式密码与捕获不得占用这些字段。两类只能显式填入 HTTPS 空文本类控件，数字控件只允许 SSH port；原生执行器仍重验原节点与期限。桌面必须校验 Secret 具体 kind、排除 Passkey、执行当前主密码二次验证，并仅解密计划请求的来源；已批准值不得重新规划其他控件。
-
-生成器复制必须通过解锁且 fresh-gesture 的有界桌面操作写入过期清理剪贴板，仅返回清理期限。插入必须来自可信 popup，绑定当前 tab/frame/document 及短期原生角色目标；密码/口令只允许可靠的空新密码和同簇确认框，用户名只允许空用户名字段；UUID 使用用户显式选择的空文本目标。结果不得写入后台缓存或持久化存储，取消、隐藏、锁定、超时与迟到响应必须清理且不得自动重试。
+生成器复制必须通过解锁且 fresh-gesture 的有界桌面操作写入过期清理剪贴板，仅返回清理期限。插入必须来自可信 popup，绑定当前 tab/frame/document 及短期合格空目标；密码/口令只允许可靠的空新密码和同簇确认框，用户名只允许空用户名字段；UUID 使用用户显式选择的空文本目标。结果不得写入后台缓存或持久化存储，取消、隐藏、锁定、超时与迟到响应必须清理且不得自动重试。
 
 ## Email OTP 候选与填充
 
@@ -161,8 +125,6 @@ Content script 只在可信用户点击语义明确的获取/发送/重发验证
 ## Capture
 
 Submission observation 可以对新生成或用户编辑的 login/card/identity/SSH/Secret 显示 Save/Ignore。只有用户确认才写入；观察到 submit 不等于 server success。未修改的 autofilled password 不得重复 capture。
-
-实验副本的 card/identity 捕获必须使用原生角色和同簇归属；只有用户编辑过的支持字段可成为候选。类型歧义或重复来源冲突必须拒绝。Save 必须绑定来源 frame、URL、短期单次 nonce 和同类型更新候选；更新只替换明确捕获的字段，保留其余元数据、未读取秘密和多值身份集合，Ignore 或结果不确定不得执行或重试写入。
 
 SSH/Secret 捕获复用相同来源匹配与 Save 生命周期，且仅限 HTTPS；SSH account/key 混合来源必须拒绝，缺少必填主机/账号或密钥不得虚构。Secret 的具体类型必须在确认 UI 明示，多个受保护类型来源必须拒绝，更新必须重验现有 kind 且不能转换。新 Secret 的 website 绑定捕获 origin，默认不要求二次验证；更新保留 website、scopes 及二次验证。捕获只保存用户实际编辑过的字段，未编辑受保护值不得重新读取或清除。
 
@@ -192,8 +154,6 @@ TOTP URI 只可在本次 content response、当前 popup 组件 state 和 deskto
 日志、通知正文或非秘密 settings。关闭 popup、取消编辑、lock、disconnect、failure 或保存完成
 后不得保留额外副本。已有 OTP discovery/fill assignment 行为不变。
 
-实验性 Bitwarden 副本的扫描授权只包含 request/tab/frame/URL/expiry；每个 frame 的开始与完成校验各消费一次。可见图像、canvas、无外部资源的 SVG 和页面显式 QR 属性可参与一次有界解码；不得读取表单现有值或因解码获取远程 SVG 资源。结果由 content 直接返回发起的 toolbar popup，不进入后台缓存。候选最多保留 30 秒，选择不延长 Login 草稿原期限；独立编辑窗口不能扫描自身或隐式选择其他窗口网页。
-
 ## Passkey
 
 Chromium 127+ WebAuthn proxy 把 ES256 credential 存为 protected `authenticator-key` secret，并在 active desktop privileged process 签名。创建或导入时 Extension 可以提供当前 origin 记住的默认 Login opaque ID，但 Tauri broker 必须按 RP/origin 重新验证后才能写入关联；无有效默认值时可以唯一用户名匹配，仍不确定时表示为 Passkey-only Login，不进入普通 Secret/密钥分类。每次 registration/assertion 必须显示 RP/origin/account context 的 native confirmation。Extension lock detach proxy。Conditional mediation、largeBlob/PRF 不在当前范围。
@@ -211,3 +171,7 @@ pnpm tauri:test
 ```
 
 Public RPC operation 缺少 policy、dispatcher 或 extension workflow route 时 parity 必须失败。
+
+## 已配对设备填充互通
+
+REQ-DEVICE-ASSIST-001 / REQ-ANDROID-026 与 [独立互通规格](../specs/device-fill-assist.md) 定义逐设备一次授权、锁屏号码/短信交付及短时秘密生命周期。既有禁止 RECEIVE_SMS 的条款限于手机本地 Autofill；独立互通服务仅在用户主动启用后可以请求 RECEIVE_SMS，不使用 READ_SMS。短信正文仅本机瞬态解析，验证码不进入 Vault、备份、日志、同步或普通 DTO。系统限制自动读取时使用显式手动交付。

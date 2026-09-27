@@ -1,0 +1,29 @@
+schema: "2"
+id: "CHG-2026-072-android-sms-otp-autofill"
+title: "Android 短信验证码自动填充"
+type: "security"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "新增 Google Play 服务短信验证码授权与 Autofill 交付，跨越短信凭据和生产依赖边界"
+requirements:
+  - "REQ-ANDROID-025"
+tests:
+  - "CT-ANDROID-AUTOFILL-004"
+  - "AT-ANDROID-025"
+adrs:
+  - "ADR-0046"
+context_refs:
+  - "docs/02-scope-matrix.md#客户端与平台"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-025 Android 短信验证码自动填充"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md#系统自动填充与识别保存"
+related_changes: []
+boundaries:
+  - "仅系统指定的 Autofill 服务通过 Google Play SMS Code Autofill API 取得一次性验证码；不申请短信读取权限"
+  - "验证码仅交付当前显式识别的验证码字段，不能进入 Vault、日志、普通状态或登录保存流程"
+risks:
+  - "Google Play 服务不存在、权限被拒或目标应用自行使用 SMS Retriever 时不得显示不可用建议"
+  - "跨应用验证码字段和短信结果可能错配，必须使用系统字段与目标身份及短期一次性请求绑定"
+next:
+  - "实现 OTP 字段识别、授权接收与一次性 Dataset，并完成真机验证码验收"

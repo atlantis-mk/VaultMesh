@@ -36,6 +36,7 @@ export const BROWSER_EXTENSION_WORKFLOWS: readonly BrowserExtensionWorkflow[] = 
   { id: 'ssh-key-scan', route: 'popup:settings', commands: ['ssh.scan', 'ssh.scan.commit', 'ssh.scan.cancel'], requiresConfirmation: true },
   // The experimental Bitwarden popup uses the same execute/audit workflow with a bounded nativeLoginPlan.
   { id: 'browser-autofill', route: 'popup:vault', commands: ['browser.autofill.candidates', 'browser.autofill.profile', 'browser.autofill.execute', 'browser.card.capture-status', 'browser.login.password-changed', 'browser.fill.record', 'browser.fill.history', 'browser.fill.request'], requiresConfirmation: true },
+  { id: 'device-assist', route: 'popup:vault', commands: ['device.assist.capabilities', 'device.assist.start', 'device.assist.poll', 'device.assist.select', 'device.assist.finish', 'device.assist.cancel'], requiresConfirmation: false },
   { id: 'email-otp', route: 'popup:vault', commands: ['email.otp.watch', 'email.otp.poll', 'email.otp.candidates', 'email.otp.fill'], requiresConfirmation: false },
   { id: 'passkeys', route: 'popup:vault', commands: ['passkeys.create', 'passkeys.get'], requiresConfirmation: false },
 ];

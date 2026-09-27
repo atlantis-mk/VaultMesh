@@ -1,0 +1,36 @@
+schema: "2"
+id: "CHG-2026-053-android-password-health"
+title: "Android 密码健康报告"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "密码健康安全投影跨固定 JNI 边界且平台展示需真机验收"
+requirements:
+  - "REQ-ANDROID-010"
+  - "REQ-ITEM-001"
+tests:
+  - "CT-ANDROID-JNI-010"
+  - "AT-ANDROID-010"
+adrs:
+  - "ADR-0021"
+  - "ADR-0022"
+  - "ADR-0028"
+context_refs:
+  - "docs/02-scope-matrix.md#Vault 能力"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-010 Compose 密码健康"
+  - "docs/03-functional-requirements.md#REQ-ITEM-001 Login"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "固定 JNI 调用 core 密码健康判定，只投影分数及对应 Login ID，不返回密码、哈希或候选"
+  - "报告只在已解锁进程内按用户动作读取，锁定、后台、切换时清除"
+risks:
+  - "弱密码和过期规则以 core 当前规则为准，Android 不复制算法；大 Vault 的计算与展示需平台性能验收"
+next:
+  - "固定 JNI 健康报告、Compose 用户主动查看、Host/contract 测试和 Debug/Release 构建已通过本地检查"
+  - "arm64 真机验证报告、条目对应、后台清理及大 Vault 响应"

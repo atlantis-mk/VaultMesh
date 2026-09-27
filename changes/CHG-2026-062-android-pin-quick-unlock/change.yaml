@@ -1,0 +1,33 @@
+schema: "2"
+id: "CHG-2026-062-android-pin-quick-unlock"
+title: "Android PIN 快捷解锁"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "Keystore 设备秘密与 PIN 失败限制跨秘密和平台边界且需真机验收"
+requirements:
+  - "REQ-ANDROID-020"
+tests:
+  - "CT-ANDROID-JNI-018"
+  - "AT-ANDROID-020"
+adrs:
+  - "ADR-0021"
+  - "ADR-0037"
+context_refs:
+  - "docs/02-scope-matrix.md#客户端与平台"
+  - "docs/03-functional-requirements.md#REQ-ANDROID-020 Compose PIN 快捷解锁"
+  - "docs/04-architecture.md#Android 边界"
+  - "docs/06-security-privacy.md#Android 边界"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+  - "specs/android-client.md"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "Keystore 仅封存设备秘密；PIN/设备秘密只经固定 JNI 输入 Rust，Vault Key 保留在 core"
+  - "Rust 原子持久化五次失败限制并由 core 验证当前 Vault 后发布解锁"
+risks:
+  - "Keystore 可用性、失败计数和后台竞态需 arm64 真机验收"
+next:
+  - "arm64 真机 Debug APK 已确认生物识别取消后显示单一 PIN 界面和剩余 5 次、正确 PIN 解锁、切换到主密码、进程重启后重新验证；独立缓存 Vault 的 PIN 五次限制 AndroidTest 通过"
+  - "继续用独立 Debug Vault 验证 PIN 设置/确认、错误 PIN 到五次锁定后的主密码重置、后台取消、Keystore 失效、关闭和备份恢复，完成 AT-ANDROID-020"

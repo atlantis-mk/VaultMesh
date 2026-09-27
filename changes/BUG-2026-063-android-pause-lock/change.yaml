@@ -1,0 +1,27 @@
+schema: "2"
+id: "BUG-2026-063-android-pause-lock"
+title: "Android 离开前台时及时锁定"
+type: "bug"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "真机复现快速 Home 往返在 onPause 已发生而 onStop 尚未发生时保留解锁会话；修复生命周期锁定边界并完成设备验收"
+requirements:
+  - "REQ-ANDROID-001"
+tests:
+  - "CT-ANDROID-JNI-001"
+  - "AT-ANDROID-001"
+adrs:
+  - "ADR-0021"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-ANDROID-001 Compose 客户端 Vault 生命周期"
+  - "specs/android-client.md#Lifecycle 与平台策略"
+  - "docs/07-test-release-plan.md#GATE-3A Android runtime"
+related_changes:
+  - "CHG-2026-047-android-compose-client"
+boundaries:
+  - "仅调整 Activity 离开前台时的锁定触发时机，不变更 JNI、Vault 格式或授权所有权"
+risks:
+  - "onPause 可能由系统对话框触发；文档选择和生物识别流程必须保持封闭失败与可恢复解锁"
+next:
+  - "onPause 回归、完整真机仪器化测试和快速 Home 往返已通过；继续复测文档选择与生物识别/PIN 快捷解锁，确认系统界面触发暂停时仍可安全回退"

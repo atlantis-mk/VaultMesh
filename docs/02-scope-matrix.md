@@ -18,7 +18,7 @@
 | 远程 MCP、云端 Agent、常驻网络监听 broker | Out | Out | 不引入 VaultMesh 服务端、远程 bearer 管理面或端口映射 |
 | SwiftUI/AppKit client | Out | N/A | 产品源码已移除；历史 contract 证据保留在 Rejected Change |
 | WinUI 3 client | N/A | Out | reserved source root 已移除 |
-| Android Compose client | N/A | N/A | Partial；`CHG-2026-047` 实施 create/unlock/status/lock、app-private storage 与 lifecycle lock；Autofill、Credential Manager、Passkey、LAN 后台同步、导入导出和 quick unlock 暂不属于首切片 |
+| Android Compose client | N/A | N/A | Partial；`CHG-2026-047` 至 `CHG-2026-062` 逐步实施本地 Vault、Login/Card/Secret/SSH/Identity 字段编辑、主密码轮换、受保护复制与查看、历史、TOTP、备份恢复、密码健康、Login 恢复码及生物识别/PIN 快捷解锁；直接实现本地生成器。`CHG-2026-064` 扩展与桌面互通的显式局域网发现和配对；`CHG-2026-065` 接入独立局域网同步服务。Agent 工作流不纳入 Android；`CHG-2026-066` 接入系统 Autofill 与登录识别保存，`CHG-2026-069` 增加本机号码用户名候选，`CHG-2026-070` 增加锁定态加密候选预览与先选后授权，`CHG-2026-072` 增加经系统授权的短信验证码字段填充；Credential Manager、Passkey 和其他导入仍需分别建立受控切片与平台验收。format 3 升级按 `NFR-COMPAT-001` 仍仅由 desktop 主密码入口执行 |
 | Linux/iOS/web client | Out | Out | 不在当前范围 |
 
 ## Vault 能力
@@ -45,8 +45,8 @@
 | 能力 | 状态 |
 | --- | --- |
 | 固定 ID 配对、独立 unlock/lock、撤销 | Required |
-| Popup 管理 Vault workflow | Required；实验性 Bitwarden 副本按下列桌面集中范围裁剪 |
-| 实验性 Bitwarden 副本的 Vault 备份/恢复、批量文件导入、SSH 扫描导入入口 | Out；由桌面端完成，不计入插件迁移缺口；不移除既有桌面/原插件兼容 RPC |
+| Popup 管理 Vault workflow | Required；由现有 WXT 扩展承担 |
+| Bitwarden 浏览器实验副本 | Out；对接风险未消除，源码已移出当前仓库，不属于发布或验收范围 |
 | Popup Login 编辑的受控恢复码文件导入 | Required |
 | Login/card/identity/secret/SSH 显式填充 | Required |
 | 策略控制的 login/OTP page-load fill | Required |
@@ -54,7 +54,8 @@
 | 插件 popup 内用户主动触发的 TOTP QR 识别与附加到 Login | Required |
 | Save/Ignore capture | Required |
 | Chromium 127+ ES256 Passkey proxy | Required |
-| 自动表单提交、SMS OTP、conditional mediation、largeBlob/PRF | Out |
+| 已授权 Android 手机号码与 SMS OTP 显式填充 | Required；REQ-DEVICE-ASSIST-001，支持 HTTP(S) 网页的电脑显式点选填充；号码授权后本地持久注册，短信认证推送后各电脑两分钟内本地使用，受 Android 系统接收能力限制，支持手动交付回退；用户保存互通开关后允许 Vault 锁定恢复，系统生命周期与开关语义见 REQ-ANDROID-026 |
+| 自动表单提交、conditional mediation、largeBlob/PRF | Out |
 | Firefox MV2 extension（Passkey proxy 除外） | Required；由 `CHG-2026-036` 推进双浏览器 ZIP 与 Native Host 发布验收 |
 | Safari extension | Out |
 | 复用 Browser 配对/session 作为 Agent 授权 | Out |

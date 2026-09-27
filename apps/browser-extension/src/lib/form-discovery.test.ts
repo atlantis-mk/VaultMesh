@@ -397,6 +397,34 @@ describe("discoverFields", () => {
     expect(values).toEqual(["A", "Ad", "Ada"]);
   });
 
+  it("classifies every secret subtype field without recasting its surrounding form", () => {
+    const labels = ["Authenticator key", "Database connection string", "Recovery codes", "Certificate PEM", "Software license", "Identity document", "Secure note", "Wallet seed phrase", "Other secret"];
+    document.body.innerHTML = labels.map((label, index) => `<form><label for="s${index}">${label}</label><textarea id="s${index}"></textarea></form>`).join("")
+      + `<form><label for="name">Full name</label><input id="name"><label for="phone">Phone</label><input id="phone" type="tel"><label for="passport">Passport number</label><input id="passport"></form>`
+      + `<form><label for="gift">Gift certificate code</label><input id="gift"></form>`;
+    document.querySelectorAll<HTMLElement>("input, textarea").forEach(makeVisible);
+    expect(labels.filter((_, index) => classifyControl(document.querySelector(`#s${index}`)!) !== "secret")).toEqual([]);
+    expect(classifyControl(document.querySelector("#passport")!)).toBeNull();
+    expect(classifyControl(document.querySelector("#name")!)).toBe("identity");
+    expect(classifyControl(document.querySelector("#phone")!)).not.toBe("secret");
+    expect(classifyControl(document.querySelector("#gift")!)).not.toBe("secret");
+  });
+
+  it("treats whitespace-only markup content as empty and replaces it", async () => {
+    document.body.innerHTML = `<textarea id="secret">
+      </textarea>`;
+    makeVisible(document.querySelector<HTMLElement>("#secret")!);
+    const { handles, descriptors } = discoverFields(document);
+    const secret = descriptors.find((field) => field.id === "secret")!;
+    expect(secret.isEmpty).toBe(true);
+    const result = await applyAssignments({
+      documentId: "953370ec-4dc7-4c77-a6e0-f2a4f6e37f03", currentOrigin: "https://example.test", fields: handles,
+      message: { kind: "vaultmesh.apply-assignments", requestId: "a5370ec1-4dc7-4c77-a6e0-f2a4f6e37f03", documentId: "953370ec-4dc7-4c77-a6e0-f2a4f6e37f03", frameOrigin: "https://example.test", expiresAt: new Date(Date.now() + 10_000).toISOString(), assignments: [{ handle: secret.handle, value: "synthetic", overwrite: false }] },
+    });
+    expect(result.results.map((entry) => entry.status)).toEqual(["filled"]);
+    expect(document.querySelector<HTMLTextAreaElement>("#secret")!.value).toBe("synthetic");
+  });
+
   it("clears stale handle maps without filling a replacement document", async () => {
     document.body.innerHTML = `<input id="email">`;
     makeVisible(document.querySelector("input")!);
@@ -531,5 +559,30 @@ describe("discoverFields", () => {
     const result = await pending;
     expect(result).toEqual({ status: "stale-document", results: [] });
     expect(input.value).toBe("");
+  });
+});
+
+
+describe("CT-DEVICE-ASSIST-002 final device assignment", () => {
+  it("fills original empty fields and immediately rejects hidden, changed, or edited targets", async () => {
+    for (const change of ["none", "hidden", "replacement", "input", "password"]) {
+      document.body.innerHTML = '<input autocomplete="one-time-code" id="sms">';
+      const input = document.querySelector<HTMLInputElement>("input")!;
+      makeVisible(input);
+      const {handles, descriptors} = discoverFields(document);
+      if (change === "hidden") input.style.display = "none";
+      if (change === "replacement") input.replaceWith(input.cloneNode());
+      if (change === "input") input.value = "user-input";
+      if (change === "password") input.type = "password";
+      const documentId = crypto.randomUUID();
+      const result = await applyAssignments({documentId, fields: handles, currentOrigin: "https://example.test", message: {
+        kind: "vaultmesh.apply-assignments", requestId: crypto.randomUUID(), documentId, frameOrigin: "https://example.test",
+        expiresAt: new Date(Date.now()+10000).toISOString(), deviceAssistKind: "sms",
+        assignments: [{handle: descriptors[0].handle, value: "123456", overwrite: false}],
+      }});
+      expect(result.status).toBe(change === "none" ? "completed" : "stale-document");
+      if (change === "none") expect(input.value).toBe("123456");
+      else expect(input.value).not.toBe("123456");
+    }
   });
 });

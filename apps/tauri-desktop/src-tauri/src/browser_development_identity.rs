@@ -19,7 +19,7 @@ mod tests {
     #[test]
     fn development_identity_matches_public_key_and_never_aliases_the_existing_host() {
         let identity: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../bitwarden-browser/development-identity.json"
+            "../tests/fixtures/browser-development-identity.json"
         ))
         .unwrap();
         assert_eq!(identity["hostName"], HOST_NAME);

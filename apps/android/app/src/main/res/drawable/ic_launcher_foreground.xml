@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Keep the transparent PNG at 84% of the adaptive icon's visible viewport,
+     leaving a small white margin around the artwork. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:insetLeft="22%"
+    android:insetTop="22%"
+    android:insetRight="22%"
+    android:insetBottom="22%">
+    <bitmap
+        android:src="@mipmap/ic_launcher_artwork"
+        android:gravity="fill"
+        android:filter="true"
+        android:antialias="true" />
+</inset>

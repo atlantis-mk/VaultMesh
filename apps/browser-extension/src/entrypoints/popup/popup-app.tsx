@@ -1,3 +1,4 @@
+import { DeviceAssistPanel } from "./device-assist-panel";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { REGEXP_ONLY_DIGITS } from "input-otp";
 import {
@@ -35,7 +36,7 @@ import { confirmedDesktopRpc, desktopRpc, DesktopRpcError, getDesktopStatus, get
 import { requiresFillConfirmation } from "@/lib/autofill-selection";
 import { PageInformationDetectionResponseSchema, PageInformationSaveResponseSchema, SaveCaptureDecisionResponseSchema, SaveCapturePendingResponseSchema, TotpQrScanResponseSchema, type PageInformationDetectionResponse, type SaveCaptureQueuedResponse, type TotpQrCode } from "@/lib/protocol";
 import { loginCopyOptions } from "@/lib/login-copy-options";
-import { loadCachedPopupWorkspace, loadPopupSuggestionIds, loadPopupWorkspace, popupSessionInvalidation, shouldShowDesktopConnection } from "@/lib/popup-workspace";
+import { loadCachedPopupWorkspace, loadPopupSuggestionIds, loadPopupWorkspace, popupEventsRequireRefresh, popupSessionInvalidation, shouldShowDesktopConnection } from "@/lib/popup-workspace";
 import { saveCaptureCountdown } from "@/lib/save-capture-countdown";
 import { saveCapturePromptActionLabel, saveCapturePromptTitle } from "@/lib/save-capture-prompt";
 import { paginateVaultItems } from "@/lib/vault-pagination";
@@ -247,11 +248,13 @@ export function PopupApp({ initialWorkspace = null }: { initialWorkspace?: Initi
           after = (await pollDesktopEvents(0)).sequence;
           initialized = true;
         }
-        const [status, eventBatch] = await Promise.all([getDesktopStatus(), pollDesktopEvents(after)]);
+        const eventBatch = await pollDesktopEvents(after);
+        const status = await getDesktopStatus();
         if (!active) return;
         after = eventBatch.sequence;
         const invalidation = popupSessionInvalidation(status, eventBatch.events);
         if (invalidation) invalidatePopupSession(invalidation);
+        else if (popupEventsRequireRefresh(eventBatch.events)) await refreshWorkspace();
       } catch {
         if (active) invalidatePopupSession("unavailable");
       } finally {
@@ -681,6 +684,7 @@ export function PopupApp({ initialWorkspace = null }: { initialWorkspace?: Initi
 
           {loading && desktopState !== "ready" ? <VaultWorkspaceSkeleton /> : <ScrollArea className="-mr-3 min-h-0 flex-1">
             <div className="flex flex-col gap-4 pr-4">
+              <DeviceAssistPanel />
               {emailOtpCandidates.length > 0 || emailOtpBoostExpiresAt > Math.floor(Date.now() / 1_000) ? (
                 <section className="flex flex-col gap-2" aria-label="邮箱验证码">
                   <div className="flex items-center justify-between gap-2">

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { isOtpRequestAction, startAutofillPage } from "./autofill-page";
+import { InlineAutofillMenu } from "./inline-autofill";
 import {
   DEFAULT_PASSWORD_GENERATOR_OPTIONS,
   DEFAULT_USERNAME_GENERATOR_OPTIONS,
@@ -23,6 +24,64 @@ afterEach(async () => {
 });
 
 describe("startAutofillPage", () => {
+  it("CT-DEVICE-ASSIST-002 adds the paired-phone entry to an explicit profile telephone field", async () => {
+    document.body.innerHTML = `<form><h3>个人资料与收货地址</h3>
+      <label for="save-first-name">名</label><input id="save-first-name" autocomplete="given-name">
+      <label for="save-phone">电话</label><input id="save-phone" name="save_phone" type="tel" autocomplete="tel">
+      <button type="submit">使用资料并测试保存</button></form>`;
+    document.querySelectorAll<HTMLElement>("input").forEach(makeVisible);
+    const phone = document.querySelector<HTMLInputElement>("#save-phone")!;
+    const show = vi.spyOn(InlineAutofillMenu.prototype, "show");
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const kind = (message as { kind: string }).kind;
+      if (kind === "vaultmesh.device-assist-capabilities") return { supported: true };
+      if (kind === "vaultmesh.autofill-candidates") return { status: "ready", candidates: [] };
+      return { status: "ready" };
+    });
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    try {
+      phone.focus();
+      await Promise.resolve();
+      document.querySelector<HTMLElement>("[data-vaultmesh-autofill-trigger]")!.click();
+      await vi.waitFor(() => expect(show).toHaveBeenCalledWith(phone,
+        expect.arrayContaining([expect.objectContaining({ kind: "device-assist", assistKind: "phone", title: "从手机填入号码" })]),
+        expect.any(String), expect.any(Object)));
+      expect(sendMessage).toHaveBeenCalledWith({ kind: "vaultmesh.device-assist-capabilities" });
+    } finally {
+      controller.dispose();
+      show.mockRestore();
+    }
+  });
+
+  it("CT-DEVICE-ASSIST-002 anchors the phone menu to the phone field when a code box shares its grid", async () => {
+    document.body.innerHTML = `<form><h3>手机号注册</h3><div class="field-grid">
+      <div class="field"><label for="phone">手机号</label><input id="phone" type="tel" autocomplete="tel"></div>
+      <div class="field"><label for="code">短信验证码</label><input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="10"></div>
+    </div></form>`;
+    document.querySelectorAll<HTMLElement>("input").forEach(makeVisible);
+    const phone = document.querySelector<HTMLInputElement>("#phone")!;
+    const show = vi.spyOn(InlineAutofillMenu.prototype, "show");
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const kind = (message as { kind: string }).kind;
+      if (kind === "vaultmesh.device-assist-capabilities") return { supported: true };
+      if (kind === "vaultmesh.autofill-candidates") return { status: "ready", candidates: [] };
+      return { status: "ready" };
+    });
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    try {
+      phone.focus();
+      await Promise.resolve();
+      document.querySelector<HTMLElement>("[data-vaultmesh-autofill-trigger]")!.click();
+      await vi.waitFor(() => expect(show).toHaveBeenCalledWith(phone,
+        expect.arrayContaining([expect.objectContaining({ kind: "device-assist", assistKind: "phone" })]),
+        expect.any(String), expect.any(Object)));
+      for (const call of show.mock.calls) expect(call[3]?.anchor ?? phone).toBe(phone);
+    } finally {
+      controller.dispose();
+      show.mockRestore();
+    }
+  });
+
   it("recognizes the pasted-form get-code action without reading field values", () => {
     document.body.innerHTML = `<form><input id="email" type="email" value="private@example.test"><button type="button">获取验证码</button><input id="verification_code" name="verification_code"></form>`;
     const button = document.querySelector<HTMLButtonElement>("button")!;

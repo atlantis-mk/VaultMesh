@@ -65,6 +65,18 @@ describe("CT-AUTOFILL-001 content assignment lifecycle", () => {
     expect(await second).toMatchObject({ status: "completed", results: [{ status: "filled" }] });
   });
 
+  it("CT-DEVICE-ASSIST-002 keeps a pending request's handles when another fill discovers the page meanwhile", async () => {
+    const pendingRequestId = crypto.randomUUID();
+    const pending = await receive({ kind: "vaultmesh.discover-fields", requestId: pendingRequestId }) as DiscoveryFrame;
+    await discover();
+    const message = { ...assignment(pending), requestId: pendingRequestId };
+    const fill = receive(message);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await fill).toMatchObject({ status: "completed", results: [{ status: "filled" }] });
+    const replay = await receive(message) as { results: { status: string }[] };
+    expect(replay.results.map((result) => result.status)).toEqual(["missing"]);
+  });
+
   it("rejects a stale route even before the background navigation notification arrives", async () => {
     const message = assignment(await discover());
     window.history.pushState(null, "", "/different-route");

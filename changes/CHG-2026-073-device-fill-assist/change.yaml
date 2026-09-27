@@ -1,0 +1,49 @@
+schema: "2"
+id: "CHG-2026-073-device-fill-assist"
+title: "手机号码与短信验证码局域网互通"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "跨 Android、桌面与 Browser 的独立设备授权、锁屏即时秘密交付与新 RPC 边界"
+requirements:
+  - "REQ-DEVICE-ASSIST-001"
+  - "REQ-ANDROID-026"
+  - "REQ-BROWSER-002"
+
+tests:
+  - "CT-DEVICE-ASSIST-001"
+  - "CT-DEVICE-ASSIST-002"
+  - "AT-DEVICE-ASSIST-001"
+
+adrs:
+  - "ADR-0047"
+
+context_refs:
+  - "specs/device-fill-assist.md"
+  - "specs/lan-peer-pairing.md"
+  - "specs/browser-integration.md"
+  - "specs/android-client.md"
+  - "docs/06-security-privacy.md"
+
+related_changes: []
+boundaries:
+  - "security"
+  - "public-api"
+  - "platform"
+  - "persistence"
+
+risks:
+  - "已授权号码改为电脑凭据库注册，手机端撤销需下次连通传播；短信 v2 改为各授权电脑独立本地消费"
+  - "用户接受 HTTP 网页显式填充；页面可被网络篡改，手动点选不消除目标页面读取风险，LAN mutual TLS 不变"
+  - "Android 系统与安装器可能禁止即时短信接收或限制后台恢复；保存开关不能保证永久在线"
+  - "多平台安装态验收需要对应设备"
+  - "现有大批量首次同步回归出现连接提前关闭，单独复测仍失败，根因待定位"
+
+next:
+  - "已通过 v2 合成真机被动接收后停止手机服务的本地填充切片；仍需安装新版 Mac 和扩展，验收多电脑独立消费及连续点击"
+  - "定位并修复 ct_lan_sync_v2_large_first_merge_is_chunked_and_committed_atomically 的连接提前关闭，再完成同步回归"
+  - "验收持久互通开关、无 Vault 解锁冷启动恢复、系统开机与进程恢复及显式停止防复活"
+  - "依据 change.md 完成 AT-DEVICE-ASSIST-001 的系统短信、Android 17、无 GMS 与双桌面双浏览器安装态验收"
+  - "完成系统生命周期与现有同步填充人工回归后运行 work:finish；不自动发布"
+
