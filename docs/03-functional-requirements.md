@@ -294,7 +294,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 - 必须：`0.0.1-review` 是 fresh-install 基线；每个后续 Review build 的 workspace、Rust package、
   Tauri desktop、Chromium extension 和 Firefox extension 必须统一为同一个严格递增的规范 Review SemVer，当前更新版本为
-  `0.1.1-review`；打包输出和 updater descriptor 不得丢失 `review` prerelease 标识。
+  `0.1.2-review`；打包输出和 updater descriptor 不得丢失 `review` prerelease 标识。
 - 必须：Review build 从编译期固定的 HTTPS `channels/review/latest.json` 检查更新，并继续使用
   `REQ-UPDATE-001` 的 Rust-owned 检查、用户确认、Tauri 签名验证、安装前 lock/cleanup 和 latest-last
   发布、Cargo cache 与失败任务恢复约束；完整 Review 发布同样必须使用三个标准 GitHub-hosted 原生架构

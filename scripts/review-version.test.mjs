@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workspace = new URL("../", import.meta.url);
-const expectedVersion = "0.1.1-review";
+const expectedVersion = "0.1.2-review";
 
 async function json(relativePath) {
   return JSON.parse(await readFile(new URL(relativePath, workspace), "utf8"));
@@ -27,7 +27,7 @@ test("Review product manifests use one prerelease version", async () => {
 test("Review publication is isolated from the existing test channel", async () => {
   const workflow = await readFile(new URL(".github/workflows/r2-review-release.yml", workspace), "utf8");
   assert.match(workflow, /name: Publish R2 review release/);
-  assert.match(workflow, /default: "0\.1\.1-review"/);
+  assert.match(workflow, /default: "0\.1\.2-review"/);
   assert.equal(workflow.match(/uses: pnpm\/action-setup@v6/g)?.length, 2);
   assert.doesNotMatch(workflow, /pnpm\/action-setup@v6\n\s+with:\n\s+version:/);
   assert.match(workflow, /channels\/review\/latest\.json/);

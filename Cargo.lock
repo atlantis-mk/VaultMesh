@@ -5905,7 +5905,7 @@ dependencies = [
 
 [[package]]
 name = "vaultmesh-agent-mcp"
-version = "0.1.1-review"
+version = "0.1.2-review"
 dependencies = [
  "libc",
  "serde",
@@ -5915,7 +5915,7 @@ dependencies = [
 
 [[package]]
 name = "vaultmesh-android-runtime"
-version = "0.1.1-review"
+version = "0.1.2-review"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
@@ -5938,7 +5938,7 @@ dependencies = [
 
 [[package]]
 name = "vaultmesh-core"
-version = "0.1.1-review"
+version = "0.1.2-review"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -5957,7 +5957,7 @@ dependencies = [
 
 [[package]]
 name = "vaultmesh-ffi"
-version = "0.1.1-review"
+version = "0.1.2-review"
 dependencies = [
  "atomic-write-file",
  "serde",
@@ -5971,7 +5971,7 @@ dependencies = [
 
 [[package]]
 name = "vaultmesh-lan-pairing"
-version = "0.1.1-review"
+version = "0.1.2-review"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
@@ -5997,7 +5997,7 @@ dependencies = [
 
 [[package]]
 name = "vaultmesh-sync"
-version = "0.1.1-review"
+version = "0.1.2-review"
 dependencies = [
  "atomic-write-file",
  "serde",
@@ -6009,7 +6009,7 @@ dependencies = [
 
 [[package]]
 name = "vaultmesh-tauri-desktop"
-version = "0.1.1-review"
+version = "0.1.2-review"
 dependencies = [
  "aes-gcm",
  "atomic-write-file",
