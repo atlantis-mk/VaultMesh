@@ -84,18 +84,29 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
           cache: gradle
       - uses: actions/setup-node@v6
         with:
           node-version: 22
       - name: Install Android SDK components
         run: |
+          # yes 在 sdkmanager 读完后收到 SIGPIPE；只以 sdkmanager 的退出码判断成败。
+          set +o pipefail
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          set -o pipefail
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
             "platforms;${ANDROID_PLATFORM}" \
             "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
             "ndk;${ANDROID_NDK_VERSION}" >/dev/null
+          # Runner 预设的 ANDROID_NDK_HOME 指向其他 NDK；固定到 Gradle ndkVersion。
+          ndk_home="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+          [[ -x "$ndk_home/ndk-build" ]] || {
+            echo "NDK $ANDROID_NDK_VERSION was not installed." >&2
+            exit 1
+          }
+          echo "ANDROID_NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk_home" >> "$GITHUB_ENV"
       - name: Install Rust Android targets and cargo-ndk
         run: |
           rustup target add armv7-linux-androideabi aarch64-linux-android x86_64-linux-android
