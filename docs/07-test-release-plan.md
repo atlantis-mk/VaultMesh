@@ -236,13 +236,12 @@ pnpm typecheck
   HKCU manifest registration、固定 extension origin、packaged Host 路径和真实 `vault.status` 往返；
   卸载后执行 `pnpm tauri:windows:browser-uninstall-at`，必须确认 registry、manifest 和非秘密 Host
   config 已清除。两个命令都必须在目标 Windows 执行，不能以交叉编译代替。
-- 本地目标机测试包使用 `pnpm tauri:build` 与 `pnpm extension:zip`，两者默认绑定同一固定 sideload ID。
-  只供本地解压安装的 Review Draft 必须显式设置 `VAULTMESH_EXTENSION_DISTRIBUTION=sideload-review`，
-  复用仓库内公开且固定的 sideload key；该 key 不是商店凭证。商店或正式公开发布必须在同一环境
-  提供独立 `WXT_CHROME_EXTENSION_KEY`，分别执行
-  `pnpm tauri:release:build` 与 `pnpm extension:release:zip:all`；两条命令必须从 key 派生同一
-  `VAULTMESH_BROWSER_EXTENSION_ID`，同时固定 Firefox Gecko ID；未显式选择分发模式、显式 ID 不匹配、
-  未授权身份回退或 Firefox ID 漂移时必须在构建前失败。
+- 仓库固定的公开 key 是 Chrome Web Store 条目公钥（ID `bdneegbnjbheblmamalplnddbodcghbg`），
+  不是商店凭证。本地目标机测试包使用 `pnpm tauri:build` 与 `pnpm extension:zip`，Review Draft 可以
+  显式设置 `VAULTMESH_EXTENSION_DISTRIBUTION=sideload-review`；商店或正式公开发布执行
+  `pnpm tauri:release:build` 与 `pnpm extension:release:zip:all`。所有命令必须从同一 key 派生同一
+  `VAULTMESH_BROWSER_EXTENSION_ID`，同时固定 Firefox Gecko ID；未知分发模式、显式 ID 不匹配或
+  Firefox ID 漂移时必须在构建前失败。
 
 ### GATE-5 安全与依赖
 

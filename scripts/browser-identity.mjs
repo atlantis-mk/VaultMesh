@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 
-// Repository-pinned public key for unpacked development and Review sideload
-// ZIPs. It is public identity material, not a store signing credential.
-export const developmentExtensionKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAiNA5YkMlr1IgyW/d+n1bPkQsBegHPWb1P77n2BkyexUoFxJIs/PmPfKhvlBye3F1jXIwbczScuSVL7dryYSESpOHY3Zk9X5o19XsGaUFkAxiSbEDdc+15tgDuc8W22lxPyEI3z0kIb8jxWVHZPCmAFIE4X/snDhxOgUZ/SkdZFJ6R/YKT4IjBCrxMjEaYLCxzpzbrFIwf5IOkSyzzlb3+uEshXASuBXKj5/jdKrJaEP1Nzzw9XpAdvA5gvCRKqV/9tzJ+G74GtoSyp5feoY5h5d5Xqj4Jj7TudgbcIKMTGcMJslnBh7Dhwymn1Amwm7HYxps6/acIP6Mvd7A9A5EcQIDAQAB";
+// Repository-pinned public key of the Chrome Web Store item. Development, Review
+// sideload and store ZIPs share this identity. It is public identity material, not a
+// store signing credential.
+export const developmentExtensionKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1VmBabFPaQN47bo15GHTVRUlOgfK1syNFdL2ydmiYYAPtOyWOXwoiAldC56aF3mVoA7LYH3rgxnKLkgGRnH38xBrAmJzYqch+ECBI3pCtyDFgRNtzOGvCpFsKPp4HcfQrWyu4pub6Yx38iAw2kvRJK41BvvtksXoLsgdgfClzGOeavmKPr3XwbSZrNrkhPi7lnliAO8LrE7LGVu49gFEDEu9OXlLv/xrD9R6GoNvY367bIx6QzLpbMi9sPYHBurkLQMuDs6aLj3Oldp1cHK9deqLeDt/rxIariFxo26wf4xkBeRiymO/KcYiLecLyD2C1feSRzhWybzaGl/O90ACmwIDAQAB";
 
 const alphabet = "abcdefghijklmnop";
 
@@ -21,17 +22,11 @@ export function validFirefoxExtensionId(value) {
     && value === firefoxExtensionId;
 }
 
-export function browserIdentityEnvironment(baseEnvironment = process.env, { requireRelease = false } = {}) {
-  const explicitKey = baseEnvironment.WXT_CHROME_EXTENSION_KEY;
-  const extensionKey = explicitKey ?? developmentExtensionKey;
+export function browserIdentityEnvironment(baseEnvironment = process.env) {
+  const extensionKey = baseEnvironment.WXT_CHROME_EXTENSION_KEY ?? developmentExtensionKey;
   const distribution = baseEnvironment.VAULTMESH_EXTENSION_DISTRIBUTION;
   if (distribution && distribution !== sideloadReviewDistribution) {
     throw new Error(`VAULTMESH_EXTENSION_DISTRIBUTION 只支持 ${sideloadReviewDistribution}。`);
-  }
-  if (requireRelease
-    && (!explicitKey || extensionKey === developmentExtensionKey)
-    && distribution !== sideloadReviewDistribution) {
-    throw new Error("商店或正式发布必须显式提供非 sideload WXT_CHROME_EXTENSION_KEY；本地 Review ZIP 必须显式选择 sideload-review。");
   }
   const derivedExtensionId = extensionIdFromKey(extensionKey);
   const extensionId = baseEnvironment.VAULTMESH_BROWSER_EXTENSION_ID ?? derivedExtensionId;

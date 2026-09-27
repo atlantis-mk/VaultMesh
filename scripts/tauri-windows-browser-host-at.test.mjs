@@ -41,9 +41,9 @@ test("Windows Browser AT requires one fixed extension origin and absolute Host",
     description: "VaultMesh",
     path: "C:\\Users\\tester\\AppData\\Local\\VaultMesh\\vaultmesh-native-host.exe",
     type: "stdio",
-    allowed_origins: ["chrome-extension://dmmjcaemejijgkpginfccokjmbknbgif/"],
+    allowed_origins: ["chrome-extension://bdneegbnjbheblmamalplnddbodcghbg/"],
   }, "manifest.json");
-  assert.equal(result.extensionId, "dmmjcaemejijgkpginfccokjmbknbgif");
+  assert.equal(result.extensionId, "bdneegbnjbheblmamalplnddbodcghbg");
   assert.throws(() => validateInstalledManifest({
     name: "com.vaultmesh.browser",
     path: "relative.exe",

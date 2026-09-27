@@ -111,10 +111,10 @@ test("Tauri CLI is launched through Node instead of a Windows command shim", () 
   assert.match(invocation.cwd, /apps[\\/]tauri-desktop$/);
 });
 
-test("Tauri release build cannot silently package the development extension identity", () => {
-  assert.throws(
-    () => tauriBuildEnvironment({}, { requireRelease: true }),
-    /必须显式提供非 sideload/,
+test("Tauri release build packages the pinned store extension identity", () => {
+  assert.equal(
+    tauriBuildEnvironment({}, { requireRelease: true }).VAULTMESH_BROWSER_EXTENSION_ID,
+    developmentExtensionId,
   );
   const environment = tauriBuildEnvironment({
     VAULTMESH_EXTENSION_DISTRIBUTION: sideloadReviewDistribution,

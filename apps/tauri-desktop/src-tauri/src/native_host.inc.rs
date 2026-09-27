@@ -48,7 +48,7 @@ mod windows_host {
 
     const CONFIG_NAME: &str = if DEV { dev::CONFIG_NAME } else { "browser-host-config.json" };
     const APP_DATA_NAME: &str = "com.vaultmesh.desktop";
-    const DEFAULT_EXTENSION_ID: &str = "dmmjcaemejijgkpginfccokjmbknbgif";
+    const DEFAULT_EXTENSION_ID: &str = "bdneegbnjbheblmamalplnddbodcghbg";
     const DEFAULT_FIREFOX_EXTENSION_ID: &str = "vaultmesh@atlantis-mk.github.io";
     const FIREFOX_MANIFEST_NAME: &str = if DEV { "com.vaultmesh.bitwarden.dev.firefox.json" } else { "com.vaultmesh.browser.firefox.json" };
     const EXPECTED_PIPE: &str = if DEV { dev::PIPE_NAME } else { r"\\.\pipe\VaultMesh.BrowserBroker.v2" };
@@ -805,7 +805,7 @@ mod macos_host {
                 broker_socket: PathBuf::from("/tmp/vaultmesh-tauri-browser.sock"),
                 keychain_service: "com.vaultmesh.desktop.browser-pairing".to_owned(),
                 keychain_account: "native-host-hmac-v1".to_owned(),
-                chromium_allowed_origin: "chrome-extension://dmmjcaemejijgkpginfccokjmbknbgif/"
+                chromium_allowed_origin: "chrome-extension://bdneegbnjbheblmamalplnddbodcghbg/"
                     .to_owned(),
                 firefox_extension_id: DEFAULT_FIREFOX_EXTENSION_ID.to_owned(),
                 firefox_manifest_path: PathBuf::from(

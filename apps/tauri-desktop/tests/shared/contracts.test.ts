@@ -479,7 +479,7 @@ describe('desktop IPC contracts', () => {
       ready: false,
       brokerReady: true,
       hostRegistered: false,
-      extensionId: 'dmmjcaemejijgkpginfccokjmbknbgif',
+      extensionId: 'bdneegbnjbheblmamalplnddbodcghbg',
       errorCode: 'registration-unavailable',
     }).errorCode).toBe('registration-unavailable');
     expect(() => DesktopBrowserIntegrationStatusSchema.parse({

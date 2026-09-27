@@ -16,7 +16,7 @@ const unavailable = {
   ready: false,
   brokerReady: true,
   hostRegistered: false,
-  extensionId: 'dmmjcaemejijgkpginfccokjmbknbgif',
+  extensionId: 'bdneegbnjbheblmamalplnddbodcghbg',
   errorCode: 'registration-unavailable' as const,
 };
 

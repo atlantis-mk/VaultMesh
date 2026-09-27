@@ -573,9 +573,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-BROWSER-004 跨浏览器扩展打包与分发
 
 - 必须：同一 WXT 扩展源码生成版本一致的 Chrome/Chromium MV3 ZIP 和 Firefox MV2 ZIP；Chrome
-  使用固定 manifest key 派生 ID，Firefox 使用固定 `browser_specific_settings.gecko.id`。Review
-  本地安装 ZIP 必须显式选择仓库固定的 `sideload-review` 公共身份；商店或正式发布必须提供独立
-  Chrome key。构建不得隐式退回其他身份、使用空 Firefox ID、目标不匹配的 manifest 或未检查 ZIP。
+  使用固定 manifest key 派生 ID，Firefox 使用固定 `browser_specific_settings.gecko.id`。开发、Review
+  本地安装 ZIP 与商店/正式发布必须共用仓库固定的 Chrome Web Store 条目公钥派生的同一 ID。构建不得隐式退回其他身份、使用空 Firefox ID、目标不匹配的 manifest 或未检查 ZIP。
 - 必须：Firefox manifest 省略 Chromium-only `minimum_chrome_version`、manifest key 和
   `webAuthenticationProxy` permission；Firefox 不提供 Passkey proxy，其他 Browser RPC、瞬态状态、
   secret 最小化、lock/revoke 和 assignment 边界与 Chromium 等价。

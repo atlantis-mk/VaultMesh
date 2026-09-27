@@ -46,22 +46,15 @@ test("Extension release build rejects mismatched identity or Host name", () => {
   }), /固定为/);
 });
 
-test("Explicit extension key derives one shared identity and release mode rejects the development key", () => {
+test("Explicit extension key derives one shared identity and release mode defaults to the pinned store key", () => {
   const releaseKey = Buffer.from("vaultmesh-test-release-public-key").toString("base64");
   const environment = browserExtensionBuildEnvironment({
     WXT_CHROME_EXTENSION_KEY: releaseKey,
   }, { requireRelease: true });
   assert.notEqual(environment.VAULTMESH_BROWSER_EXTENSION_ID, developmentExtensionId);
-  assert.throws(
-    () => browserExtensionBuildEnvironment({}, { requireRelease: true }),
-    /必须显式提供非 sideload/,
-  );
-  assert.throws(
-    () => browserExtensionBuildEnvironment({
-      WXT_CHROME_EXTENSION_KEY: developmentExtensionKey,
-    }, { requireRelease: true }),
-    /必须显式提供非 sideload/,
-  );
+  const storeEnvironment = browserExtensionBuildEnvironment({}, { requireRelease: true });
+  assert.equal(storeEnvironment.WXT_CHROME_EXTENSION_KEY, developmentExtensionKey);
+  assert.equal(storeEnvironment.VAULTMESH_BROWSER_EXTENSION_ID, "bdneegbnjbheblmamalplnddbodcghbg");
   const sideloadEnvironment = browserExtensionBuildEnvironment({
     VAULTMESH_EXTENSION_DISTRIBUTION: sideloadReviewDistribution,
   }, { requireRelease: true });

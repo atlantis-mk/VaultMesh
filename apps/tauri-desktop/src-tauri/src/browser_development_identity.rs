@@ -33,7 +33,7 @@ mod tests {
             .collect();
         assert_eq!(id, EXTENSION_ID);
         assert_ne!(HOST_NAME, "com.vaultmesh.browser");
-        assert_ne!(EXTENSION_ID, "dmmjcaemejijgkpginfccokjmbknbgif");
+        assert_ne!(EXTENSION_ID, "bdneegbnjbheblmamalplnddbodcghbg");
         assert_ne!(FIREFOX_ID, "vaultmesh@atlantis-mk.github.io");
         assert_ne!(PAIRING_SERVICE, "com.vaultmesh.desktop.browser-pairing");
     }
