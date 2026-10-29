@@ -404,6 +404,9 @@ export const SshLaunchResultSchema = z.object({
   passwordCopied: z.boolean(),
   passwordCopySkipped: z.boolean(),
   authentication: z.enum(['key', 'password', 'sshAgent']),
+  durationMinutes: z.number().int().optional(),
+  sessionRef: z.string().optional(),
+  expiresAt: z.string().optional(),
 });
 
 export const SshCredentialTrashSummarySchema = z.object({
@@ -629,6 +632,7 @@ export const SecuritySettingsSchema = z.object({
   lockOnSleep: z.boolean(),
   clipboardClearTimeoutMs: z.number().int().min(10_000).max(2 * 60_000),
   copySshPasswordOnLaunch: z.boolean().default(true),
+  sshSessionDurationMinutes: z.number().int().min(1).max(60).default(15),
 }).strict();
 
 export const DEFAULT_SECURITY_SETTINGS: z.infer<typeof SecuritySettingsSchema> = {
@@ -637,6 +641,7 @@ export const DEFAULT_SECURITY_SETTINGS: z.infer<typeof SecuritySettingsSchema> =
   lockOnSleep: true,
   clipboardClearTimeoutMs: 30_000,
   copySshPasswordOnLaunch: true,
+  sshSessionDurationMinutes: 15,
 };
 
 export const LanNearbyDeviceSchema = z.object({

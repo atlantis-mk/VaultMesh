@@ -14,6 +14,42 @@ impl DesktopRuntime {
             .map_err(map_runtime_core_error)
     }
 
+    pub fn find_managed_ssh_key_for_account(
+        &mut self,
+        account_id: Uuid,
+        host_key_sha256: &str,
+    ) -> Result<Option<ManagedSshHostKeyMaterial>, DesktopRuntimeError> {
+        self.refresh_from_disk()?;
+        let vault = self
+            .vault
+            .as_ref()
+            .ok_or(DesktopRuntimeError::from(VAULTMESH_STATUS_LOCKED))?;
+        let Some(key_item_id) = vault
+            .session
+            .find_managed_ssh_key_id_for_account(account_id, host_key_sha256)
+            .map_err(map_runtime_core_error)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ManagedSshHostKeyMaterial {
+            key_item_id,
+            public_key: Zeroizing::new(
+                vault
+                    .session
+                    .ssh_public_key_for_access(key_item_id)
+                    .map_err(map_runtime_core_error)?
+                    .to_owned(),
+            ),
+            private_key: Zeroizing::new(
+                vault
+                    .session
+                    .ssh_private_key_for_access(key_item_id, None)
+                    .map_err(map_runtime_core_error)?
+                    .to_owned(),
+            ),
+        }))
+    }
+
     pub fn add_managed_ssh_host_key(
         &mut self,
         account_id: Uuid,

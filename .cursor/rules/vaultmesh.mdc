@@ -1,0 +1,10 @@
+---
+description: VaultMesh product and secret boundaries
+alwaysApply: true
+---
+
+Follow `AGENTS.md` for scope, security, and when to open a Work.
+
+- Local-first password manager. Do not add accounts, servers, cross-network sync, sharing, or recovery backdoors.
+- `crates/vault-core` owns crypto, format, models, unlock sessions, and rollback.
+- Do not commit or log vaults, master passwords, vault keys, protected fields, OTP, private keys, or fill values.

@@ -119,6 +119,7 @@ pub(super) async fn handle_ssh_external(
                 serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
             let client_id = input.client_id;
             let account_id = input.account_id;
+            let account_id_for_material = account_id.clone();
             let copy_password = input.copy_password;
             let permits_transient_secret = state
                 .settings
@@ -128,7 +129,7 @@ pub(super) async fn handle_ssh_external(
             let material = with_runtime(state, move |runtime| {
                 collect_ssh_external_launch_material(
                     runtime,
-                    &account_id,
+                    &account_id_for_material,
                     client_id,
                     copy_password,
                     permits_transient_secret,
@@ -146,11 +147,50 @@ pub(super) async fn handle_ssh_external(
                     "authentication": material.authentication,
                 }));
             }
+
+            let duration_minutes = state
+                .settings
+                .lock()
+                .map(|settings| settings.ssh_session_duration_minutes)
+                .unwrap_or(15);
             let launch_directory = state.ssh_launch_directory.clone();
+            let ssh_directory = state.ssh_directory.clone();
+            let base_dir = app.path().app_data_dir().map_err(|_| "无法解析应用数据目录。")?;
             let target = material.target.clone();
-            let private_key = material.private_key;
+
+            let session_info = if let Some(private_key) = material.private_key {
+                let mut registry = state
+                    .agent_ssh_agent_registry
+                    .lock()
+                    .map_err(|_| "SSH agent 注册表不可用。")?;
+                let session_info = registry
+                    .start_session(
+                        &base_dir,
+                        &account_id,
+                        &material.account_label,
+                        private_key,
+                        material.passphrase,
+                        duration_minutes,
+                    )
+                    .map_err(|err| format!("启动短时 SSH Agent 会话失败：{err}"))?;
+
+                if client_id == ssh_external::ExternalClientId::Vscode {
+                    let fragment = crate::ssh_host_setup::register_ephemeral_session_fragment(
+                        &ssh_directory,
+                        &session_info.session_ref,
+                        &target,
+                        &session_info.socket_path,
+                    )?;
+                    registry.attach_config_fragment(&session_info.session_ref, fragment);
+                }
+                Some(session_info)
+            } else {
+                None
+            };
+
+            let socket_path = session_info.as_ref().map(|info| info.socket_path.clone());
             tauri::async_runtime::spawn_blocking(move || {
-                ssh_external::launch(client_id, &target, &launch_directory, private_key)
+                ssh_external::launch(client_id, &target, &launch_directory, socket_path.as_deref())
             })
             .await
             .map_err(|_| "SSH 外部客户端启动未能完成。".to_owned())??;
@@ -166,6 +206,9 @@ pub(super) async fn handle_ssh_external(
                 "passwordCopied": password_copied,
                 "passwordCopySkipped": material.password_copy_skipped,
                 "authentication": material.authentication,
+                "durationMinutes": duration_minutes,
+                "sessionRef": session_info.as_ref().map(|s| s.session_ref.as_str()),
+                "expiresAt": session_info.as_ref().map(|s| s.expires_at.as_str()),
             }))
         }
         _ => Err("该 SSH 外部客户端操作不被允许。".to_owned()),

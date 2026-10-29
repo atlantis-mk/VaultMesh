@@ -16,11 +16,12 @@ describe("plugin security policy", () => {
       lockOnBrowserRestart: true,
       lockOnSystemLock: true,
       idleTimeoutMinutes: 5,
+      passkeyProxyEnabled: true,
     });
   });
 
   it("persists a valid policy", async () => {
-    const policy = { lockOnBrowserRestart: false, lockOnSystemLock: true, idleTimeoutMinutes: 15 as const };
+    const policy = { lockOnBrowserRestart: false, lockOnSystemLock: true, idleTimeoutMinutes: 15 as const, passkeyProxyEnabled: false };
     await expect(savePluginSecurityPolicy(policy)).resolves.toBe(true);
     await expect(loadPluginSecurityPolicy()).resolves.toEqual(policy);
   });

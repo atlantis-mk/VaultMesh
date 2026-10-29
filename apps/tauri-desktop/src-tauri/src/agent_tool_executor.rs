@@ -6,6 +6,7 @@ pub(super) struct AgentToolContext<'a> {
     pub(super) managed_web: &'a Arc<Mutex<AgentManagedWebStore>>,
     pub(super) email_otp: &'a Arc<Mutex<EmailOtpService>>,
     pub(super) ssh_sessions: &'a Arc<Mutex<AgentSshSessionStore>>,
+    pub(super) ssh_agent_registry: &'a Arc<Mutex<crate::agent_ssh_agent::SshAgentRegistry>>,
     pub(super) ssh_directory: &'a std::path::Path,
     pub(super) app: &'a AppHandle,
     pub(super) dialog_focus: &'a Arc<NativeDialogFocusState>,

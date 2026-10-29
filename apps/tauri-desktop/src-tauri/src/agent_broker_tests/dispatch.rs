@@ -906,6 +906,45 @@ fn ct_agent_connection_metadata_does_not_require_an_account_reference() {
 }
 
 #[test]
+fn ct_agent_ssh_agent_close_does_not_require_an_account_reference() {
+    let tool = "vaultmesh_ssh_agent_close";
+    let mut broker = AgentBrokerCore::new().unwrap();
+    broker.set_access_check(Arc::new(|_| true));
+    let client = broker
+        .register_client(peer(), hello(&[tool]), 1_000)
+        .unwrap();
+    broker.approve_pairing(&client.client_id).unwrap();
+    let client_id = Uuid::parse_str(&client.client_id).unwrap();
+    let session = broker
+        .sessions()
+        .into_iter()
+        .find(|session| session.client_id == client.client_id)
+        .expect("connection-managed session");
+    let executor: AgentToolExecutor = Arc::new(|tool, account_ref, parameters, _, _| {
+        assert_eq!(tool, "vaultmesh_ssh_agent_close");
+        assert!(account_ref.is_none());
+        assert_eq!(parameters["sessionRef"], "sess-test-123");
+        Ok(json!({ "closed": true, "sessionRef": "sess-test-123" }))
+    });
+
+    let response = broker.handle_json_with_executor(
+        client_id,
+        &request(
+            &session,
+            Uuid::new_v4(),
+            tool,
+            json!({ "sessionRef": "sess-test-123" }),
+        ),
+        1_002,
+        &executor,
+    );
+
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(response["result"]["closed"], true);
+    assert_eq!(response["result"]["sessionRef"], "sess-test-123");
+}
+
+#[test]
 fn ct_agent_executor_runs_after_releasing_the_broker_mutex() {
     let account_ref = "00000000-0000-4000-8000-000000000099";
     let tool = "vaultmesh_ssh_exec";

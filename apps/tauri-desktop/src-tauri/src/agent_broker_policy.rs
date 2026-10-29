@@ -258,6 +258,8 @@ pub(super) fn candidate_tools(kind: &str) -> &'static [&'static str] {
         "ssh" => &[
             "vaultmesh_local_file_select",
             "vaultmesh_result_save",
+            "vaultmesh_ssh_agent_open",
+            "vaultmesh_ssh_agent_close",
             "vaultmesh_ssh_exec",
             "vaultmesh_ssh_upload",
             "vaultmesh_ssh_download",
@@ -289,6 +291,7 @@ pub(super) fn is_direct_ssh_action_tool(tool: &str) -> bool {
         tool,
         "vaultmesh_local_file_select"
             | "vaultmesh_result_save"
+            | "vaultmesh_ssh_agent_open"
             | "vaultmesh_ssh_exec"
             | "vaultmesh_ssh_upload"
             | "vaultmesh_ssh_download"

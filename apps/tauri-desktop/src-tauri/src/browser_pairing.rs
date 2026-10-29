@@ -23,42 +23,32 @@ trait PairingSecretStore: Send + Sync {
 }
 
 struct PlatformPairingSecretStore {
-    service: &'static str,
+    store: crate::device_credentials::ScopedCredentialStore,
     account: &'static str,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl PairingSecretStore for PlatformPairingSecretStore {
     fn set(&self, encoded: &str) -> Result<(), String> {
-        keyring::Entry::new(self.service, self.account)
-            .and_then(|entry| entry.set_password(encoded))
+        self.store
+            .set(self.account, encoded.as_bytes())
             .map_err(|_| "无法保存浏览器配对凭据。".to_owned())
     }
 
     fn get(&self) -> Result<Zeroizing<String>, String> {
-        keyring::Entry::new(self.service, self.account)
-            .and_then(|entry| entry.get_password())
-            .map(Zeroizing::new)
-            .map_err(|_| "无法读取浏览器配对凭据，请重新配对。".to_owned())
+        match self.store.get(self.account) {
+            Ok(Some(bytes)) => {
+                let s = String::from_utf8(bytes.to_vec())
+                    .map_err(|_| "无法读取浏览器配对凭据，请重新配对。".to_owned())?;
+                Ok(Zeroizing::new(s))
+            }
+            _ => Err("无法读取浏览器配对凭据，请重新配对。".to_owned()),
+        }
     }
 
     fn delete(&self) -> Result<(), String> {
-        keyring::Entry::new(self.service, self.account)
-            .and_then(|entry| entry.delete_credential())
+        self.store
+            .delete(self.account)
             .map_err(|_| "无法删除浏览器配对凭据。".to_owned())
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-impl PairingSecretStore for PlatformPairingSecretStore {
-    fn set(&self, _encoded: &str) -> Result<(), String> {
-        Err("当前平台不支持浏览器安全配对。".to_owned())
-    }
-    fn get(&self) -> Result<Zeroizing<String>, String> {
-        Err("当前平台不支持浏览器安全配对。".to_owned())
-    }
-    fn delete(&self) -> Result<(), String> {
-        Ok(())
     }
 }
 
@@ -68,21 +58,27 @@ pub struct BrowserPairingService {
 }
 
 impl BrowserPairingService {
-    pub fn new(record_path: PathBuf) -> Self {
+    pub fn new(
+        record_path: PathBuf,
+        credentials: &crate::device_credentials::DeviceCredentialStore,
+    ) -> Self {
         Self {
             record_path,
             store: Arc::new(PlatformPairingSecretStore {
-                service: TAURI_PAIRING_SERVICE,
+                store: credentials.scoped(TAURI_PAIRING_SERVICE),
                 account: TAURI_PAIRING_ACCOUNT,
             }),
         }
     }
 
-    pub fn new_bitwarden_development(record_path: PathBuf) -> Self {
+    pub fn new_bitwarden_development(
+        record_path: PathBuf,
+        credentials: &crate::device_credentials::DeviceCredentialStore,
+    ) -> Self {
         Self {
             record_path,
             store: Arc::new(PlatformPairingSecretStore {
-                service: crate::browser_development_identity::PAIRING_SERVICE,
+                store: credentials.scoped(crate::browser_development_identity::PAIRING_SERVICE),
                 account: crate::browser_development_identity::PAIRING_ACCOUNT,
             }),
         }

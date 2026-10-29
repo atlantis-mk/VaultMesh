@@ -98,6 +98,9 @@
 
 - `../adr/0050-desktop-platform-authentication.md`
 - `../adr/0051-browser-touchid.md`
+- `../adr/0052-agent-ephemeral-ssh-agent-bridge.md`
+- `../adr/0053-unified-desktop-keychain-root.md`
+- `../adr/0054-desktop-ssh-agent-session.md`
 
 ## Change 与 Release 入口
 

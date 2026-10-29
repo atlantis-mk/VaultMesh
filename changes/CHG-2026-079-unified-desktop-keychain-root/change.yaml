@@ -1,0 +1,32 @@
+schema: "2"
+id: "CHG-2026-079-unified-desktop-keychain-root"
+title: "桌面单一钥匙串根密钥与统一凭据库"
+type: "feature"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "将桌面端散落的多个操作系统钥匙串条目收拢为单一根密钥并在本地加密保存子凭据，提供平滑迁移与免重复弹窗授权"
+requirements:
+  - "REQ-SEC-002"
+  - "REQ-AGENT-001"
+tests:
+  - "CT-SEC-002"
+  - "CT-AGENT-AUTH-001"
+adrs:
+  - "ADR-0053"
+context_refs:
+  - "adr/0050-desktop-platform-authentication.md"
+  - "adr/0053-unified-desktop-keychain-root.md"
+  - "specs/agent-capability-broker.md"
+related_changes: []
+boundaries:
+  - "keychain-root"
+  - "credential-store"
+  - "desktop-runtime"
+risks:
+  - "升级时旧条目（Touch ID、Agent pairing、Browser pairing）必须自动平滑无损迁移，并在迁移完成后安全清理旧条目"
+  - "单一根密钥文件 device-credentials.enc 必须使用 AES-256-GCM 加密并严格限制权限为 0600"
+next:
+  - "实现统一 DeviceCredentialStore 与 Lazy Migration"
+  - "切换各子模块接入统一 DeviceCredentialStore"
+  - "通过全面自动化测试与文档校验"

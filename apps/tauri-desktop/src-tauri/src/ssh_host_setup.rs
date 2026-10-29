@@ -427,6 +427,58 @@ fn preflight_user_config(paths: &SshHostPaths, alias: &str) -> Result<(), String
     Ok(())
 }
 
+pub fn register_ephemeral_session_fragment(
+    ssh_directory: &Path,
+    session_ref: &str,
+    target: &crate::ssh_external::LaunchTarget,
+    socket_path: &str,
+) -> Result<PathBuf, String> {
+    let fragment_dir = ssh_directory.join("vaultmesh").join("config.d");
+    ensure_owner_only_directory(&fragment_dir)?;
+
+    let user_config = ssh_directory.join("config");
+    ensure_managed_include_in_config(&user_config)?;
+
+    let fragment_path = fragment_dir.join(format!("session-{session_ref}"));
+    let content = format!(
+        "# VaultMesh Ephemeral Session: {session_ref}\nHost {}\n  HostName {}\n  User {}\n  Port {}\n  IdentityAgent {}\n  IdentitiesOnly yes\n",
+        target.host(), target.host(), target.username(), target.port(), socket_path
+    );
+    write_atomic_private(&fragment_path, content.as_bytes())?;
+    Ok(fragment_path)
+}
+
+fn ensure_managed_include_in_config(user_config: &Path) -> Result<(), String> {
+    let existing = if user_config.exists() {
+        String::from_utf8(read_bounded_regular_file(user_config)?)
+            .map_err(|_| "The OpenSSH user config is not UTF-8.".to_owned())?
+    } else {
+        String::new()
+    };
+
+    if first_effective_line(&existing) == Some(MANAGED_INCLUDE) {
+        return Ok(());
+    }
+
+    let mut remaining = existing
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            line != MANAGED_INCLUDE && line != MANAGED_COMMENT
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    while remaining.starts_with('\n') {
+        remaining.remove(0);
+    }
+    let next = if remaining.is_empty() {
+        format!("{MANAGED_COMMENT}\n{MANAGED_INCLUDE}\n")
+    } else {
+        format!("{MANAGED_COMMENT}\n{MANAGED_INCLUDE}\n\n{remaining}\n")
+    };
+    write_atomic_private(user_config, next.as_bytes())
+}
+
 fn commit_config(paths: &SshHostPaths, alias: &str, target: &SshTarget) -> Result<(), String> {
     validate_managed_path_boundaries(paths)?;
     let existing = if paths.user_config.exists() {
@@ -868,6 +920,37 @@ mod tests {
             )
             .is_err()
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ephemeral_session_fragment_registers_and_cleans_up() {
+        let root = std::env::temp_dir().join(format!("vm-ephemeral-session-{}", uuid::Uuid::new_v4()));
+        let ssh_directory = root.join(".ssh");
+        fs::create_dir_all(&ssh_directory).unwrap();
+        let target = crate::ssh_external::LaunchTarget::new("192.168.1.100", 2222, "deploy").unwrap();
+        let socket_path = "/tmp/vaultmesh-501/sess_test.sock";
+
+        let fragment = register_ephemeral_session_fragment(
+            &ssh_directory,
+            "test_session",
+            &target,
+            socket_path,
+        )
+        .expect("fragment");
+
+        assert!(fragment.exists());
+        let content = fs::read_to_string(&fragment).unwrap();
+        assert!(content.contains("Host 192.168.1.100"));
+        assert!(content.contains("IdentityAgent /tmp/vaultmesh-501/sess_test.sock"));
+        assert!(content.contains("Port 2222"));
+        assert!(content.contains("User deploy"));
+
+        let user_config = fs::read_to_string(ssh_directory.join("config")).unwrap();
+        assert!(user_config.contains(MANAGED_INCLUDE));
+
+        fs::remove_file(&fragment).unwrap();
+        assert!(!fragment.exists());
         let _ = fs::remove_dir_all(root);
     }
 }

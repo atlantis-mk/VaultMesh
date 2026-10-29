@@ -76,6 +76,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-ITEM-003 SSH credential
 
 - 必须：支持密码/密钥凭证、生成、受限本地扫描、外部客户端和公钥安装；秘密不进入 summary/detail。
+- 必须：桌面外部客户端（系统终端、VS Code）连接时必须通过短时本地 SSH-Agent 协议桥接（内存签名，私钥不落盘）；密码账号支持全自动动态密钥签发与部署直连；会话时长支持安全设置配置（默认 15 分钟，范围 1~60 分钟），超时或锁定立即销毁。
 - 验收：`CT-ITEM-003`、`AT-ITEM-003`。
 
 ### REQ-ITEM-004 Identity
@@ -626,7 +627,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 - 必须：Chromium WebAuthn proxy 的 ES256 私钥保存在加密 secret 中，签名在 main 完成，每次 registration/assertion 显示 native confirmation。
 - 必须：Passkey 创建或导入使用当前 RP/origin 的默认 Login 作为归属提示，并由 desktop 重新验证；无有效默认值时可以唯一用户名匹配，仍不确定时作为 Passkey-only Login，禁止进入普通 Secret/密钥分类。
-- 必须：Chromium 扩展必须在后台启动时即挂载 WebAuthn proxy，并在插件锁定、native 连接重连或桌面端暂时不可达期间保持挂载；此时的 registration/assertion 与平台认证器探测不得绕过 VaultMesh，必须保留请求、打开插件解锁界面并在桌面端可用且解锁后由 VaultMesh 继续。仅当用户在该界面明确选择不解锁时，当前请求以 `NotAllowedError` 结束，proxy 暂时 detach 5 分钟以便网站重试交给浏览器；在此期间解锁则立即重新挂载。页面取消或 5 分钟未完成时请求失败，但不绕过。仅确认未配对时 detach。
+- 必须：Chromium 扩展必须在后台挂载 WebAuthn proxy，并在插件锁定、native 连接重连或桌面端暂时不可达期间保持挂载；此时普通站点的 registration/assertion 与平台认证器探测由 VaultMesh 接管。浏览器原生身份服务（如 Google 账号登录 accounts.google.com 等）以及设置中关闭通行密钥接管时自动直通（detach），不拦截 Chrome 原生 Touch ID / 平台生物识别认证。在受接管站点，仅当用户在解锁界面明确选择不解锁时，当前请求以 `NotAllowedError` 结束，proxy 暂时 detach 5 分钟以便网站重试交给浏览器；在此期间解锁则立即重新挂载。页面取消或 5 分钟未完成时请求失败，但不绕过。仅确认未配对时 detach。
 - 验收：`CT-PASSKEY-001`、`CT-PASSKEY-002`、`AT-PASSKEY-001`。
 
 ## 本地 Agent Capability Broker
@@ -720,15 +721,9 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-AGENT-004 SSH 动作
 
 - 必须：Rust SSH adapter 可以按 exact SSH Vault item 执行 non-PTY exec、SFTP、公钥安装和显式启用的 PTY/tunnel，
-  并逐次执行 host identity、命令/路径、风险、输出配额与生命周期策略。
-- 必须：Agent 可以提交受限 OpenSSH alias，请求 Rust broker 为 exact SSH Vault item 生成专属 ED25519
-  密钥、把生成的密钥自动保存为软件内 SSH key 记录、安装公钥、验证新密钥登录并写入 VaultMesh 管理的
-  本机 SSH config fragment。alias/account/target/Host Key 绑定必须由加密 Vault 记录拥有，本地不得保存
-  `manifest.json`。软件必须在生成的 SSH key 信息卡片上独立显示 `ssh <alias>`，并在编辑表单中以只读字段
-  显示 alias；修改普通名称不得改变 alias，公私钥不得在普通表单中替换或清除。Agent 不得提交或获得
-  host、username、port、算法、私钥、公钥原文或本地路径；既有 alias、key、config、symlink、target 或
-  Host Key 冲突必须拒绝且不得覆盖。该动作属于 R3 exact-only，每次执行必须由原生授权窗口明确提示它会建立
-  不再受 VaultMesh 逐命令 Action Lease 控制的持久本机 OpenSSH authority。
+  并逐次执行 host identity、命令/路径、风险、输出配额与生命周期策略；旧版逐命令代理工具在目录中明确标注为已废弃。
+- 必须：Rust broker 支持通过 `vaultmesh_ssh_agent_open` 为 exact SSH item 创建本地独占的短时 SSH-Agent 协议桥接会话（仅需 Vault 解锁门禁，免二次动作审批；Unix Socket 权限 0600，目录 0700），支持已有私钥及纯密码账号全自动动态密钥签发与直连，仅响应公开身份与内存签名挑战，私钥绝不向 Agent 暴露，并设置硬性 TTL；超时、调用 `vaultmesh_ssh_agent_close` 或 Vault 锁定时立即销毁清理。返回必须附带 targetHost、targetPort、targetUser 与标准直连执行命令。
+- 必须：`vaultmesh_ssh_host_setup` 标记为已废弃；Agent 严禁扫描宿主机 `~/.ssh/config`，严禁使用或生成 Host Alias，必须通过真实 IP/域名直连。早期持久 OpenSSH 配置能力仅作为向下兼容历史保留。
 - 必须：密码、私钥和 passphrase 不进入 shell、PTY、argv、环境或临时 identity 文件；`sudo` 不自动输入密码。
 - 验收：`CT-AGENT-SSH-001`、`CT-AGENT-PTY-001`、`AT-AGENT-SSH-001`。
 

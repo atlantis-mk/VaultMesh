@@ -581,6 +581,23 @@ fn ssh_external_launch_keeps_private_material_in_rust_and_honors_reprompt() {
     );
     assert!(key_material.password.is_none());
 
+    let vscode_material = collect_ssh_external_launch_material(
+        &mut runtime,
+        key_account["id"].as_str().expect("key account id"),
+        ssh_external::ExternalClientId::Vscode,
+        true,
+        true,
+    )
+    .expect("vscode launch material");
+    assert_eq!(vscode_material.authentication, "key");
+    assert!(
+        vscode_material
+            .private_key
+            .as_ref()
+            .is_some_and(|key| key.contains("launch-private"))
+    );
+    assert!(vscode_material.password.is_none());
+
     let locked_on_blur_material = collect_ssh_external_launch_material(
         &mut runtime,
         key_account["id"].as_str().expect("key account id"),

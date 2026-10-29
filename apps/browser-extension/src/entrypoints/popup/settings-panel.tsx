@@ -15,7 +15,7 @@ import { RecoveryPanel, type RecoveryTarget } from "./recovery-panel";
 
 type PinStatus = { enabled: boolean; locked: boolean; failureLimit: number; remainingAttempts: number };
 type BiometricStatus = { available: boolean; enabled: boolean; followsDesktop?: boolean };
-type DesktopSecuritySettings = { lockOnBlur: boolean; idleTimeoutMs: number; lockOnSleep: boolean; clipboardClearTimeoutMs: number; copySshPasswordOnLaunch: boolean };
+type DesktopSecuritySettings = { lockOnBlur: boolean; idleTimeoutMs: number; lockOnSleep: boolean; clipboardClearTimeoutMs: number; copySshPasswordOnLaunch: boolean; sshSessionDurationMinutes?: number };
 type SettingsSection = "menu" | "pin" | "security" | "device" | "history" | "recovery";
 
 const fieldClass = "h-9 rounded-md border border-input bg-background px-3 text-sm";
@@ -184,6 +184,7 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
             <p className="text-xs text-muted-foreground">浏览器锁定规则只影响插件；剪贴板设置由桌面端管理。</p>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.lockOnBrowserRestart} onChange={(event) => setPluginPolicy({ ...pluginPolicy, lockOnBrowserRestart: event.target.checked })} />浏览器启动或重启时锁定插件</label>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.lockOnSystemLock} onChange={(event) => setPluginPolicy({ ...pluginPolicy, lockOnSystemLock: event.target.checked })} />系统锁屏时锁定插件</label>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.passkeyProxyEnabled !== false} onChange={(event) => setPluginPolicy({ ...pluginPolicy, passkeyProxyEnabled: event.target.checked })} />接管浏览器通行密钥 (Passkey)</label>
             <div className="flex flex-col gap-1 text-xs"><span id="plugin-idle-timeout-label">浏览器空闲后锁定插件</span><div className="grid grid-cols-3 gap-1.5" role="group" aria-labelledby="plugin-idle-timeout-label">{idleTimeoutOptions.map(({ value, label }) => <Button key={value} type="button" size="sm" className="w-full px-1 text-xs" variant={pluginPolicy.idleTimeoutMinutes === value ? "default" : "outline"} aria-pressed={pluginPolicy.idleTimeoutMinutes === value} onClick={() => setPluginPolicy({ ...pluginPolicy, idleTimeoutMinutes: value })}>{label}</Button>)}</div></div>
             {desktopSettings ? <div className="flex flex-col gap-1 text-xs"><span id="clipboard-timeout-label">剪贴板自动清除</span><div className="grid grid-cols-2 gap-1.5" role="group" aria-labelledby="clipboard-timeout-label">{clipboardTimeoutOptions.map(({ value, label }) => <Button key={value} type="button" size="sm" className="w-full text-xs" variant={desktopSettings.clipboardClearTimeoutMs === value ? "default" : "outline"} aria-pressed={desktopSettings.clipboardClearTimeoutMs === value} onClick={() => setDesktopSettings({ ...desktopSettings, clipboardClearTimeoutMs: value })}>{label}</Button>)}</div></div> : <p className="text-xs text-muted-foreground">桌面端剪贴板设置暂不可用，不影响插件锁定策略。</p>}
             <div className="flex flex-wrap gap-2">

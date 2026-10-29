@@ -126,6 +126,24 @@ impl VaultSession {
         Ok(Some(item.id))
     }
 
+    pub fn find_managed_ssh_key_id_for_account(
+        &self,
+        account_id: Uuid,
+        host_key_sha256: &str,
+    ) -> Result<Option<Uuid>, VaultError> {
+        let payload = self.payload()?;
+        let item = payload.ssh_items.iter().find(|item| {
+            item.managed_ssh_host
+                .as_ref()
+                .is_some_and(|binding| {
+                    binding.account_id == account_id
+                        && binding.host_key_sha256 == host_key_sha256
+                })
+                && item.private_key.is_some()
+        });
+        Ok(item.map(|item| item.id))
+    }
+
     /// Adds the generated key and its alias binding to the encrypted payload.
     /// Persistence remains owned by the runtime transaction surrounding this
     /// mutation.

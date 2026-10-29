@@ -31,7 +31,8 @@ export function SshExternalLauncher({ account }: { account: SshCredentialSummary
       } else if (result.passwordCopySkipped) {
         toast.warning(`${preferredClientLabel} 已打开，但密码未自动复制。`, { description: '窗口失焦锁定或主密码复核策略阻止了自动复制，请从保险库手动复制 SSH 密码。' });
       } else if (result.authentication === 'key') {
-        toast.success(`${preferredClientLabel} 已使用 SSH 密钥打开。`);
+        const duration = result.durationMinutes ?? settings.sshSessionDurationMinutes ?? 15;
+        toast.success(`${preferredClientLabel} 已通过短时 SSH 会话打开。`, { description: `已签发内存 SSH-Agent 临时会话（有效期 ${duration} 分钟）。` });
       } else if (result.authentication === 'password') {
         toast.success(`${preferredClientLabel} 已打开。`, { description: '请在终端输入 SSH 密码；可在设置中启用自动复制。' });
       } else {

@@ -62,6 +62,8 @@ fn agent_sftp_paths_are_component_bounded_and_never_prefix_confused() {
 
 #[test]
 fn install_command_uses_stdin_and_never_interpolates_key_material() {
+    assert!(INSTALL_PUBLIC_KEY_COMMAND.starts_with("sh -c '"));
+    assert!(INSTALL_PUBLIC_KEY_COMMAND.ends_with('\''));
     assert!(INSTALL_PUBLIC_KEY_COMMAND.contains("key=$(cat)"));
     assert!(INSTALL_PUBLIC_KEY_COMMAND.contains("grep -qxF"));
     assert!(INSTALL_PUBLIC_KEY_COMMAND.contains("chmod 600"));

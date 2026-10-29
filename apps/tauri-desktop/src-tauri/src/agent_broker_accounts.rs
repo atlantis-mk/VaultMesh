@@ -383,6 +383,11 @@ impl AgentBrokerCore {
                                 "risk": "R3"
                             }),
                             json!({
+                                "name": "ssh-agent",
+                                "tools": ["vaultmesh_ssh_agent_open", "vaultmesh_ssh_agent_close"],
+                                "risk": "R1"
+                            }),
+                            json!({
                                 "name": "pty",
                                 "tools": [
                                     "vaultmesh_ssh_pty_open",

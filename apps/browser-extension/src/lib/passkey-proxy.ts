@@ -1,4 +1,4 @@
-import { backgroundDesktopRpc, DesktopRpcError } from '@/lib/desktop-rpc';
+import { backgroundDesktopRpc, DesktopRpcError, type WorkspaceSnapshot } from '@/lib/desktop-rpc';
 import { rememberedLoginSelection } from '@/lib/autofill-preferences';
 
 type WebAuthenticationProxyApi = typeof browser.webAuthenticationProxy;
@@ -14,6 +14,7 @@ export type PasskeyProxyOptions = {
   openUnlockPrompt?: () => Promise<void>;
   now?: () => number;
   unlockPollMs?: number;
+  autoAttach?: boolean;
 };
 
 /** Upper bound for holding a WebAuthn request while the user unlocks. */
@@ -24,24 +25,34 @@ export const PASSKEY_BYPASS_MS = 5 * 60_000;
 type PendingUnlock = PasskeyUnlockPrompt & { requestId: number; settle: (outcome: 'unlocked' | 'declined' | 'expired') => void };
 
 /** Connect Chromium's WebAuthn proxy to the encrypted desktop vault. The
- * proxy is attached from worker start and stays attached while the extension
- * is locked or the native port is reconnecting: such a request waits for
- * VaultMesh to become usable. Only a confirmed unpaired extension or the
- * user's explicit refusal to unlock returns WebAuthn to the browser. Signing
- * still requires an unlocked vault and the desktop's native confirmation. */
+ * proxy attaches dynamically only when the active site has a stored passkey
+ * in VaultMesh, leaving Chrome's native Touch ID and platform authenticators
+ * completely unblocked for sites that do not use VaultMesh passkeys. */
 export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
   const proxy = options.proxy ?? (browser as typeof browser & { webAuthenticationProxy?: WebAuthenticationProxyApi }).webAuthenticationProxy;
   const rpc = options.rpc ?? backgroundDesktopRpc;
   const openUnlockPrompt = options.openUnlockPrompt ?? (async () => undefined);
   const now = options.now ?? Date.now;
   const unlockPollMs = options.unlockPollMs ?? 1_000;
+  const autoAttach = options.autoAttach ?? false;
   let attached = false;
   let bypassUntil = 0;
+  let tabBypass = !autoAttach;
+  let policyEnabled = true;
   const cancelled = new Set<number>();
   const pendingUnlocks = new Map<string, PendingUnlock>();
 
   const noop = async () => undefined;
-  if (!proxy) return { sync: noop, detach: noop, pendingUnlockPrompt: () => null, declineUnlock: () => false };
+  if (!proxy) {
+    return {
+      sync: noop,
+      detach: noop,
+      pendingUnlockPrompt: () => null,
+      declineUnlock: () => false,
+      setTabBypass: () => undefined,
+      setEnabled: () => undefined,
+    };
+  }
 
   proxy.onRequestCanceled.addListener((requestId) => {
     cancelled.add(requestId);
@@ -69,6 +80,11 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
     finish: FinishRequest,
     extraInput: Record<string, unknown> = {},
   ) {
+    if (isNativePasskeyBypassRequest(requestDetailsJson)) {
+      await detach();
+      await finish({ requestId, error: { name: 'NotAllowedError', message: '已直通浏览器原生生物识别/通行密钥。' } }).catch(() => undefined);
+      return;
+    }
     try {
       let result: { responseJson?: unknown };
       try {
@@ -94,7 +110,9 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
     } catch (error) {
       if (cancelled.delete(requestId)) return;
       await finish({ requestId, error: domException(error) }).catch(() => undefined);
-      if (error instanceof DesktopRpcError && error.code === 'unpaired') await detach();
+      if (error instanceof DesktopRpcError && (error.code === 'unpaired' || error.code === 'cancelled')) {
+        await bypass();
+      }
     }
   }
 
@@ -152,6 +170,7 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
 
   async function attach() {
     if (attached) return;
+    if (!policyEnabled || tabBypass || bypassUntil > now()) return;
     if (await tryAttach()) return;
     // A restarted MV3 worker forgets that Chromium still holds this
     // extension's attachment; re-attach from a clean state once.
@@ -190,15 +209,35 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
         return;
       }
     }
-    if (bypassUntil > now()) await detach();
+    if (!policyEnabled || tabBypass || bypassUntil > now()) await detach();
     else await attach();
+  }
+
+  function setTabBypass(active: boolean) {
+    if (tabBypass === active) return;
+    tabBypass = active;
+    if (tabBypass) {
+      void detach();
+    } else {
+      void sync();
+    }
+  }
+
+  function setEnabled(enabled: boolean) {
+    if (policyEnabled === enabled) return;
+    policyEnabled = enabled;
+    if (!policyEnabled) {
+      void detach();
+    } else {
+      void sync();
+    }
   }
 
   // Attach before the first status round-trip so an early page request
   // cannot reach the browser's own authenticator.
   void attach();
 
-  return { sync, detach, pendingUnlockPrompt, declineUnlock };
+  return { sync, detach, pendingUnlockPrompt, declineUnlock, setTabBypass, setEnabled };
 }
 
 function waitsForVaultMesh(error: unknown): boolean {
@@ -222,9 +261,133 @@ export function passkeyRequestOrigin(requestDetailsJson: string): string | null 
   }
 }
 
+export function passkeyRequestRpId(requestDetailsJson: string): string | null {
+  if (requestDetailsJson.length < 2 || requestDetailsJson.length > 128 * 1024) return null;
+  try {
+    const request = JSON.parse(requestDetailsJson) as {
+      rpId?: unknown;
+      rp?: { id?: unknown };
+    };
+    if (typeof request.rpId === 'string' && request.rpId.length > 0) return request.rpId;
+    if (typeof request.rp?.id === 'string' && request.rp.id.length > 0) return request.rp.id;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function isNativePasskeyBypassHost(host: string): boolean {
+  const normalized = host.toLowerCase().trim();
+  if (!normalized) return false;
+  const bypassSuffixes = [
+    'google.com',
+    'google.co.jp',
+    'google.co.uk',
+    'google.de',
+    'google.fr',
+    'google.com.hk',
+    'google.com.tw',
+    'googleusercontent.com',
+    'apple.com',
+    'icloud.com',
+    'live.com',
+    'microsoft.com',
+    'microsoftonline.com',
+  ];
+  return bypassSuffixes.some((suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`));
+}
+
+export function isNativePasskeyBypassUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    return isNativePasskeyBypassHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function isNativePasskeyBypassRequest(requestDetailsJson: string): boolean {
+  const origin = passkeyRequestOrigin(requestDetailsJson);
+  if (origin && isNativePasskeyBypassUrl(origin)) return true;
+  const rpId = passkeyRequestRpId(requestDetailsJson);
+  if (rpId && isNativePasskeyBypassHost(rpId)) return true;
+  return false;
+}
+
 export async function defaultLoginIdForPasskeyRequest(requestDetailsJson: string): Promise<string | null> {
   const origin = passkeyRequestOrigin(requestDetailsJson);
   return origin ? rememberedLoginSelection(origin) : null;
+}
+
+/**
+ * Checks whether the given workspace snapshot has a passkey associated with the specified host.
+ * This ensures VaultMesh only dynamically attaches Chromium's WebAuthn proxy for sites
+ * that actually have credentials stored in the vault, leaving native macOS Touch ID
+ * unintercepted for all other sites (e.g. GitHub, Google, etc.).
+ */
+export function hasPasskeyForHost(
+  snapshot: WorkspaceSnapshot | null | undefined,
+  host: string | null | undefined,
+): boolean {
+  if (!snapshot || !host) return false;
+  const targetHost = host.toLowerCase().trim();
+  if (!targetHost) return false;
+
+  const loginsById = new Map<string, (typeof snapshot.items)[number]>();
+  for (const item of snapshot.items ?? []) {
+    loginsById.set(item.id, item);
+  }
+
+  const passkeys = (snapshot.secrets ?? []).filter((s) => s.isPasskey);
+  for (const passkey of passkeys) {
+    if (passkey.website) {
+      const candidate = extractHost(passkey.website);
+      if (candidate && hostsMatch(targetHost, candidate)) {
+        return true;
+      }
+    }
+    if (passkey.loginId) {
+      const login = loginsById.get(passkey.loginId);
+      if (login?.url) {
+        const candidate = extractHost(login.url);
+        if (candidate && hostsMatch(targetHost, candidate)) {
+          return true;
+        }
+      }
+    }
+    if (passkey.title) {
+      const titleCandidate = extractHost(passkey.title);
+      if (titleCandidate && hostsMatch(targetHost, titleCandidate)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function extractHost(candidate: string | null | undefined): string | null {
+  if (!candidate) return null;
+  const trimmed = candidate.trim().toLowerCase();
+  if (!trimmed) return null;
+  try {
+    const url = trimmed.includes('://') ? new URL(trimmed) : new URL(`https://${trimmed}`);
+    return url.hostname.toLowerCase();
+  } catch {
+    const matched = trimmed.match(/(?:https?:\/\/)?([a-z0-9.-]+\.[a-z]{2,})/);
+    return matched ? matched[1] : null;
+  }
+}
+
+function hostsMatch(target: string, candidate: string): boolean {
+  const t = target.toLowerCase();
+  const c = candidate.toLowerCase();
+  if (t === c) return true;
+  if (t.endsWith(`.${c}`)) return true;
+  if (c.endsWith(`.${t}`)) return true;
+  return false;
 }
 
 function domException(error: unknown) {

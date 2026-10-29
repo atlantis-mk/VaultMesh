@@ -230,7 +230,7 @@ fn run_client(client_argument: &str, expected_wire_key: &str) {
     );
     let listed = read_mcp(&mut stdout);
     let tools = listed["result"]["tools"].as_array().expect("tools");
-    assert_eq!(tools.len(), 28);
+    assert_eq!(tools.len(), 30);
     assert!(
         tools
             .iter()
@@ -352,7 +352,7 @@ fn run_client(client_argument: &str, expected_wire_key: &str) {
         json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {} }),
     );
     let revoked = read_mcp(&mut stdout);
-    assert_eq!(revoked["result"]["tools"].as_array().unwrap().len(), 28);
+    assert_eq!(revoked["result"]["tools"].as_array().unwrap().len(), 30);
 
     send_mcp(
         &mut stdin,

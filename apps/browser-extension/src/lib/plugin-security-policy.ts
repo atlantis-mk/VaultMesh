@@ -13,6 +13,7 @@ const pluginSecurityPolicySchema = z.object({
     z.literal(15),
     z.literal(30),
   ]),
+  passkeyProxyEnabled: z.boolean().default(true),
 });
 
 export type PluginSecurityPolicy = z.infer<typeof pluginSecurityPolicySchema>;
@@ -22,6 +23,7 @@ export const DEFAULT_PLUGIN_SECURITY_POLICY: PluginSecurityPolicy = {
   lockOnBrowserRestart: true,
   lockOnSystemLock: true,
   idleTimeoutMinutes: 5,
+  passkeyProxyEnabled: true,
 };
 
 export async function loadPluginSecurityPolicy(): Promise<PluginSecurityPolicy> {

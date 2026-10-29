@@ -390,17 +390,19 @@ account/target/policy 更新、client disconnect 和 final lock 使其失效。
 
 | Tool | 能力 | 返回 | 风险 |
 | --- | --- | --- | --- |
-| `vaultmesh_ssh_exec` | 对 SSH account 执行结构化 `program` + `arguments[]` | exit/status/bounded stdout/stderr | R1–R4 |
-| `vaultmesh_ssh_upload` | broker-owned local handle → approved remote path | bytes/hash/status | R2 |
-| `vaultmesh_ssh_download` | approved remote path → broker-owned result handle | bytes/hash/handle | R1–R3 |
-| `vaultmesh_ssh_public_key_install` | 通过现有 channel 安装 public key并验证 | fingerprint/status | R2 |
-| `vaultmesh_ssh_host_setup` | 为 exact SSH account 生成并在 Vault 保存专属 ED25519 key、安装公钥并创建 VaultMesh 管理的 OpenSSH alias | alias/command/opaque credentialRef/public fingerprint/status；无 key/path/host | R3 exact-only |
-| `vaultmesh_ssh_pty_open` | 打开独占 PTY session | sessionRef/terminal metadata | R3 |
-| `vaultmesh_ssh_pty_read` | 读取 sanitized bounded terminal output | chunks/sequence | R3 session |
-| `vaultmesh_ssh_pty_write` | 写入 bounded bytes/resize-safe input | accepted sequence | R3 session |
-| `vaultmesh_ssh_pty_resize` | 调整 PTY | status | R3 session |
-| `vaultmesh_ssh_pty_close` | 关闭 PTY | exit/status | R3 session |
-| `vaultmesh_ssh_tunnel_open` | 仅内部 ConnectorDefinition 预定义且绑定 exact SSH item/Host Key 的固定 tunnel | sessionRef/status | R3 |
+| `vaultmesh_ssh_agent_open` | 为 exact SSH account 创建本地短时 SSH-Agent 协议桥接会话（原生 OpenSSH/rsync/scp/sftp 免打扰，支持已有私钥及纯密码账号全自动动态密钥签发，直连真实 IP/域名，仅需 Vault 解锁，免二次动作审批） | sessionRef/socketPath/exportCommand/targetHost/targetPort/targetUser/sshCommand/expiresAt/accountLabel/fingerprint | R1 |
+| `vaultmesh_ssh_agent_close` | 主动关闭本地短时 SSH-Agent 桥接会话并销毁 Socket | closed/sessionRef | R0 |
+| `vaultmesh_ssh_host_setup` | [已废弃 / Deprecated: 避免向宿主机写入配置，推荐使用 vaultmesh_ssh_agent_open 直连真实 IP/域名] 为 exact SSH account 生成并在 Vault 保存专属 ED25519 key、安装公钥并创建 VaultMesh 管理的 OpenSSH alias | alias/command/opaque credentialRef/public fingerprint/status；无 key/path/host | R3 exact-only |
+| `vaultmesh_ssh_exec` | [已废弃 / Deprecated: 推荐使用 vaultmesh_ssh_agent_open] 对 SSH account 执行结构化 `program` + `arguments[]` | exit/status/bounded stdout/stderr | R1–R4 |
+| `vaultmesh_ssh_upload` | [已废弃 / Deprecated: 推荐使用 vaultmesh_ssh_agent_open 搭配 scp/rsync] broker-owned local handle → approved remote path | bytes/hash/status | R2 |
+| `vaultmesh_ssh_download` | [已废弃 / Deprecated: 推荐使用 vaultmesh_ssh_agent_open 搭配 scp/rsync] approved remote path → broker-owned result handle | bytes/hash/handle | R1–R3 |
+| `vaultmesh_ssh_public_key_install` | [已废弃 / Deprecated] 通过现有 channel 安装 public key并验证 | fingerprint/status | R2 |
+| `vaultmesh_ssh_pty_open` | [已废弃 / Deprecated: 推荐使用 vaultmesh_ssh_agent_open 原生终端] 打开独占 PTY session | sessionRef/terminal metadata | R3 |
+| `vaultmesh_ssh_pty_read` | [已废弃 / Deprecated] 读取 sanitized bounded terminal output | chunks/sequence | R3 session |
+| `vaultmesh_ssh_pty_write` | [已废弃 / Deprecated] 写入 bounded bytes/resize-safe input | accepted sequence | R3 session |
+| `vaultmesh_ssh_pty_resize` | [已废弃 / Deprecated] 调整 PTY | status | R3 session |
+| `vaultmesh_ssh_pty_close` | [已废弃 / Deprecated] 关闭 PTY | exit/status | R3 session |
+| `vaultmesh_ssh_tunnel_open` | [已废弃 / Deprecated: 推荐使用原生 ssh -L/-R] 仅内部 ConnectorDefinition 预定义且绑定 exact SSH item/Host Key 的固定 tunnel | sessionRef/status | R3 |
 
 upload/download/public-key/PTY 在 v2 进入 SSH item direct ActionPlan；tunnel 只有存在唯一匹配的固定
 ConnectorDefinition endpoint 时才进入该 SSH item 的安全目录，否则 fail closed。不得添加

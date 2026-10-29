@@ -79,11 +79,12 @@ const CONFIRMATION_TTL_MILLIS: u64 = AUTHORIZATION_TTL_MILLIS;
 const PERMISSION_TTL_MILLIS: u64 = MAX_SESSION_MILLIS;
 const PAIRING_REQUEST_TTL_MILLIS: u64 = 10 * 60_000;
 const SESSION_REQUEST_LIMIT: u32 = 1_000;
-const SESSION_BASE_TOOLS: [&str; 4] = [
+const SESSION_BASE_TOOLS: [&str; 5] = [
     "vaultmesh_accounts_list",
     "vaultmesh_items_list_metadata",
     "vaultmesh_item_get_metadata",
     "vaultmesh_request_local_ui",
+    "vaultmesh_ssh_agent_close",
 ];
 #[cfg(unix)]
 const MAX_IPC_LINE_BYTES: usize = 384 * 1024;
@@ -256,6 +257,8 @@ pub struct AgentToolDefinition {
     pub risk: String,
     pub requires_account: bool,
     pub confirmation: String,
+    #[serde(default)]
+    pub deprecated: bool,
     pub parameters: Vec<AgentToolParameter>,
 }
 

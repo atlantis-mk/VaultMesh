@@ -4,7 +4,7 @@ use super::*;
 fn ct_agent_protocol_registry_is_shared_strict_and_secret_free() {
     let registry = capability_registry().unwrap();
     assert_eq!(registry.protocol_version, 2);
-    assert_eq!(registry.tools.len(), 28);
+    assert_eq!(registry.tools.len(), 30);
     let serialized = serde_json::to_string(&registry).unwrap();
     for forbidden in ["get_password", "export_secret", "dump_vault", "copy_secret"] {
         assert!(!serialized.contains(forbidden));
@@ -16,8 +16,10 @@ fn ct_agent_protocol_registry_is_shared_strict_and_secret_free() {
             .map(|tool| &tool.name)
             .collect::<HashSet<_>>()
             .len(),
-        28
+        30
     );
+    assert!(registry.tools.iter().any(|tool| tool.name == "vaultmesh_ssh_agent_open"));
+    assert!(registry.tools.iter().any(|tool| tool.name == "vaultmesh_ssh_agent_close"));
     let accounts = registry
         .tools
         .iter()
@@ -1918,4 +1920,75 @@ fn ct_agent_permission_permanent_requires_scoped_store_and_session_grants_remain
             1_005,
         )
         .unwrap();
+}
+
+#[test]
+fn ct_agent_ssh_agent_open_requires_unlock_but_no_authorization_prompt() {
+    let unlocked_clients = Arc::new(Mutex::new(HashSet::<Uuid>::new()));
+    let source_item_ref = Uuid::new_v4();
+    let mut broker =
+        AgentBrokerCore::new_with_pairing_proofs(AgentPairingProofs::memory()).unwrap();
+    let access = Arc::clone(&unlocked_clients);
+    broker.set_access_check(Arc::new(move |client_id| {
+        access
+            .lock()
+            .is_ok_and(|clients| clients.contains(&client_id))
+    }));
+    broker.set_account_catalog(Arc::new(move || {
+        Ok(AgentAccountCatalogSnapshot {
+            connector_definitions: Vec::new(),
+            candidates: vec![AgentVaultAccountCandidate {
+                account_ref: source_item_ref,
+                kind: "ssh".into(),
+                label: "Direct SSH".into(),
+            }],
+        })
+    }));
+    broker.set_direct_ssh_policy_factory(Arc::new(move |item_id, tool, _parameters| {
+        assert_eq!(item_id, source_item_ref);
+        assert_eq!(tool, "vaultmesh_ssh_agent_open");
+        Ok(test_direct_ssh_policy(
+            item_id,
+            "Direct SSH",
+            "server.example.test",
+        ))
+    }));
+    let client = broker.register_client(peer(), hello(&[]), 1_000).unwrap();
+    broker.approve_pairing_at(&client.client_id, 1_001).unwrap();
+    let client_id = Uuid::parse_str(&client.client_id).unwrap();
+    let agent_open_request = |request_id| {
+        serde_json::to_vec(&json!({
+            "protocolVersion": 2,
+            "requestId": request_id,
+            "accountRef": source_item_ref,
+            "tool": "vaultmesh_ssh_agent_open",
+            "toolVersion": 1,
+            "parameters": { "durationMinutes": 15 }
+        }))
+        .unwrap()
+    };
+
+    // 1. When locked: must require unlock
+    let request_id = Uuid::new_v4();
+    let locked = broker.handle_json(client_id, &agent_open_request(request_id), 1_002);
+    assert_eq!(locked["error"]["code"], "mcp-locked");
+    assert_eq!(locked["error"]["nativeActionRequired"], "unlock-agent");
+
+    // 2. Unlock vault
+    let unlock_ref = locked["error"]["details"]["unlockRef"].as_str().unwrap().to_owned();
+    unlocked_clients.lock().unwrap().insert(client_id);
+    broker
+        .resolve_unlock_request(&unlock_ref, client_id, true, 1_003)
+        .unwrap();
+
+    // 3. When unlocked: does NOT return permission-required or authorization-required!
+    let next_id = Uuid::new_v4();
+    let (response, _audit, action) =
+        broker.authorize_json_for_dispatch(client_id, &agent_open_request(next_id), 1_004);
+    assert_ne!(response["error"]["code"], "authorization-required");
+    assert_ne!(response["error"]["code"], "permission-required");
+    assert_eq!(response["ok"], true);
+    let authorized = action.expect("action authorized without popup");
+    assert_eq!(authorized.tool, "vaultmesh_ssh_agent_open");
+    assert_eq!(authorized.account_ref.as_deref(), Some(source_item_ref.to_string().as_str()));
 }

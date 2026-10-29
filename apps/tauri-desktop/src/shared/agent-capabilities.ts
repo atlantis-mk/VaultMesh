@@ -20,6 +20,7 @@ export type AgentToolDefinition = {
   risk: AgentRiskTier;
   requiresAccount: boolean;
   confirmation: AgentConfirmation;
+  deprecated?: boolean;
   parameters: readonly AgentToolParameter[];
 };
 

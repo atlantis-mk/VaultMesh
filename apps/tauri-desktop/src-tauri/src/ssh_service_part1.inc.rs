@@ -21,7 +21,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_RESOLVED_ADDRESSES: usize = 8;
 const MAX_AGENT_TRANSFER_BYTES: usize = 32 * 1024 * 1024;
 
-const INSTALL_PUBLIC_KEY_COMMAND: &str = r#"umask 077 &&
+const INSTALL_PUBLIC_KEY_COMMAND: &str = r#"sh -c 'umask 077 &&
 mkdir -p "$HOME/.ssh" &&
 touch "$HOME/.ssh/authorized_keys" &&
 chmod 700 "$HOME/.ssh" &&
@@ -30,8 +30,8 @@ key=$(cat) &&
 if grep -qxF "$key" "$HOME/.ssh/authorized_keys"; then
   exit 20
 else
-  printf '%s\n' "$key" >> "$HOME/.ssh/authorized_keys"
-fi"#;
+  printf "%s\n" "$key" >> "$HOME/.ssh/authorized_keys"
+fi'"#;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SshTarget {

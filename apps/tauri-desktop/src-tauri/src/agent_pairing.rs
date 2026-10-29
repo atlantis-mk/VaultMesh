@@ -99,48 +99,19 @@ trait AgentPairingIndexStore: Send + Sync {
     fn save(&self, records: &[AgentPairingRecord]) -> Result<(), ()>;
 }
 
-struct PlatformAgentPairingProofStore;
+struct PlatformAgentPairingProofStore(crate::device_credentials::ScopedCredentialStore);
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl AgentPairingProofStore for PlatformAgentPairingProofStore {
     fn set(&self, account: &str, proof: &[u8]) -> Result<(), ()> {
-        keyring::Entry::new(AGENT_PAIRING_SERVICE, account)
-            .and_then(|entry| entry.set_secret(proof))
-            .map_err(|_| ())
+        self.0.set(account, proof).map_err(|_| ())
     }
 
     fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ()> {
-        match keyring::Entry::new(AGENT_PAIRING_SERVICE, account)
-            .and_then(|entry| entry.get_secret())
-        {
-            Ok(proof) => Ok(Some(Zeroizing::new(proof))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(()),
-        }
+        self.0.get(account).map_err(|_| ())
     }
 
     fn delete(&self, account: &str) -> Result<(), ()> {
-        match keyring::Entry::new(AGENT_PAIRING_SERVICE, account)
-            .and_then(|entry| entry.delete_credential())
-        {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(()),
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-impl AgentPairingProofStore for PlatformAgentPairingProofStore {
-    fn set(&self, _account: &str, _proof: &[u8]) -> Result<(), ()> {
-        Err(())
-    }
-
-    fn get(&self, _account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ()> {
-        Ok(None)
-    }
-
-    fn delete(&self, _account: &str) -> Result<(), ()> {
-        Ok(())
+        self.0.delete(account).map_err(|_| ())
     }
 }
 
@@ -203,9 +174,14 @@ pub struct AgentPairingProofs {
 }
 
 impl AgentPairingProofs {
-    pub fn platform(record_path: PathBuf) -> Self {
+    pub fn platform(
+        record_path: PathBuf,
+        credentials: &crate::device_credentials::DeviceCredentialStore,
+    ) -> Self {
         Self {
-            store: Arc::new(PlatformAgentPairingProofStore),
+            store: Arc::new(PlatformAgentPairingProofStore(
+                credentials.scoped(AGENT_PAIRING_SERVICE),
+            )),
             index: Arc::new(FileAgentPairingIndexStore(record_path)),
         }
     }

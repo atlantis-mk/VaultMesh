@@ -728,6 +728,17 @@ fn direct_ssh_action_policy(
                 .unwrap_or("SSH key");
             fixed("R2", format!("安装公钥：{label}"))
         }
+        "vaultmesh_ssh_agent_open" => {
+            let duration_minutes = parameters
+                .get("durationMinutes")
+                .and_then(Value::as_u64)
+                .unwrap_or(15)
+                .clamp(1, 60);
+            fixed(
+                "R1",
+                format!("开启本地短时 SSH-Agent 桥接会话（原生工具直接免密连接，有效期 {duration_minutes} 分钟）"),
+            )
+        }
         "vaultmesh_ssh_host_setup" => {
             let alias = parameters
                 .get("alias")
@@ -996,6 +1007,63 @@ mod tests {
             )
             .is_err()
         );
+        runtime.lock();
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn ct_agent_ssh_agent_open_is_r1_with_duration() {
+        let (mut runtime, path, item_id) = runtime_with_ssh();
+        let fingerprint = format!("SHA256:{}", "a".repeat(43));
+        let policy = generate_direct_ssh_policy_with_host_key_inspector(
+            &mut runtime,
+            item_id,
+            "vaultmesh_ssh_agent_open",
+            &json!({ "durationMinutes": 30 }),
+            |_| Ok(fingerprint.clone()),
+        )
+        .expect("ssh agent open policy");
+        assert_eq!(policy.risk, "R1");
+        assert!(policy.action_display.contains("30 分钟"));
+        runtime.lock();
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn ct_agent_ssh_agent_open_resolves_managed_key_for_password_account() {
+        let (mut runtime, path, item_id) = runtime_with_ssh();
+        let fingerprint = format!("SHA256:{}", "a".repeat(43));
+        let policy = generate_direct_ssh_policy_with_host_key_inspector(
+            &mut runtime,
+            item_id,
+            "vaultmesh_ssh_agent_open",
+            &json!({ "durationMinutes": 30 }),
+            |_| Ok(fingerprint.clone()),
+        )
+        .expect("ssh agent open policy");
+
+        let identity = crate::ssh_host_setup::generate_ssh_host_identity("auto-test").unwrap();
+        runtime
+            .add_managed_ssh_host_key(
+                item_id,
+                "auto-test".to_owned(),
+                fingerprint.clone(),
+                identity.public_key,
+                identity.private_key,
+            )
+            .expect("add managed key");
+
+        let cancellation = std::sync::atomic::AtomicBool::new(false);
+        let material = crate::agent_ssh_runtime::collect_direct_agent_ssh_agent_material(
+            &mut runtime,
+            &policy,
+            &cancellation,
+        )
+        .expect("material collected via managed key");
+
+        assert!(!material.private_key.is_empty());
+        assert_eq!(material.account_label, "Unraid");
+
         runtime.lock();
         std::fs::remove_file(path).expect("cleanup");
     }

@@ -12,7 +12,13 @@ describe('CT-AGENT-PROTOCOL-001 Agent capability registry', () => {
   it('is exhaustive, unique, versioned, strict and contains no secret getter', () => {
     expect(() => assertAgentCapabilityRegistry()).not.toThrow();
     expect(AGENT_CAPABILITY_REGISTRY.protocolVersion).toBe(2);
-    expect(AGENT_CAPABILITY_REGISTRY.tools).toHaveLength(28);
+    expect(AGENT_CAPABILITY_REGISTRY.tools).toHaveLength(30);
+    const agentOpen = AGENT_CAPABILITY_REGISTRY.tools.find(({ name }) => name === 'vaultmesh_ssh_agent_open');
+    expect(agentOpen).toMatchObject({ version: 1, capability: 'ssh-agent', risk: 'R1', confirmation: 'none', requiresAccount: true });
+    const agentClose = AGENT_CAPABILITY_REGISTRY.tools.find(({ name }) => name === 'vaultmesh_ssh_agent_close');
+    expect(agentClose).toMatchObject({ version: 1, capability: 'ssh-agent', risk: 'R0', requiresAccount: false });
+    const legacyExec = AGENT_CAPABILITY_REGISTRY.tools.find(({ name }) => name === 'vaultmesh_ssh_exec');
+    expect(legacyExec?.deprecated).toBe(true);
     expect(AGENT_CAPABILITY_REGISTRY.tools.map(({ name }) => name).join('\n')).not.toMatch(permanentlyForbidden);
     expect(AGENT_CAPABILITY_REGISTRY.tools.map(({ name }) => name)).not.toEqual(
       expect.arrayContaining([
@@ -42,6 +48,10 @@ describe('CT-AGENT-PROTOCOL-001 Agent capability registry', () => {
     ]);
     expect(ssh).toMatchObject({ version: 2, requiresAccount: true, risk: 'R1' });
     expect(ssh?.parameters.map(({ name }) => name)).toEqual(['program', 'arguments']);
-    expect(AGENT_CAPABILITY_REGISTRY.tools.filter((tool) => tool.requiresAccount).every((tool) => tool.confirmation === 'permission')).toBe(true);
+    expect(
+      AGENT_CAPABILITY_REGISTRY.tools
+        .filter((tool) => tool.requiresAccount && tool.name !== 'vaultmesh_ssh_agent_open')
+        .every((tool) => tool.confirmation === 'permission')
+    ).toBe(true);
   });
 });

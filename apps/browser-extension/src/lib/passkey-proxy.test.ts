@@ -2,7 +2,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { rememberLoginSelection } from './autofill-preferences';
 import { DesktopRpcError } from './desktop-rpc';
-import { defaultLoginIdForPasskeyRequest, installPasskeyProxy } from './passkey-proxy';
+import {
+  defaultLoginIdForPasskeyRequest,
+  hasPasskeyForHost,
+  installPasskeyProxy,
+  isNativePasskeyBypassHost,
+  isNativePasskeyBypassRequest,
+  isNativePasskeyBypassUrl,
+  passkeyRequestRpId,
+} from './passkey-proxy';
 
 const loginId = '953370ec-4dc7-4c77-a6e0-f2a4f6e37f03';
 
@@ -60,7 +68,7 @@ function createFakeProxy() {
   return { proxy, completions, uvpaaResults, canceled, uvpaa, get, create };
 }
 
-function createHarness(initiallyUnlocked: boolean) {
+function createHarness(initiallyUnlocked: boolean, options: { autoAttach?: boolean } = {}) {
   const fake = createFakeProxy();
   const state = { unlocked: initiallyUnlocked, reachable: true, paired: true };
   const rpc = vi.fn(async (operation: string) => {
@@ -71,7 +79,13 @@ function createHarness(initiallyUnlocked: boolean) {
     return { responseJson: '{"ok":true}' };
   });
   const openUnlockPrompt = vi.fn(async () => undefined);
-  const passkeys = installPasskeyProxy({ proxy: fake.proxy as never, rpc: rpc as never, openUnlockPrompt, unlockPollMs: 5 });
+  const passkeys = installPasskeyProxy({
+    proxy: fake.proxy as never,
+    rpc: rpc as never,
+    openUnlockPrompt,
+    unlockPollMs: 5,
+    autoAttach: options.autoAttach ?? true,
+  });
   return { ...fake, state, rpc, openUnlockPrompt, passkeys };
 }
 
@@ -108,7 +122,7 @@ describe('Passkey proxy while the extension is locked', () => {
     let chromiumAttached = true;
     fake.proxy.attach = vi.fn(async () => { if (chromiumAttached) return 'already attached'; chromiumAttached = true; fake.proxy.attached = true; return undefined; }) as never;
     fake.proxy.detach = vi.fn(async () => { chromiumAttached = false; fake.proxy.attached = false; });
-    installPasskeyProxy({ proxy: fake.proxy as never, rpc: (async () => ({ unlocked: false })) as never, unlockPollMs: 5 });
+    installPasskeyProxy({ proxy: fake.proxy as never, rpc: (async () => ({ unlocked: false })) as never, unlockPollMs: 5, autoAttach: true });
     await vi.waitFor(() => expect(fake.proxy.attached).toBe(true));
     fake.uvpaa.emit({ requestId: 1 });
     await vi.waitFor(() => expect(fake.uvpaaResults).toEqual([true]));
@@ -181,5 +195,190 @@ describe('Passkey proxy while the extension is locked', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(harness.completions).toEqual([]);
     expect(harness.proxy.attached).toBe(true);
+  });
+});
+
+describe('Native Passkey / Touch ID bypass detection', () => {
+  it('identifies browser-native and platform authenticator hosts', () => {
+    expect(isNativePasskeyBypassHost('google.com')).toBe(true);
+    expect(isNativePasskeyBypassHost('accounts.google.com')).toBe(true);
+    expect(isNativePasskeyBypassHost('myaccount.google.com')).toBe(true);
+    expect(isNativePasskeyBypassHost('apple.com')).toBe(true);
+    expect(isNativePasskeyBypassHost('appleid.apple.com')).toBe(true);
+    expect(isNativePasskeyBypassHost('login.microsoftonline.com')).toBe(true);
+
+    expect(isNativePasskeyBypassHost('github.com')).toBe(false);
+    expect(isNativePasskeyBypassHost('example.com')).toBe(false);
+    expect(isNativePasskeyBypassHost('')).toBe(false);
+  });
+
+  it('identifies browser-native and platform authenticator URLs', () => {
+    expect(isNativePasskeyBypassUrl('https://accounts.google.com/signin/v2')).toBe(true);
+    expect(isNativePasskeyBypassUrl('https://appleid.apple.com/sign-in')).toBe(true);
+    expect(isNativePasskeyBypassUrl('https://github.com/login')).toBe(false);
+    expect(isNativePasskeyBypassUrl('chrome://settings')).toBe(false);
+    expect(isNativePasskeyBypassUrl(null)).toBe(false);
+  });
+
+  it('extracts rpId correctly from create and get requests', () => {
+    expect(passkeyRequestRpId(JSON.stringify({ rpId: 'google.com' }))).toBe('google.com');
+    expect(passkeyRequestRpId(JSON.stringify({ rp: { id: 'accounts.google.com' } }))).toBe('accounts.google.com');
+    expect(passkeyRequestRpId('{')).toBeNull();
+  });
+
+  it('detects native bypass from request details JSON', () => {
+    const googleGet = JSON.stringify({ rpId: 'google.com', extensions: { remoteDesktopClientOverride: { origin: 'https://accounts.google.com' } } });
+    expect(isNativePasskeyBypassRequest(googleGet)).toBe(true);
+
+    const normalGet = JSON.stringify({ rpId: 'github.com', extensions: { remoteDesktopClientOverride: { origin: 'https://github.com' } } });
+    expect(isNativePasskeyBypassRequest(normalGet)).toBe(false);
+  });
+
+  it('immediately detaches and completes with error when a native bypass request arrives', async () => {
+    const harness = createHarness(true);
+    await harness.passkeys.sync();
+    expect(harness.proxy.attached).toBe(true);
+
+    const googleRequest = JSON.stringify({ rpId: 'google.com', extensions: { remoteDesktopClientOverride: { origin: 'https://accounts.google.com' } } });
+    harness.get.emit({ requestId: 101, requestDetailsJson: googleRequest });
+
+    await vi.waitFor(() => expect(harness.completions).toEqual([
+      { requestId: 101, error: expect.objectContaining({ name: 'NotAllowedError' }) },
+    ]));
+    expect(harness.proxy.attached).toBe(false);
+  });
+
+  it('detaches when tab bypass is activated and re-attaches when deactivated', async () => {
+    const harness = createHarness(true);
+    await harness.passkeys.sync();
+    expect(harness.proxy.attached).toBe(true);
+
+    harness.passkeys.setTabBypass(true);
+    await vi.waitFor(() => expect(harness.proxy.attached).toBe(false));
+
+    harness.passkeys.setTabBypass(false);
+    await vi.waitFor(() => expect(harness.proxy.attached).toBe(true));
+  });
+
+  it('detaches when policy disables passkeys and re-attaches when enabled', async () => {
+    const harness = createHarness(true);
+    await harness.passkeys.sync();
+    expect(harness.proxy.attached).toBe(true);
+
+    harness.passkeys.setEnabled(false);
+    await vi.waitFor(() => expect(harness.proxy.attached).toBe(false));
+
+    harness.passkeys.setEnabled(true);
+    await vi.waitFor(() => expect(harness.proxy.attached).toBe(true));
+  });
+
+  it('starts detached when autoAttach is false', () => {
+    const harness = createHarness(true, { autoAttach: false });
+    expect(harness.proxy.attached).toBe(false);
+  });
+
+  it('bypasses for subsequent requests when user cancels the desktop dialog', async () => {
+    const fake = createFakeProxy();
+    const rpc = vi.fn(async (op: string) => {
+      if (op === 'vault.status') return { unlocked: true, hasVault: true, itemCount: 1 };
+      throw new DesktopRpcError('cancelled', '操作已取消。');
+    });
+    const passkeys = installPasskeyProxy({ proxy: fake.proxy as never, rpc: rpc as never, autoAttach: true });
+    await passkeys.sync();
+    expect(fake.proxy.attached).toBe(true);
+
+    fake.get.emit({ requestId: 201, requestDetailsJson: getRequest });
+    await vi.waitFor(() => expect(fake.proxy.attached).toBe(false));
+  });
+});
+
+describe('hasPasskeyForHost', () => {
+  const dummySnapshot = {
+    status: { unlocked: true, hasVault: true, itemCount: 2 },
+    items: [
+      {
+        id: '11111111-1111-1111-1111-111111111111',
+        title: 'GitHub Login',
+        username: 'alice',
+        url: 'https://github.com/login',
+        notes: null,
+        hasPassword: true,
+        hasTotpSecret: false,
+        hasRecoveryCodes: false,
+        autofillOnPageLoad: false,
+        masterPasswordReprompt: false,
+      },
+    ],
+    cards: [],
+    identities: [],
+    sshCredentials: [],
+    secrets: [
+      {
+        id: '22222222-2222-2222-2222-222222222222',
+        title: 'Alice · github.com',
+        kind: 'authenticator-key' as const,
+        provider: 'passkey',
+        account: 'alice',
+        environment: 'Passkey',
+        expiresAt: null,
+        website: 'https://github.com',
+        notes: null,
+        favorite: false,
+        masterPasswordReprompt: false,
+        isPasskey: true,
+        loginId: '11111111-1111-1111-1111-111111111111',
+      },
+      {
+        id: '33333333-3333-3333-3333-333333333333',
+        title: 'Direct Domain Passkey',
+        kind: 'authenticator-key' as const,
+        provider: 'passkey',
+        account: 'bob',
+        environment: 'Passkey',
+        expiresAt: null,
+        website: 'auth.corp.internal',
+        notes: null,
+        favorite: false,
+        masterPasswordReprompt: false,
+        isPasskey: true,
+        loginId: null,
+      },
+      {
+        id: '44444444-4444-4444-4444-444444444444',
+        title: 'Regular API Key',
+        kind: 'api-key' as const,
+        provider: 'aws',
+        account: null,
+        environment: null,
+        expiresAt: null,
+        website: 'https://aws.amazon.com',
+        notes: null,
+        favorite: false,
+        masterPasswordReprompt: false,
+        isPasskey: false,
+        loginId: null,
+      },
+    ],
+  };
+
+  it('returns true when a passkey matches the host directly or as subdomain', () => {
+    expect(hasPasskeyForHost(dummySnapshot, 'github.com')).toBe(true);
+    expect(hasPasskeyForHost(dummySnapshot, 'api.github.com')).toBe(true);
+    expect(hasPasskeyForHost(dummySnapshot, 'auth.corp.internal')).toBe(true);
+    expect(hasPasskeyForHost(dummySnapshot, 'sub.auth.corp.internal')).toBe(true);
+  });
+
+  it('returns false for unrelated hosts', () => {
+    expect(hasPasskeyForHost(dummySnapshot, 'google.com')).toBe(false);
+    expect(hasPasskeyForHost(dummySnapshot, 'notgithub.com')).toBe(false);
+    expect(hasPasskeyForHost(dummySnapshot, 'aws.amazon.com')).toBe(false); // isPasskey is false
+  });
+
+  it('returns false when snapshot or host is empty/null/undefined', () => {
+    expect(hasPasskeyForHost(null, 'github.com')).toBe(false);
+    expect(hasPasskeyForHost(undefined, 'github.com')).toBe(false);
+    expect(hasPasskeyForHost(dummySnapshot, '')).toBe(false);
+    expect(hasPasskeyForHost(dummySnapshot, null)).toBe(false);
+    expect(hasPasskeyForHost(dummySnapshot, undefined)).toBe(false);
   });
 });

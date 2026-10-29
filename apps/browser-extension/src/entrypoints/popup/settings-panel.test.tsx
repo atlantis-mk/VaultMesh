@@ -14,6 +14,7 @@ const desktopSettings = {
   lockOnSleep: true,
   clipboardClearTimeoutMs: 30_000,
   copySshPasswordOnLaunch: true,
+  sshSessionDurationMinutes: 15,
 };
 
 describe("CT-BROWSER-003 popup plugin security settings", () => {

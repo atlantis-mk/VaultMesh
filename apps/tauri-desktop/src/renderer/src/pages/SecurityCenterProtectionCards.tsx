@@ -433,7 +433,7 @@ export function SecurityCenterProtectionCards({ model, agentPage = false }: { mo
           title="自动锁定与剪贴板"
           description="在离开应用或设备休眠时保护保险库，并自动清除已复制的敏感内容。"
           summary={securitySettings
-            ? `失焦${securitySettings.lockOnBlur ? '锁定' : '不锁定'} · 空闲 ${formatDuration(securitySettings.idleTimeoutMs)} · 休眠${securitySettings.lockOnSleep ? '锁定' : '不锁定'} · 剪贴板 ${formatDuration(securitySettings.clipboardClearTimeoutMs)} · SSH 密码${securitySettings.copySshPasswordOnLaunch ? '自动复制' : '手动复制'}`
+            ? `失焦${securitySettings.lockOnBlur ? '锁定' : '不锁定'} · 空闲 ${formatDuration(securitySettings.idleTimeoutMs)} · 休眠${securitySettings.lockOnSleep ? '锁定' : '不锁定'} · 剪贴板 ${formatDuration(securitySettings.clipboardClearTimeoutMs)} · SSH 会话 ${securitySettings.sshSessionDurationMinutes ?? 15} 分钟`
             : '正在读取安全策略…'}
           actionLabel="配置安全策略"
           onOpenChange={(open) => {
@@ -533,10 +533,27 @@ export function SecurityCenterProtectionCards({ model, agentPage = false }: { mo
           </Card>
           <Card size="sm">
             <CardHeader>
-              <CardTitle>SSH 密码登录</CardTitle>
-              <CardDescription>没有可用 SSH 私钥时，打开终端前可自动复制账号密码，并按上方时长清除。</CardDescription>
+              <CardTitle>SSH 会话与登录</CardTitle>
+              <CardDescription>配置外部客户端（终端、VS Code）打开服务器时的短时 SSH-Agent 会话时长及密码自动复制行为。</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-4">
+              <Field>
+                <FieldLabel htmlFor="ssh-session-duration">临时会话有效期</FieldLabel>
+                <Select
+                  value={String(securityDraft?.sshSessionDurationMinutes ?? DEFAULT_SECURITY_SETTINGS.sshSessionDurationMinutes)}
+                  onValueChange={(value) => updateSecurityDraft({ sshSessionDurationMinutes: Number(value) })}
+                >
+                  <SelectTrigger id="ssh-session-duration"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="5">5 分钟（高安全）</SelectItem>
+                      <SelectItem value="15">15 分钟（默认）</SelectItem>
+                      <SelectItem value="30">30 分钟</SelectItem>
+                      <SelectItem value="60">60 分钟（上限）</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </Field>
               <Field>
                 <FieldLabel htmlFor="copy-ssh-password-on-launch">打开服务器时</FieldLabel>
                 <Select

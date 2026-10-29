@@ -207,11 +207,44 @@ mod windows_host {
     }
 
     fn load_pairing_secret(config: &HostConfig) -> Result<Zeroizing<[u8; 32]>, ()> {
-        let encoded = Zeroizing::new(
-            keyring::Entry::new(&config.keychain_service, &config.keychain_account)
-                .and_then(|entry| entry.get_password())
-                .map_err(|_| ())?,
-        );
+        let app_data: Option<PathBuf> = {
+            #[cfg(target_os = "macos")]
+            {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join("Library").join("Application Support").join(APP_DATA_NAME))
+            }
+            #[cfg(target_os = "windows")]
+            {
+                std::env::var_os("APPDATA")
+                    .map(PathBuf::from)
+                    .map(|dir| dir.join(APP_DATA_NAME))
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                None
+            }
+        };
+
+        let encoded_bytes = if let Some(ref dir) = app_data {
+            if let Ok(store) = vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::platform(dir) {
+                store.get(&config.keychain_service, &config.keychain_account).ok().flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let encoded = if let Some(bytes) = encoded_bytes {
+            Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| ())?)
+        } else {
+            Zeroizing::new(
+                keyring::Entry::new(&config.keychain_service, &config.keychain_account)
+                    .and_then(|entry| entry.get_password())
+                    .map_err(|_| ())?,
+            )
+        };
         let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded.as_bytes()).map_err(|_| ())?);
         if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(decoded.as_slice()) != encoded.as_str() {
             return Err(());
@@ -849,11 +882,44 @@ mod macos_host {
     }
 
     fn load_pairing_secret(config: &HostConfig) -> Result<Zeroizing<[u8; 32]>, ()> {
-        let encoded = Zeroizing::new(
-            keyring::Entry::new(&config.keychain_service, &config.keychain_account)
-                .and_then(|entry| entry.get_password())
-                .map_err(|_| ())?,
-        );
+        let app_data: Option<PathBuf> = {
+            #[cfg(target_os = "macos")]
+            {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join("Library").join("Application Support").join(APP_DATA_NAME))
+            }
+            #[cfg(target_os = "windows")]
+            {
+                std::env::var_os("APPDATA")
+                    .map(PathBuf::from)
+                    .map(|dir| dir.join(APP_DATA_NAME))
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                None
+            }
+        };
+
+        let encoded_bytes = if let Some(ref dir) = app_data {
+            if let Ok(store) = vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::platform(dir) {
+                store.get(&config.keychain_service, &config.keychain_account).ok().flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let encoded = if let Some(bytes) = encoded_bytes {
+            Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| ())?)
+        } else {
+            Zeroizing::new(
+                keyring::Entry::new(&config.keychain_service, &config.keychain_account)
+                    .and_then(|entry| entry.get_password())
+                    .map_err(|_| ())?,
+            )
+        };
         let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded.as_bytes()).map_err(|_| ())?);
         if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(decoded.as_slice()) != encoded.as_str() {
             return Err(());

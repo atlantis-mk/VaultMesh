@@ -30,7 +30,7 @@ export async function launchInstalledTauriApp({
     } catch {
       return false;
     }
-  }, 30_000, "Tauri 已启动，但浏览器 Broker 未在 30 秒内就绪。");
+  }, 60_000, "Tauri 已启动，但浏览器 Broker 未在 60 秒内就绪。");
 
   await run(process.execPath, [path.resolve(import.meta.dirname, "tauri-macos-browser-host.mjs")], {
     ...environment,

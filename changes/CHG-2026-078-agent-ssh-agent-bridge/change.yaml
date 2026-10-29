@@ -1,0 +1,33 @@
+schema: "2"
+id: "CHG-2026-078-agent-ssh-agent-bridge"
+title: "Agent 本地 SSH-Agent 桥接与旧工具废弃标注"
+type: "feature"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "提供短时本地 SSH-Agent 协议桥接会话，标记旧版代理 SSH MCP 工具为已废弃，并提供完整的 MCP Skill 使用指南"
+requirements:
+  - "REQ-AGENT-001"
+  - "REQ-AGENT-002"
+  - "REQ-AGENT-004"
+tests:
+  - "CT-AGENT-SSH-001"
+  - "CT-AGENT-PROTOCOL-001"
+adrs:
+  - "ADR-0052"
+context_refs:
+  - "specs/agent-capability-broker.md"
+  - "adr/0007-agent-capability-broker.md"
+  - "adr/0013-agent-managed-openssh-host-alias.md"
+  - "adr/0052-agent-ephemeral-ssh-agent-bridge.md"
+related_changes: []
+boundaries:
+  - "agent-broker"
+  - "ssh-agent-ipc"
+  - "mcp-protocol"
+risks:
+  - "SSH-Agent socket 必须设置严格文件权限 (Unix 0600, 目录 0700)，并在 session 到期或 Vault 锁定时立即清理"
+  - "旧版本代理 SSH 工具标注为已废弃，运行时保持向后兼容"
+next:
+  - "实现 agent_ssh_agent 协议处理器并在 MCP 中注册 vaultmesh_ssh_agent_open / close"
+  - "编写 MCP 使用说明书 Skill 供 Agent 和用户查阅"

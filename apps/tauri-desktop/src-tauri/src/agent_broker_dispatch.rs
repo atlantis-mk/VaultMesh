@@ -428,7 +428,11 @@ impl AgentBrokerCore {
             .sessions
             .get(&request.session_id)
             .is_some_and(|session| session.connection_managed);
-        if connection_session && tool.requires_account && !derived_ssh_pty_action {
+        if connection_session
+            && tool.requires_account
+            && !derived_ssh_pty_action
+            && request.tool != "vaultmesh_ssh_agent_open"
+        {
             let account_ref = request.account_ref.as_deref().ok_or_else(|| {
                 AgentBrokerError::new(
                     "account-required",
@@ -488,9 +492,29 @@ impl AgentBrokerCore {
                 }
             }
         }
-        let direct_ssh_policy = direct_policy_key
-            .as_ref()
-            .and_then(|key| self.active_direct_ssh_policies.get(key).cloned());
+        let direct_ssh_policy = if request.tool == "vaultmesh_ssh_agent_open" {
+            let account_uuid = request
+                .account_ref
+                .as_deref()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| {
+                    AgentBrokerError::new(
+                        "account-required",
+                        "An account reference is required.",
+                        false,
+                    )
+                })?;
+            let factory = self
+                .direct_ssh_policy_factory
+                .clone()
+                .ok_or_else(|| AgentBrokerError::action_rule_unavailable("ssh", &request.tool))?;
+            let policy = factory(account_uuid, &request.tool, &request.parameters)?;
+            Some(policy)
+        } else {
+            direct_policy_key
+                .as_ref()
+                .and_then(|key| self.active_direct_ssh_policies.get(key).cloned())
+        };
         let direct_http_policy = (request.tool == "vaultmesh_http_request")
             .then(|| {
                 request.account_ref.as_ref().and_then(|account_ref| {
@@ -517,11 +541,30 @@ impl AgentBrokerCore {
                     false,
                 )
             })?;
-            if !self
-                .sessions
-                .get(&request.session_id)
-                .is_some_and(|session| session.allowed_accounts.contains(account_ref))
-            {
+            let account_approved = if request.tool == "vaultmesh_ssh_agent_open" {
+                let is_valid = self
+                    .refresh_account_catalog()
+                    .map(|candidates| {
+                        candidates.iter().any(|candidate| {
+                            candidate.account_ref.to_string() == account_ref
+                                && candidate.kind == "ssh"
+                        })
+                    })
+                    .unwrap_or(false);
+                if is_valid {
+                    if let Some(session) = self.sessions.get_mut(&request.session_id) {
+                        session.allowed_accounts.insert(account_ref.to_owned());
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                self.sessions
+                    .get(&request.session_id)
+                    .is_some_and(|session| session.allowed_accounts.contains(account_ref))
+            };
+            if !account_approved {
                 return Err(AgentBrokerError::new(
                     "account-denied",
                     "The account is not approved for this connection.",
@@ -565,6 +608,7 @@ impl AgentBrokerCore {
         if connection_session
             && !SESSION_BASE_TOOLS.contains(&request.tool.as_str())
             && !derived_ssh_pty_action
+            && request.tool != "vaultmesh_ssh_agent_open"
         {
             let account_ref = request.account_ref.as_deref().ok_or_else(|| {
                 AgentBrokerError::new(
@@ -703,6 +747,7 @@ impl AgentBrokerCore {
         session.requests_used = session.requests_used.saturating_add(1);
         if session.connection_managed
             && !SESSION_BASE_TOOLS.contains(&request.tool.as_str())
+            && request.tool != "vaultmesh_ssh_agent_open"
             && let Some(grants) = self.transport_permission_grants.get_mut(&client_id)
         {
             if let Some(index) = matching_permission_grant_index(

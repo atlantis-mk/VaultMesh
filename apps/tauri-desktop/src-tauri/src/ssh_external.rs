@@ -6,7 +6,6 @@ use std::{
 use serde::{Deserialize, Serialize};
 use url::Host;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 const LAUNCH_DIRECTORY_NAME: &str = "ssh-launch";
 
@@ -57,6 +56,18 @@ impl LaunchTarget {
             port,
             username: username.to_owned(),
         })
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
     }
 
     fn destination(&self) -> String {
@@ -116,7 +127,7 @@ pub fn launch(
     client: ExternalClientId,
     target: &LaunchTarget,
     root: &Path,
-    private_key: Option<Zeroizing<String>>,
+    socket_path: Option<&str>,
 ) -> Result<(), String> {
     match client {
         ExternalClientId::CopyCommand => Ok(()),
@@ -127,7 +138,7 @@ pub fn launch(
             open::that_detached(target.vscode_uri())
                 .map_err(|_| "无法通过 VS Code 打开 SSH 目标。".to_owned())
         }
-        ExternalClientId::SystemTerminal => launch_system_terminal(target, root, private_key),
+        ExternalClientId::SystemTerminal => launch_system_terminal(target, root, socket_path),
     }
 }
 
@@ -135,24 +146,18 @@ pub fn launch(
 fn launch_system_terminal(
     target: &LaunchTarget,
     root: &Path,
-    private_key: Option<Zeroizing<String>>,
+    socket_path: Option<&str>,
 ) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
     let launch_directory = prepare_launch_directory(root)?;
-    let identity_path = private_key
-        .map(|private_key| write_identity(&launch_directory, private_key))
-        .transpose()?;
     let launcher_path = launch_directory.join("connect.command");
     let mut script = String::from("#!/bin/sh\n");
-    script.push_str("/usr/bin/ssh ");
-    if let Some(identity_path) = &identity_path {
-        script.push_str("-o IdentitiesOnly=yes -i ");
-        script.push_str(&shell_quote(&identity_path.to_string_lossy()));
-        script.push(' ');
+    if let Some(socket_path) = socket_path {
+        script.push_str(&format!("export SSH_AUTH_SOCK={}\n", shell_quote(socket_path)));
     }
     script.push_str(&format!(
-        "-p {} -- {}\nstatus=$?\n/bin/rm -rf -- {}\nexit \"$status\"\n",
+        "/usr/bin/ssh -p {} -- {}\nstatus=$?\n/bin/rm -rf -- {}\nexit \"$status\"\n",
         target.port,
         shell_quote(&target.destination()),
         shell_quote(&launch_directory.to_string_lossy()),
@@ -177,31 +182,19 @@ fn launch_system_terminal(
 fn launch_system_terminal(
     target: &LaunchTarget,
     root: &Path,
-    private_key: Option<Zeroizing<String>>,
+    socket_path: Option<&str>,
 ) -> Result<(), String> {
     let launch_directory = prepare_launch_directory(root)?;
-    let identity_path = private_key
-        .map(|private_key| write_identity(&launch_directory, private_key))
-        .transpose()?;
     let launcher_path = launch_directory.join("connect.cmd");
-    let mut script = String::from("@echo off\r\nssh ");
-    if let Some(identity_path) = &identity_path {
-        script.push_str("-o IdentitiesOnly=yes -i ");
-        script.push_str(&windows_quote(&identity_path.to_string_lossy()));
-        script.push(' ');
+    let mut script = String::from("@echo off\r\n");
+    if let Some(socket_path) = socket_path {
+        script.push_str(&format!("set \"SSH_AUTH_SOCK={}\"\r\n", socket_path));
     }
     script.push_str(&format!(
-        "-p {} -- {}\r\nset \"VAULTMESH_SSH_STATUS=%ERRORLEVEL%\"\r\n",
+        "ssh -p {} -- {}\r\nset \"VAULTMESH_SSH_STATUS=%ERRORLEVEL%\"\r\nexit /b %VAULTMESH_SSH_STATUS%\r\n",
         target.port,
         windows_quote(&target.destination()),
     ));
-    if let Some(identity_path) = &identity_path {
-        script.push_str(&format!(
-            "del /f /q {} >nul 2>nul\r\n",
-            windows_quote(&identity_path.to_string_lossy())
-        ));
-    }
-    script.push_str("exit /b %VAULTMESH_SSH_STATUS%\r\n");
     std::fs::write(&launcher_path, script)
         .map_err(|_| cleanup_error(&launch_directory, "无法准备 SSH 终端启动器。"))?;
     Command::new("cmd.exe")
@@ -216,7 +209,7 @@ fn launch_system_terminal(
 fn launch_system_terminal(
     _target: &LaunchTarget,
     _root: &Path,
-    _private_key: Option<Zeroizing<String>>,
+    _socket_path: Option<&str>,
 ) -> Result<(), String> {
     Err("当前平台不支持打开系统终端。".to_owned())
 }
@@ -231,19 +224,6 @@ fn prepare_launch_directory(root: &Path) -> Result<PathBuf, String> {
             .map_err(|_| cleanup_error(&directory, "无法保护 SSH 临时会话。"))?;
     }
     Ok(directory)
-}
-
-fn write_identity(directory: &Path, private_key: Zeroizing<String>) -> Result<PathBuf, String> {
-    let identity_path = directory.join("identity");
-    std::fs::write(&identity_path, private_key.as_bytes())
-        .map_err(|_| cleanup_error(directory, "无法准备 SSH 私钥会话。"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&identity_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| cleanup_error(directory, "无法保护 SSH 私钥会话。"))?;
-    }
-    Ok(identity_path)
 }
 
 fn cleanup_error(directory: &Path, message: &str) -> String {
@@ -353,25 +333,20 @@ mod tests {
     }
 
     #[test]
-    fn private_identity_is_owner_only_and_cleanup_is_bounded() {
+    fn launch_directory_is_owner_only_and_cleanup_is_bounded() {
         let root = std::env::temp_dir().join(format!("vaultmesh-ssh-external-{}", Uuid::new_v4()));
         let directory = prepare_launch_directory(&root).expect("directory");
-        let key = Zeroizing::new(
-            "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----"
-                .to_owned(),
-        );
-        let identity = write_identity(&directory, key).expect("identity");
-        assert!(identity.is_file());
+        assert!(directory.is_dir());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                std::fs::metadata(&identity)
+                std::fs::metadata(&directory)
                     .expect("metadata")
                     .permissions()
                     .mode()
                     & 0o777,
-                0o600
+                0o700
             );
         }
         clear_launches(&root);

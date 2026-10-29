@@ -146,8 +146,10 @@ fn ct_agent_auth_owner_only_unix_transport_registers_and_delivers_connection_ses
     let allowed_tools = session["result"]["session"]["allowedTools"]
         .as_array()
         .unwrap();
-    assert_eq!(allowed_tools.len(), 28);
+    assert_eq!(allowed_tools.len(), 30);
     assert!(allowed_tools.contains(&json!("vaultmesh_ssh_exec")));
+    assert!(allowed_tools.contains(&json!("vaultmesh_ssh_agent_open")));
+    assert!(allowed_tools.contains(&json!("vaultmesh_ssh_agent_close")));
     assert_eq!(notifications.load(Ordering::Relaxed), 1);
     assert_eq!(
         surfaces.lock().unwrap().as_slice(),

@@ -64,42 +64,60 @@ trait DeviceSecretStore: Send + Sync {
 
 struct PlatformSecretStore {
     service: &'static str,
+    store: Option<crate::device_credentials::ScopedCredentialStore>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl DeviceSecretStore for PlatformSecretStore {
     fn set(&self, account: &str, secret: &[u8]) -> Result<(), String> {
-        keyring::Entry::new(self.service, account)
-            .and_then(|entry| entry.set_secret(secret))
-            .map_err(|_| "无法保存设备安全凭据。".to_owned())
+        if let Some(ref store) = self.store {
+            return store.set(account, secret);
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            keyring::Entry::new(self.service, account)
+                .and_then(|entry| entry.set_secret(secret))
+                .map_err(|_| "无法保存设备安全凭据。".to_owned())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Err("这台设备当前不支持安全的 PIN 快速解锁。".to_owned())
+        }
     }
 
     fn get(&self, account: &str) -> Result<Zeroizing<Vec<u8>>, String> {
-        keyring::Entry::new(self.service, account)
-            .and_then(|entry| entry.get_secret())
-            .map(Zeroizing::new)
-            .map_err(|_| "无法读取设备安全凭据。".to_owned())
+        if let Some(ref store) = self.store {
+            return match store.get(account)? {
+                Some(s) => Ok(s),
+                None => Err("无法读取设备安全凭据。".to_owned()),
+            };
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            keyring::Entry::new(self.service, account)
+                .and_then(|entry| entry.get_secret())
+                .map(Zeroizing::new)
+                .map_err(|_| "无法读取设备安全凭据。".to_owned())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Err("这台设备当前不支持安全的 PIN 快速解锁。".to_owned())
+        }
     }
 
     fn delete(&self, account: &str) -> Result<(), String> {
-        keyring::Entry::new(self.service, account)
-            .and_then(|entry| entry.delete_credential())
-            .map_err(|_| "无法删除设备安全凭据。".to_owned())
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-impl DeviceSecretStore for PlatformSecretStore {
-    fn set(&self, _account: &str, _secret: &[u8]) -> Result<(), String> {
-        Err("这台设备当前不支持安全的 PIN 快速解锁。".to_owned())
-    }
-
-    fn get(&self, _account: &str) -> Result<Zeroizing<Vec<u8>>, String> {
-        Err("这台设备当前不支持安全的 PIN 快速解锁。".to_owned())
-    }
-
-    fn delete(&self, _account: &str) -> Result<(), String> {
-        Ok(())
+        if let Some(ref store) = self.store {
+            return store.delete(account);
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            keyring::Entry::new(self.service, account)
+                .and_then(|entry| entry.delete_credential())
+                .map_err(|_| "无法删除设备安全凭据。".to_owned())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Ok(())
+        }
     }
 }
 
@@ -110,31 +128,79 @@ pub struct PinQuickUnlockService {
 }
 
 impl PinQuickUnlockService {
+    #[allow(dead_code)]
     pub fn new(record_path: PathBuf) -> Self {
         Self {
             record_path,
             secrets: Arc::new(PlatformSecretStore {
                 service: DESKTOP_KEYRING_SERVICE,
+                store: None,
             }),
             credential_prefix: "desktop-pin",
         }
     }
 
+    pub fn new_with_credentials(
+        record_path: PathBuf,
+        credentials: &crate::device_credentials::DeviceCredentialStore,
+    ) -> Self {
+        Self {
+            record_path,
+            secrets: Arc::new(PlatformSecretStore {
+                service: DESKTOP_KEYRING_SERVICE,
+                store: Some(credentials.scoped(DESKTOP_KEYRING_SERVICE)),
+            }),
+            credential_prefix: "desktop-pin",
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn new_browser(record_path: PathBuf) -> Self {
         Self {
             record_path,
             secrets: Arc::new(PlatformSecretStore {
                 service: BROWSER_KEYRING_SERVICE,
+                store: None,
             }),
             credential_prefix: "browser-pin",
         }
     }
 
+    pub fn new_browser_with_credentials(
+        record_path: PathBuf,
+        credentials: &crate::device_credentials::DeviceCredentialStore,
+    ) -> Self {
+        Self {
+            record_path,
+            secrets: Arc::new(PlatformSecretStore {
+                service: BROWSER_KEYRING_SERVICE,
+                store: Some(credentials.scoped(BROWSER_KEYRING_SERVICE)),
+            }),
+            credential_prefix: "browser-pin",
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn new_agent(record_path: PathBuf) -> Self {
         Self {
             record_path,
             secrets: Arc::new(PlatformSecretStore {
                 service: AGENT_KEYRING_SERVICE,
+                store: None,
+            }),
+            credential_prefix: "agent-pin",
+        }
+    }
+
+    pub fn new_agent_with_credentials(
+        record_path: PathBuf,
+        credentials: &crate::device_credentials::DeviceCredentialStore,
+    ) -> Self {
+        Self {
+            record_path,
+            secrets: Arc::new(PlatformSecretStore {
+                service: AGENT_KEYRING_SERVICE,
+                store: Some(credentials.scoped(AGENT_KEYRING_SERVICE)),
             }),
             credential_prefix: "agent-pin",
         }
@@ -145,6 +211,7 @@ impl PinQuickUnlockService {
             record_path,
             secrets: Arc::new(PlatformSecretStore {
                 service: "com.vaultmesh.desktop.bitwarden-dev-pin",
+                store: None,
             }),
             credential_prefix: "bitwarden-dev-pin",
         }

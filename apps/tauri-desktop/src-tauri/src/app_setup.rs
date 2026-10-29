@@ -139,6 +139,10 @@ pub fn run() {
                 std::io::Error::other("无法安全迁移现有 Electron 保险库；旧数据未被删除。")
             })?;
             let settings_path = app_data.join("security-settings.json");
+            let credentials_store = Arc::new(
+                crate::device_credentials::DeviceCredentialStore::platform(&app_data)
+                    .map_err(|e| std::io::Error::other(format!("无法初始化设备凭据存储: {e}")))?,
+            );
             let agent_access_settings_path = app_data.join("agent-access-settings.json");
             let email_settings_path = app_data.join("email-otp-settings.json");
             let pin_path = app_data.join("desktop-pin-unlock.json");
@@ -155,17 +159,18 @@ pub fn run() {
                 AgentVaultAccess::new(vault_path.clone(), agent_access_settings_path)
                     .map_err(|error| std::io::Error::other(error.public_message()))?;
             let agent_runtime = agent_vault_access.runtime();
-            let agent_pin = Arc::new(Mutex::new(PinQuickUnlockService::new_agent(
+            let agent_pin = Arc::new(Mutex::new(PinQuickUnlockService::new_agent_with_credentials(
                 app_data.join("agent-pin-unlock.json"),
+                &credentials_store,
             )));
-            let desktop_biometric = Arc::new(Mutex::new(BiometricQuickUnlockService::new(
+            let desktop_biometric = Arc::new(Mutex::new(BiometricQuickUnlockService::new_with_credentials(
                 biometric_path,
-                "com.vaultmesh.desktop.desktop-biometric",
+                credentials_store.scoped("com.vaultmesh.desktop.desktop-biometric"),
                 "desktop-biometric",
             )));
-            let agent_biometric = Arc::new(Mutex::new(BiometricQuickUnlockService::new(
+            let agent_biometric = Arc::new(Mutex::new(BiometricQuickUnlockService::new_with_credentials(
                 agent_biometric_path,
-                "com.vaultmesh.desktop.agent-biometric",
+                credentials_store.scoped("com.vaultmesh.desktop.agent-biometric"),
                 "agent-biometric",
             )));
             let settings = Arc::new(Mutex::new(load_settings(&settings_path)));
@@ -174,17 +179,27 @@ pub fn run() {
             let ssh_directory = app.path().home_dir()?.join(".ssh");
             let ssh_launch_directory = ssh_external::launch_root(&app_data);
             ssh_external::clear_launches(&ssh_launch_directory);
+            let session_fragment_dir = ssh_directory.join("vaultmesh").join("config.d");
+            if let Ok(entries) = std::fs::read_dir(&session_fragment_dir) {
+                for entry in entries.flatten() {
+                    if entry.file_name().to_string_lossy().starts_with("session-") {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
             let email_otp = Arc::new(Mutex::new(EmailOtpService::new(email_settings_path)));
             let agent_resources = Arc::new(Mutex::new(AgentResourceStore::default()));
             let agent_managed_web = Arc::new(Mutex::new(AgentManagedWebStore::default()));
             let agent_ssh_sessions = Arc::new(Mutex::new(AgentSshSessionStore::default()));
+            let agent_ssh_agent_registry = Arc::new(Mutex::new(crate::agent_ssh_agent::SshAgentRegistry::new()));
             let mut agent_broker_core = AgentBrokerCore::new_with_pairing_proofs(
-                AgentPairingProofs::platform(app_data.join("agent-pairings.json")),
+                AgentPairingProofs::platform(app_data.join("agent-pairings.json"), &credentials_store),
             )
             .map_err(|_| std::io::Error::other("Agent broker registry is invalid"))?;
             agent_broker_core.set_authorization_store(AgentAuthorizationStore::platform(
                 app_data.join("agent-authorizations.v1"),
                 &vault_path,
+                &credentials_store,
             ));
             let access_check = agent_vault_access.clone();
             agent_broker_core.set_access_check(Arc::new(move |client_id| {
@@ -209,6 +224,7 @@ pub fn run() {
             let cleanup_resources = Arc::clone(&agent_resources);
             let cleanup_managed_web = Arc::clone(&agent_managed_web);
             let cleanup_ssh_sessions = Arc::clone(&agent_ssh_sessions);
+            let cleanup_ssh_agent = Arc::clone(&agent_ssh_agent_registry);
             agent_broker_core.set_resource_cleanup(Arc::new(move |scope| {
                 if let Ok(mut resources) = cleanup_resources.lock() {
                     match scope {
@@ -232,6 +248,11 @@ pub fn run() {
                         AgentCleanupScope::All => sessions.clear(),
                     }
                 }
+                if let Ok(mut registry) = cleanup_ssh_agent.lock() {
+                    if matches!(scope, AgentCleanupScope::All) {
+                        registry.close_all();
+                    }
+                }
                 if let Ok(mut sessions) = cleanup_managed_web.lock() {
                     match scope {
                         AgentCleanupScope::Client(client_id) => {
@@ -241,6 +262,11 @@ pub fn run() {
                             sessions.revoke_session(session_id);
                         }
                         AgentCleanupScope::All => sessions.clear(),
+                    }
+                }
+                if let Ok(mut registry) = cleanup_ssh_agent.lock() {
+                    if matches!(scope, AgentCleanupScope::All) {
+                        registry.close_all();
                     }
                 }
             }));
@@ -414,6 +440,7 @@ pub fn run() {
             let executor_resources = Arc::clone(&agent_resources);
             let executor_managed_web = Arc::clone(&agent_managed_web);
             let executor_ssh_sessions = Arc::clone(&agent_ssh_sessions);
+            let executor_ssh_agent_registry = Arc::clone(&agent_ssh_agent_registry);
             let executor_ssh_directory = ssh_directory.clone();
             let executor_email_otp = Arc::clone(&email_otp);
             let executor_app = app.handle().clone();
@@ -436,6 +463,7 @@ pub fn run() {
                         managed_web: &executor_managed_web,
                         email_otp: &executor_email_otp,
                         ssh_sessions: &executor_ssh_sessions,
+                        ssh_agent_registry: &executor_ssh_agent_registry,
                         ssh_directory: &executor_ssh_directory,
                         app: &executor_app,
                         dialog_focus: &executor_dialog_focus,
@@ -526,7 +554,7 @@ pub fn run() {
             }
             #[cfg(unix)]
             let browser_listener =
-                BrowserPairingService::new(app_data.join("browser-pairing.json"))
+                BrowserPairingService::new(app_data.join("browser-pairing.json"), &credentials_store)
                     .load_or_create()
                     .ok()
                     .and_then(|secret| {
@@ -561,11 +589,15 @@ pub fn run() {
                 let browser_native_dialog_focus = Arc::clone(&native_dialog_focus);
                 let browser_email_otp = Arc::clone(&email_otp);
                 let browser_biometric = Arc::clone(&desktop_biometric);
+                let browser_credentials_store = Arc::clone(&credentials_store);
                 let broker_factory = Arc::new(move || {
                     let secret =
-                        BrowserPairingService::new(browser_app_data.join("browser-pairing.json"))
-                            .load_or_create()
-                            .map_err(|_| BrowserIntegrationError::PairingUnavailable)?;
+                        BrowserPairingService::new(
+                            browser_app_data.join("browser-pairing.json"),
+                            &browser_credentials_store,
+                        )
+                        .load_or_create()
+                        .map_err(|_| BrowserIntegrationError::PairingUnavailable)?;
                     let platform = Arc::new(TauriBrowserPlatform::new(
                         browser_app_handle.clone(),
                         browser_app_data.clone(),
@@ -594,6 +626,7 @@ pub fn run() {
             {
                 let secret = BrowserPairingService::new_bitwarden_development(
                     app_data.join(browser_development_identity::DIRECTORY).join("pairing.json"),
+                    &credentials_store,
                 ).load_or_create();
                 secret.ok().and_then(|secret| {
                     let platform = TauriBrowserPlatform::new(
@@ -615,9 +648,11 @@ pub fn run() {
                     listener.ok().map(Arc::new)
                 })
             } else { None };
-            let lan_sync = Arc::new(Mutex::new(LanSyncService::new(
+            let lan_credentials = Arc::new(credentials_store.scoped("com.vaultmesh.desktop.lan-pairing"));
+            let lan_sync = Arc::new(Mutex::new(LanSyncService::new_with_credentials(
                 runtime.clone(),
                 lan_peer_trust_path.clone(),
+                lan_credentials.clone(),
             )));
             let state = RuntimeState {
                 runtime,
@@ -633,6 +668,7 @@ pub fn run() {
                 agent_resources,
                 agent_managed_web,
                 agent_ssh_sessions,
+                agent_ssh_agent_registry,
                 #[cfg(unix)]
                 _agent_listener: agent_listener,
                 #[cfg(target_os = "windows")]
@@ -658,8 +694,14 @@ pub fn run() {
                     desktop_authentication::Coordinator::default(),
                 )),
                 biometric: desktop_biometric,
-                pin: Arc::new(Mutex::new(PinQuickUnlockService::new(pin_path))),
-                lan_pairing: Arc::new(Mutex::new(LanPairingService::new(lan_peer_trust_path))),
+                pin: Arc::new(Mutex::new(PinQuickUnlockService::new_with_credentials(
+                    pin_path,
+                    &credentials_store,
+                ))),
+                lan_pairing: Arc::new(Mutex::new(LanPairingService::new_with_credentials(
+                    lan_peer_trust_path,
+                    lan_credentials,
+                ))),
                 vault_path_record,
             };
             app.manage(state.clone());
@@ -979,6 +1021,9 @@ pub(super) fn cleanup_app_state(handle: &AppHandle) {
     }
     if let Ok(mut sessions) = state.agent_ssh_sessions.lock() {
         sessions.clear();
+    }
+    if let Ok(mut registry) = state.agent_ssh_agent_registry.lock() {
+        registry.close_all();
     }
     if let Ok(mut sessions) = state.agent_managed_web.lock() {
         sessions.clear();

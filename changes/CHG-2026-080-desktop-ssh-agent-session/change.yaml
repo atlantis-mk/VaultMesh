@@ -1,0 +1,37 @@
+schema: "2"
+id: "CHG-2026-080-desktop-ssh-agent-session"
+title: "桌面外部客户端短时 SSH-Agent 会话桥接与配置"
+type: "feature"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "将桌面端系统终端和 VS Code 打开功能迁移至短时内存 SSH-Agent 协议桥接，消除物理私钥写盘，支持密码账号全自动直连与会话时长自定义"
+requirements:
+  - "REQ-ITEM-003"
+  - "REQ-SEC-002"
+tests:
+  - "CT-ITEM-003"
+  - "CT-SEC-002"
+adrs:
+  - "ADR-0052"
+  - "ADR-0054"
+context_refs:
+  - "adr/0052-agent-ephemeral-ssh-agent-bridge.md"
+  - "adr/0054-desktop-ssh-agent-session.md"
+  - "docs/03-functional-requirements.md"
+related_changes:
+  - "CHG-2026-078-agent-ssh-agent-bridge"
+boundaries:
+  - "desktop-runtime"
+  - "ssh-external"
+  - "ssh-agent-ipc"
+  - "security-settings"
+risks:
+  - "废除物理私钥落盘后，系统终端启动脚本必须正确绑定 SSH_AUTH_SOCK，VS Code 必须正确识别 IdentityAgent"
+  - "安全设置中增加会话时长配置需保证跨端（桌面与扩展）模式兼容与默认值兜底"
+next:
+  - "在 SecuritySettings 模式中加入 sshSessionDurationMinutes（1~60分钟，默认15）"
+  - "下沉统一 SSH 短时会话服务并在 desktop_ssh_commands 中集成"
+  - "改造系统终端与 VS Code 启动链路为使用短时会话桥接"
+  - "更新前端卡片与安全中心 UI"
+  - "完善并运行自动化测试"

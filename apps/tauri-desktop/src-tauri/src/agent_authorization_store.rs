@@ -132,7 +132,17 @@ trait AuthorizationKeyStore: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ()>;
 }
 
-struct PlatformAuthorizationKeyStore;
+struct PlatformAuthorizationKeyStore(crate::device_credentials::ScopedCredentialStore);
+
+impl AuthorizationKeyStore for PlatformAuthorizationKeyStore {
+    fn set(&self, account: &str, key: &[u8]) -> Result<(), ()> {
+        self.0.set(account, key).map_err(|_| ())
+    }
+
+    fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ()> {
+        self.0.get(account).map_err(|_| ())
+    }
+}
 
 #[cfg(test)]
 #[derive(Default)]
@@ -159,34 +169,6 @@ impl AuthorizationKeyStore for MemoryAuthorizationKeyStore {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-impl AuthorizationKeyStore for PlatformAuthorizationKeyStore {
-    fn set(&self, account: &str, key: &[u8]) -> Result<(), ()> {
-        keyring::Entry::new(KEYRING_SERVICE, account)
-            .and_then(|entry| entry.set_secret(key))
-            .map_err(|_| ())
-    }
-
-    fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ()> {
-        match keyring::Entry::new(KEYRING_SERVICE, account).and_then(|entry| entry.get_secret()) {
-            Ok(key) => Ok(Some(Zeroizing::new(key))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(()),
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-impl AuthorizationKeyStore for PlatformAuthorizationKeyStore {
-    fn set(&self, _account: &str, _key: &[u8]) -> Result<(), ()> {
-        Err(())
-    }
-
-    fn get(&self, _account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ()> {
-        Ok(None)
-    }
-}
-
 #[derive(Clone)]
 pub struct AgentAuthorizationStore {
     path: PathBuf,
@@ -195,11 +177,17 @@ pub struct AgentAuthorizationStore {
 }
 
 impl AgentAuthorizationStore {
-    pub fn platform(path: PathBuf, vault_path: &Path) -> Self {
+    pub fn platform(
+        path: PathBuf,
+        vault_path: &Path,
+        credentials: &crate::device_credentials::DeviceCredentialStore,
+    ) -> Self {
         Self {
             path,
             vault_namespace: vault_namespace(vault_path),
-            keys: Arc::new(PlatformAuthorizationKeyStore),
+            keys: Arc::new(PlatformAuthorizationKeyStore(
+                credentials.scoped(KEYRING_SERVICE),
+            )),
         }
     }
 

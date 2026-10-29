@@ -26,9 +26,11 @@ pub struct BiometricQuickUnlockService {
     record_path: PathBuf,
     keyring_service: &'static str,
     credential_prefix: &'static str,
+    credentials: Option<crate::device_credentials::ScopedCredentialStore>,
 }
 
 impl BiometricQuickUnlockService {
+    #[allow(dead_code)]
     pub fn new(
         record_path: PathBuf,
         keyring_service: &'static str,
@@ -38,6 +40,20 @@ impl BiometricQuickUnlockService {
             record_path,
             keyring_service,
             credential_prefix,
+            credentials: None,
+        }
+    }
+
+    pub fn new_with_credentials(
+        record_path: PathBuf,
+        credentials: crate::device_credentials::ScopedCredentialStore,
+        credential_prefix: &'static str,
+    ) -> Self {
+        Self {
+            record_path,
+            keyring_service: "",
+            credential_prefix,
+            credentials: Some(credentials),
         }
     }
 
@@ -45,7 +61,7 @@ impl BiometricQuickUnlockService {
         let available = biometric_available();
         let enabled = available
             && self.read_record().is_some_and(|record| {
-                record.vault_path.is_file() && credential_exists(self.keyring_service, &record)
+                record.vault_path.is_file() && self.credential_exists(&record)
             });
         BiometricStatus {
             available,
@@ -78,7 +94,7 @@ impl BiometricQuickUnlockService {
             .canonicalize()
             .map_err(|_| "无法定位当前保险库。".to_owned())?;
         if self.read_record().is_some_and(|record| {
-            record.vault_path == vault_path && credential_exists(self.keyring_service, &record)
+            record.vault_path == vault_path && self.credential_exists(&record)
         }) {
             return Ok(self.status());
         }
@@ -88,7 +104,7 @@ impl BiometricQuickUnlockService {
             vault_path,
             credential_id: format!("{}-{}", self.credential_prefix, uuid::Uuid::new_v4()),
         };
-        set_credential(self.keyring_service, &record, vault_key)?;
+        self.set_credential(&record, vault_key)?;
         let bytes = serde_json::to_vec(&record)
             .map_err(|_| "无法保存 Touch ID 快速解锁状态。".to_owned())?;
         if let Err(message) = write_private_file(
@@ -96,7 +112,7 @@ impl BiometricQuickUnlockService {
             &bytes,
             "无法保存 Touch ID 快速解锁状态。",
         ) {
-            let _ = delete_credential(self.keyring_service, &record);
+            let _ = self.delete_credential(&record);
             return Err(message);
         }
         Ok(self.status())
@@ -126,7 +142,7 @@ impl BiometricQuickUnlockService {
         if !record.vault_path.is_file() {
             return Err("保险库不存在。".into());
         }
-        let key = get_credential(self.keyring_service, &record)?;
+        let key = self.get_credential(&record)?;
         if key.len() != KEY_BYTES {
             return Err("Touch ID 快速解锁凭据无效，请使用主密码重新启用。".to_owned());
         }
@@ -135,7 +151,7 @@ impl BiometricQuickUnlockService {
 
     pub fn disable(&self) -> Result<BiometricStatus, String> {
         if let Some(record) = self.read_record() {
-            delete_credential(self.keyring_service, &record)?;
+            self.delete_credential(&record)?;
         }
         match std::fs::remove_file(&self.record_path) {
             Ok(()) => {}
@@ -165,6 +181,34 @@ impl BiometricQuickUnlockService {
             && record.credential_id.len() <= 128
             && record.vault_path.is_absolute())
         .then_some(record)
+    }
+
+    fn set_credential(&self, record: &BiometricRecord, key: &[u8]) -> Result<(), String> {
+        if let Some(ref store) = self.credentials {
+            return store.set(&record.credential_id, key);
+        }
+        set_credential(self.keyring_service, record, key)
+    }
+
+    fn get_credential(&self, record: &BiometricRecord) -> Result<Zeroizing<Vec<u8>>, String> {
+        if let Some(ref store) = self.credentials {
+            return match store.get(&record.credential_id)? {
+                Some(k) => Ok(k),
+                None => Err("无法读取 Touch ID 快速解锁凭据，请使用主密码重新启用。".to_owned()),
+            };
+        }
+        get_credential(self.keyring_service, record)
+    }
+
+    fn delete_credential(&self, record: &BiometricRecord) -> Result<(), String> {
+        if let Some(ref store) = self.credentials {
+            return store.delete(&record.credential_id);
+        }
+        delete_credential(self.keyring_service, record)
+    }
+
+    fn credential_exists(&self, record: &BiometricRecord) -> bool {
+        self.get_credential(record).is_ok()
     }
 }
 
@@ -263,6 +307,7 @@ fn delete_credential(_service: &str, _record: &BiometricRecord) -> Result<(), St
     Ok(())
 }
 
+#[allow(dead_code)]
 fn credential_exists(service: &str, record: &BiometricRecord) -> bool {
     get_credential(service, record).is_ok()
 }

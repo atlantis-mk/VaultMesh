@@ -64,17 +64,21 @@ impl TauriBrowserPlatform {
     /// New OS credential slots and records; never inherits another extension's quick unlock.
     pub fn into_bitwarden_development(mut self, app_data: &std::path::Path) -> Self {
         let directory = app_data.join(crate::browser_development_identity::DIRECTORY);
+        let credentials = crate::device_credentials::DeviceCredentialStore::platform(app_data)
+            .expect("DeviceCredentialStore::platform");
         self.desktop_biometric = None;
         self.pin = Mutex::new(PinQuickUnlockService::new_bitwarden_development(
             directory.join("pin-unlock.json"),
         ));
-        self.biometric = Mutex::new(BiometricQuickUnlockService::new(
+        self.biometric = Mutex::new(BiometricQuickUnlockService::new_with_credentials(
             directory.join("biometric-unlock.json"),
-            "com.vaultmesh.desktop.bitwarden-dev-biometric",
+            credentials.scoped("com.vaultmesh.desktop.bitwarden-dev-biometric"),
             "bitwarden-dev-biometric",
         ));
-        self.pairing =
-            BrowserPairingService::new_bitwarden_development(directory.join("pairing.json"));
+        self.pairing = BrowserPairingService::new_bitwarden_development(
+            directory.join("pairing.json"),
+            &credentials,
+        );
         self
     }
 
@@ -93,6 +97,8 @@ impl TauriBrowserPlatform {
             .home_dir()
             .unwrap_or_else(|_| app_data.clone())
             .join(".ssh");
+        let credentials = crate::device_credentials::DeviceCredentialStore::platform(&app_data)
+            .expect("DeviceCredentialStore::platform");
         Self {
             app,
             settings,
@@ -101,17 +107,18 @@ impl TauriBrowserPlatform {
             native_dialog_focus,
             imports: Mutex::new(ImportService::default()),
             recovery_files: Mutex::new(RecoveryFileCleanupSessions::default()),
-            pin: Mutex::new(PinQuickUnlockService::new_browser(
+            pin: Mutex::new(PinQuickUnlockService::new_browser_with_credentials(
                 app_data.join("browser-pin-unlock.json"),
+                &credentials,
             )),
-            biometric: Mutex::new(BiometricQuickUnlockService::new(
+            biometric: Mutex::new(BiometricQuickUnlockService::new_with_credentials(
                 app_data.join("browser-biometric-unlock.json"),
-                "com.vaultmesh.desktop.browser-biometric",
+                credentials.scoped("com.vaultmesh.desktop.browser-biometric"),
                 "browser-biometric",
             )),
             desktop_biometric: Some(desktop_biometric),
             authentication: Arc::default(),
-            pairing: BrowserPairingService::new(app_data.join("browser-pairing.json")),
+            pairing: BrowserPairingService::new(app_data.join("browser-pairing.json"), &credentials),
             ssh_directory,
             ssh_scan: Mutex::new(SshScanService::default()),
             email_otp,

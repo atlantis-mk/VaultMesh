@@ -439,9 +439,20 @@ mod server {
                 json!({ "type": "string", "maxLength": 128 }),
             );
         }
+        let is_deprecated = tool.get("deprecated").and_then(Value::as_bool).unwrap_or(false);
         let description = if name == "vaultmesh_accounts_list" {
-            "Search non-secret account metadata. Filter capabilities with semantic catalog names such as ssh-exec; use actions[].tools for callable tool names. Accounts do not need prior action authorization to appear."
+            "Search non-secret account metadata. Filter capabilities with semantic catalog names such as ssh-agent; use actions[].tools for callable tool names. Accounts do not need prior action authorization to appear."
                 .to_owned()
+        } else if is_deprecated {
+            format!(
+                "[已废弃 / Deprecated: 推荐使用 vaultmesh_ssh_agent_open] VaultMesh {} capability ({}); credentials are never returned.",
+                tool["capability"].as_str()?,
+                tool["risk"].as_str()?
+            )
+        } else if name == "vaultmesh_ssh_agent_open" {
+            "Open an ephemeral local OpenSSH agent session (Unix socket / Windows named pipe) for native SSH tools (ssh, rsync, scp, sftp, git). No private keys are ever returned to the agent.".to_owned()
+        } else if name == "vaultmesh_ssh_agent_close" {
+            "Close an active ephemeral local OpenSSH agent session early and remove its socket.".to_owned()
         } else {
             format!(
                 "VaultMesh {} capability ({}); credentials are never returned.",
@@ -449,7 +460,7 @@ mod server {
                 tool["risk"].as_str()?
             )
         };
-        Some(json!({
+        let mut tool_obj = json!({
             "name": name,
             "title": name.trim_start_matches("vaultmesh_").replace('_', " "),
             "description": description,
@@ -459,7 +470,11 @@ mod server {
                 "properties": properties,
                 "required": required
             }
-        }))
+        });
+        if is_deprecated {
+            tool_obj["annotations"] = json!({ "deprecated": true });
+        }
+        Some(tool_obj)
     }
 
     fn write_broker(connection: &mut BrokerConnection, value: &Value) -> Result<(), ()> {
@@ -619,7 +634,7 @@ mod server {
                 .iter()
                 .filter_map(mcp_tool)
                 .collect::<Vec<_>>();
-            assert_eq!(tools.len(), 28);
+            assert_eq!(tools.len(), 30);
             let serialized = serde_json::to_string(&tools).unwrap();
             assert!(!serialized.contains("get_password"));
             assert!(!serialized.contains("export_secret"));
@@ -636,7 +651,28 @@ mod server {
                 accounts["description"]
                     .as_str()
                     .unwrap()
-                    .contains("semantic catalog names such as ssh-exec")
+                    .contains("semantic catalog names such as ssh-agent")
+            );
+            let ssh_exec = tools
+                .iter()
+                .find(|tool| tool["name"] == "vaultmesh_ssh_exec")
+                .unwrap();
+            assert!(
+                ssh_exec["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("[已废弃 / Deprecated: 推荐使用 vaultmesh_ssh_agent_open]")
+            );
+            assert_eq!(ssh_exec["annotations"]["deprecated"], true);
+            let ssh_agent_open = tools
+                .iter()
+                .find(|tool| tool["name"] == "vaultmesh_ssh_agent_open")
+                .unwrap();
+            assert!(
+                ssh_agent_open["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Open an ephemeral local OpenSSH agent session")
             );
             assert!(accounts["inputSchema"]["properties"]["permission"].is_null());
         }

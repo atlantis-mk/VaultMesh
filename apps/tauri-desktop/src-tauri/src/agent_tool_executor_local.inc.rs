@@ -236,6 +236,94 @@ pub(super) fn execute_agent_tool(
                     )
                 })
         }
+        "vaultmesh_ssh_agent_open" => {
+            let account_ref = account_ref.ok_or_else(|| {
+                AgentBrokerError::new(
+                    "account-required",
+                    "An approved account reference is required.",
+                    false,
+                )
+            })?;
+            let policy = required_direct_ssh_policy(scope, account_ref, tool)?;
+            let material = {
+                let mut runtime = runtime.lock().map_err(|_| vault_unavailable())?;
+                agent_ssh_runtime::collect_direct_agent_ssh_agent_material(
+                    &mut runtime,
+                    policy,
+                    cancellation,
+                )
+                .map_err(|_| {
+                    AgentBrokerError::new(
+                        "account-unavailable",
+                        "The approved SSH target or credential is unavailable.",
+                        false,
+                    )
+                })?
+            };
+            let duration_minutes = parameters
+                .get("durationMinutes")
+                .and_then(Value::as_u64)
+                .unwrap_or(15);
+            let base_dir = app.path().app_data_dir().map_err(|_| {
+                AgentBrokerError::new("storage-error", "Failed to resolve app data directory.", false)
+            })?;
+            let mut registry = context.ssh_agent_registry.lock().map_err(|_| {
+                AgentBrokerError::new("internal-error", "SSH agent registry unavailable.", true)
+            })?;
+            let session_info = registry
+                .start_session(
+                    &base_dir,
+                    account_ref,
+                    &material.account_label,
+                    material.private_key,
+                    material.passphrase,
+                    duration_minutes,
+                )
+                .map_err(|err| {
+                    let mut e = AgentBrokerError::new("session-error", "Failed to start SSH agent session.", false);
+                    e.details = Some(json!({ "reason": err }));
+                    e
+                })?;
+            let mut result = serde_json::to_value(session_info).map_err(|_| {
+                AgentBrokerError::new("internal-error", "Failed to serialize session info.", false)
+            })?;
+            result["targetHost"] = json!(policy.host);
+            result["targetPort"] = json!(policy.port);
+            result["targetUser"] = json!(policy.username);
+            result["sshCommand"] = json!(format!(
+                "ssh -p {} {}@{}",
+                policy.port, policy.username, policy.host
+            ));
+            result["rsyncCommand"] = json!(format!(
+                "rsync -avz -e \"ssh -p {}\" <src> {}@{}:<dest>",
+                policy.port, policy.username, policy.host
+            ));
+            result["scpCommand"] = json!(format!(
+                "scp -P {} <src> {}@{}:<dest>",
+                policy.port, policy.username, policy.host
+            ));
+            Ok(result)
+        }
+        "vaultmesh_ssh_agent_close" => {
+            let session_ref = parameters
+                .get("sessionRef")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AgentBrokerError::new(
+                        "invalid-parameters",
+                        "The session reference is required.",
+                        false,
+                    )
+                })?;
+            let mut registry = context.ssh_agent_registry.lock().map_err(|_| {
+                AgentBrokerError::new("internal-error", "SSH agent registry unavailable.", true)
+            })?;
+            let closed = registry.close_session(session_ref);
+            Ok(json!({
+                "closed": closed,
+                "sessionRef": session_ref,
+            }))
+        }
         "vaultmesh_ssh_exec" => {
             let account_ref = account_ref.ok_or_else(|| {
                 AgentBrokerError::new(
