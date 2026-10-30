@@ -46,9 +46,24 @@ pub struct ActiveAgentSession {
     pub config_fragment: Option<PathBuf>,
 }
 
-#[derive(Default)]
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct EphemeralKeyMaterial {
+    pub private_key: Zeroizing<String>,
+    pub public_key: Zeroizing<String>,
+    pub host_key_sha256: String,
+}
+
 pub struct SshAgentRegistry {
     sessions: HashMap<String, ActiveAgentSession>,
+    ephemeral_keys: HashMap<String, EphemeralKeyMaterial>,
+    device_id: String,
+}
+
+impl Default for SshAgentRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[allow(dead_code)]
@@ -56,7 +71,55 @@ pub type SharedSshAgentRegistry = Arc<Mutex<SshAgentRegistry>>;
 
 impl SshAgentRegistry {
     pub fn new() -> Self {
-        Self::default()
+        Self::new_with_device_id(Uuid::new_v4().simple().to_string())
+    }
+
+    pub fn new_with_device_id(device_id: String) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            ephemeral_keys: HashMap::new(),
+            device_id,
+        }
+    }
+
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    pub fn get_ephemeral_key(
+        &self,
+        account_ref: &str,
+        host_key_sha256: &str,
+    ) -> Option<Zeroizing<String>> {
+        self.ephemeral_keys.get(account_ref).and_then(|mat| {
+            if mat.host_key_sha256 == host_key_sha256 {
+                Some(mat.private_key.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn store_ephemeral_key(
+        &mut self,
+        account_ref: &str,
+        host_key_sha256: &str,
+        public_key: Zeroizing<String>,
+        private_key: Zeroizing<String>,
+    ) {
+        self.ephemeral_keys.insert(
+            account_ref.to_owned(),
+            EphemeralKeyMaterial {
+                private_key,
+                public_key,
+                host_key_sha256: host_key_sha256.to_owned(),
+            },
+        );
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_ephemeral_key(&mut self, account_ref: &str) {
+        self.ephemeral_keys.remove(account_ref);
     }
 
     pub fn start_session(
@@ -195,6 +258,7 @@ impl SshAgentRegistry {
     }
 
     pub fn close_all(&mut self) {
+        self.ephemeral_keys.clear();
         for (_, session) in self.sessions.drain() {
             session.cancelled.store(true, Ordering::Release);
             #[cfg(unix)]
@@ -461,5 +525,33 @@ mod tests {
         {
             assert!(!std::path::Path::new(&session_info.socket_path).exists());
         }
+    }
+
+    #[test]
+    fn test_ephemeral_key_cache_operations_and_close_all_clears() {
+        let mut registry = SshAgentRegistry::new_with_device_id("dev-12345678".to_owned());
+        assert_eq!(registry.device_id(), "dev-12345678");
+
+        let acc_ref = "acc-001";
+        let fp = "SHA256:fingerprint1";
+        let alt_fp = "SHA256:fingerprint2";
+
+        assert!(registry.get_ephemeral_key(acc_ref, fp).is_none());
+
+        let priv_key = Zeroizing::new("fake_priv_key".to_owned());
+        let pub_key = Zeroizing::new("fake_pub_key".to_owned());
+        registry.store_ephemeral_key(acc_ref, fp, pub_key, priv_key);
+
+        // Matching fingerprint hits
+        let hit = registry.get_ephemeral_key(acc_ref, fp);
+        assert!(hit.is_some());
+        assert_eq!(hit.unwrap().as_str(), "fake_priv_key");
+
+        // Mismatched fingerprint misses
+        assert!(registry.get_ephemeral_key(acc_ref, alt_fp).is_none());
+
+        // close_all clears the cache
+        registry.close_all();
+        assert!(registry.get_ephemeral_key(acc_ref, fp).is_none());
     }
 }

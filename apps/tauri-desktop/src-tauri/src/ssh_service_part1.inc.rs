@@ -29,9 +29,20 @@ chmod 600 "$HOME/.ssh/authorized_keys" &&
 key=$(cat) &&
 if grep -qxF "$key" "$HOME/.ssh/authorized_keys"; then
   exit 20
-else
-  printf "%s\n" "$key" >> "$HOME/.ssh/authorized_keys"
-fi'"#;
+fi &&
+case "$key" in
+  *" vaultmesh:auto-"*)
+    tag="${key##* }"
+    tmp="$HOME/.ssh/authorized_keys.tmp.$$"
+    awk -v t="$tag" '\''$NF != t'\'' "$HOME/.ssh/authorized_keys" > "$tmp" &&
+    printf "%s\n" "$key" >> "$tmp" &&
+    chmod 600 "$tmp" &&
+    mv -f "$tmp" "$HOME/.ssh/authorized_keys"
+    ;;
+  *)
+    printf "%s\n" "$key" >> "$HOME/.ssh/authorized_keys"
+    ;;
+esac'"#;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SshTarget {

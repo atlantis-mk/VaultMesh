@@ -67,8 +67,9 @@ impl TauriBrowserPlatform {
         let credentials = crate::device_credentials::DeviceCredentialStore::platform(app_data)
             .expect("DeviceCredentialStore::platform");
         self.desktop_biometric = None;
-        self.pin = Mutex::new(PinQuickUnlockService::new_bitwarden_development(
+        self.pin = Mutex::new(PinQuickUnlockService::new_bitwarden_development_with_credentials(
             directory.join("pin-unlock.json"),
+            &credentials,
         ));
         self.biometric = Mutex::new(BiometricQuickUnlockService::new_with_credentials(
             directory.join("biometric-unlock.json"),
@@ -123,7 +124,10 @@ impl TauriBrowserPlatform {
             ssh_scan: Mutex::new(SshScanService::default()),
             email_otp,
             email_fill_seen: Mutex::new(HashMap::new()),
-            device_assist: Mutex::new(crate::device_assist::DeviceAssistBroker::new(app_data.join("lan-peer-trust.json"))),
+            device_assist: Mutex::new(crate::device_assist::DeviceAssistBroker::new(
+                app_data.join("lan-peer-trust.json"),
+                Arc::new(credentials.scoped("com.vaultmesh.desktop.lan-pairing")),
+            )),
         }
     }
 

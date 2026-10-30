@@ -5,13 +5,13 @@ use std::{
 };
 
 use aes_gcm::{
+    aead::{generic_array::GenericArray, AeadInPlace},
     Aes256Gcm, KeyInit,
-    aead::{AeadInPlace, generic_array::GenericArray},
 };
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rand_core::{OsRng, RngCore};
-use scrypt::{Params as ScryptParams, scrypt};
+use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -206,12 +206,27 @@ impl PinQuickUnlockService {
         }
     }
 
+    #[allow(dead_code)]
     pub fn new_bitwarden_development(record_path: PathBuf) -> Self {
         Self {
             record_path,
             secrets: Arc::new(PlatformSecretStore {
                 service: "com.vaultmesh.desktop.bitwarden-dev-pin",
                 store: None,
+            }),
+            credential_prefix: "bitwarden-dev-pin",
+        }
+    }
+
+    pub fn new_bitwarden_development_with_credentials(
+        record_path: PathBuf,
+        credentials: &crate::device_credentials::DeviceCredentialStore,
+    ) -> Self {
+        Self {
+            record_path,
+            secrets: Arc::new(PlatformSecretStore {
+                service: "com.vaultmesh.desktop.bitwarden-dev-pin",
+                store: Some(credentials.scoped("com.vaultmesh.desktop.bitwarden-dev-pin")),
             }),
             credential_prefix: "bitwarden-dev-pin",
         }
@@ -600,16 +615,12 @@ mod tests {
             case.root.join("pin.json"),
             Arc::new(MemorySecretStore::default()),
         );
-        assert!(
-            service
-                .enable(case.vault.clone(), &[1_u8; 31], "123456", 5)
-                .is_err()
-        );
-        assert!(
-            service
-                .enable(case.vault.clone(), &[1_u8; 32], "12345x", 5)
-                .is_err()
-        );
+        assert!(service
+            .enable(case.vault.clone(), &[1_u8; 31], "123456", 5)
+            .is_err());
+        assert!(service
+            .enable(case.vault.clone(), &[1_u8; 32], "12345x", 5)
+            .is_err());
         service
             .enable(case.vault.clone(), &[1_u8; 32], "123456", 5)
             .unwrap();

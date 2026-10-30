@@ -126,13 +126,18 @@ pub(super) async fn handle_ssh_external(
                 .lock()
                 .map(|settings| !settings.lock_on_blur)
                 .unwrap_or(false);
+            let registry_arc = Arc::clone(&state.agent_ssh_agent_registry);
             let material = with_runtime(state, move |runtime| {
+                let mut reg = registry_arc
+                    .lock()
+                    .map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_INVALID_ARGUMENT))?;
                 collect_ssh_external_launch_material(
                     runtime,
                     &account_id_for_material,
                     client_id,
                     copy_password,
                     permits_transient_secret,
+                    Some(&mut reg),
                 )
             })
             .await?;

@@ -191,7 +191,8 @@ pub fn run() {
             let agent_resources = Arc::new(Mutex::new(AgentResourceStore::default()));
             let agent_managed_web = Arc::new(Mutex::new(AgentManagedWebStore::default()));
             let agent_ssh_sessions = Arc::new(Mutex::new(AgentSshSessionStore::default()));
-            let agent_ssh_agent_registry = Arc::new(Mutex::new(crate::agent_ssh_agent::SshAgentRegistry::new()));
+            let device_id = get_or_create_device_id(&app_data);
+            let agent_ssh_agent_registry = Arc::new(Mutex::new(crate::agent_ssh_agent::SshAgentRegistry::new_with_device_id(device_id)));
             let mut agent_broker_core = AgentBrokerCore::new_with_pairing_proofs(
                 AgentPairingProofs::platform(app_data.join("agent-pairings.json"), &credentials_store),
             )
@@ -1088,4 +1089,17 @@ fn monitor_email_otp(app: AppHandle, state: RuntimeState) {
             let _ = app.emit("email-otp-candidates", candidates);
         }
     }
+}
+
+fn get_or_create_device_id(app_data: &std::path::Path) -> String {
+    let id_file = app_data.join("device-id");
+    if let Ok(content) = std::fs::read_to_string(&id_file) {
+        let trimmed = content.trim();
+        if trimmed.len() >= 8 && trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            return trimmed.to_owned();
+        }
+    }
+    let new_id = uuid::Uuid::new_v4().simple().to_string();
+    let _ = std::fs::write(&id_file, &new_id);
+    new_id
 }

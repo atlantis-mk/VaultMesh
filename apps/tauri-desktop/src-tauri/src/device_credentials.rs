@@ -142,12 +142,12 @@ impl DeviceCredentialStoreInner {
             version: 1,
             entries: self.entries.clone(),
         };
-        let plaintext = serde_json::to_vec(&payload)
-            .map_err(|e| format!("序列化凭据存储失败: {e}"))?;
+        let plaintext =
+            serde_json::to_vec(&payload).map_err(|e| format!("序列化凭据存储失败: {e}"))?;
 
         let key = derive_encryption_key(&self.root_secret);
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| format!("AES 密码初始化失败: {e}"))?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&key).map_err(|e| format!("AES 密码初始化失败: {e}"))?;
 
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
@@ -157,7 +157,8 @@ impl DeviceCredentialStoreInner {
             .encrypt(nonce, plaintext.as_slice())
             .map_err(|e| format!("凭据加密失败: {e}"))?;
 
-        let mut file_bytes = Vec::with_capacity(MAGIC.len() + 1 + nonce_bytes.len() + ciphertext.len());
+        let mut file_bytes =
+            Vec::with_capacity(MAGIC.len() + 1 + nonce_bytes.len() + ciphertext.len());
         file_bytes.extend_from_slice(MAGIC);
         file_bytes.push(VERSION);
         file_bytes.extend_from_slice(&nonce_bytes);
@@ -190,8 +191,7 @@ impl DeviceCredentialStoreInner {
             file.flush().map_err(|e| format!("刷新凭据文件失败: {e}"))?;
         }
 
-        fs::rename(&tmp_path, &self.file_path)
-            .map_err(|e| format!("原子更新凭据文件失败: {e}"))?;
+        fs::rename(&tmp_path, &self.file_path).map_err(|e| format!("原子更新凭据文件失败: {e}"))?;
         Ok(())
     }
 
@@ -220,15 +220,15 @@ impl DeviceCredentialStoreInner {
         let ciphertext = &file_bytes[nonce_end..];
 
         let key = derive_encryption_key(root_secret);
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| format!("AES 密码初始化失败: {e}"))?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&key).map_err(|e| format!("AES 密码初始化失败: {e}"))?;
 
         let plaintext = cipher
             .decrypt(nonce, ciphertext)
             .map_err(|e| format!("凭据解密失败: {e}"))?;
 
-        let payload: StoredPayload = serde_json::from_slice(&plaintext)
-            .map_err(|e| format!("反序列化凭据内容失败: {e}"))?;
+        let payload: StoredPayload =
+            serde_json::from_slice(&plaintext).map_err(|e| format!("反序列化凭据内容失败: {e}"))?;
 
         Ok(payload.entries)
     }
@@ -260,7 +260,10 @@ impl DeviceCredentialStore {
     }
 
     pub fn get(&self, service: &str, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-        let inner = self.inner.lock().map_err(|_| "凭据互斥锁中毒".to_string())?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| "凭据互斥锁中毒".to_string())?;
         let key = entry_key(service, account);
 
         if let Some(encoded) = inner.entries.get(&key) {
@@ -275,7 +278,10 @@ impl DeviceCredentialStore {
         drop(inner); // Drop lock while talking to legacy provider to minimize contention
 
         if let Some(secret) = legacy_provider.get_legacy_secret(service, account) {
-            let mut inner = self.inner.lock().map_err(|_| "凭据互斥锁中毒".to_string())?;
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| "凭据互斥锁中毒".to_string())?;
             inner.entries.insert(key, STANDARD.encode(&secret));
             let _ = inner.save();
             legacy_provider.delete_legacy_secret(service, account);
@@ -286,7 +292,10 @@ impl DeviceCredentialStore {
     }
 
     pub fn set(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), String> {
-        let mut inner = self.inner.lock().map_err(|_| "凭据互斥锁中毒".to_string())?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "凭据互斥锁中毒".to_string())?;
         let key = entry_key(service, account);
         inner.entries.insert(key, STANDARD.encode(secret));
         inner.save()?;
@@ -298,7 +307,10 @@ impl DeviceCredentialStore {
     }
 
     pub fn delete(&self, service: &str, account: &str) -> Result<(), String> {
-        let mut inner = self.inner.lock().map_err(|_| "凭据互斥锁中毒".to_string())?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "凭据互斥锁中毒".to_string())?;
         let key = entry_key(service, account);
         let removed = inner.entries.remove(&key).is_some();
         if removed {
@@ -395,12 +407,9 @@ pub mod test_helpers {
         let file_path = temp_dir.join("device-credentials.enc");
         let root_store = Arc::new(MemoryRootSecretStore([42u8; 32]));
         let legacy_provider = Arc::new(MemoryLegacyKeyring::default());
-        let store = DeviceCredentialStore::with_stores(
-            file_path,
-            root_store,
-            legacy_provider.clone(),
-        )
-        .expect("create store");
+        let store =
+            DeviceCredentialStore::with_stores(file_path, root_store, legacy_provider.clone())
+                .expect("create store");
         (store, TestDir(temp_dir), legacy_provider)
     }
 }
@@ -427,7 +436,9 @@ mod tests {
         // Reload store from disk
         let root_store = Arc::new(MemoryRootSecretStore([42u8; 32]));
         let legacy_provider = Arc::new(MemoryLegacyKeyring::default());
-        let reloaded = DeviceCredentialStore::with_stores(file_path.clone(), root_store, legacy_provider).unwrap();
+        let reloaded =
+            DeviceCredentialStore::with_stores(file_path.clone(), root_store, legacy_provider)
+                .unwrap();
         assert_eq!(
             reloaded.get("svc1", "acc1").unwrap().unwrap().as_slice(),
             b"secret_value_1"
@@ -440,7 +451,8 @@ mod tests {
         // Reload again, should be gone
         let root_store2 = Arc::new(MemoryRootSecretStore([42u8; 32]));
         let legacy_provider2 = Arc::new(MemoryLegacyKeyring::default());
-        let reloaded2 = DeviceCredentialStore::with_stores(file_path, root_store2, legacy_provider2).unwrap();
+        let reloaded2 =
+            DeviceCredentialStore::with_stores(file_path, root_store2, legacy_provider2).unwrap();
         assert_eq!(reloaded2.get("svc1", "acc1").unwrap(), None);
     }
 
@@ -449,11 +461,10 @@ mod tests {
         let (store, _, legacy_provider) = temp_store();
 
         // Seed legacy provider with an item
-        legacy_provider
-            .items
-            .lock()
-            .unwrap()
-            .insert(entry_key("com.vaultmesh.desktop.agent-pairing", "cursor"), b"cursor_proof".to_vec());
+        legacy_provider.items.lock().unwrap().insert(
+            entry_key("com.vaultmesh.desktop.agent-pairing", "cursor"),
+            b"cursor_proof".to_vec(),
+        );
 
         // Querying store should trigger migration
         let retrieved = store
@@ -486,17 +497,55 @@ mod tests {
         let (store, _, _) = temp_store();
         let scoped = store.scoped("com.vaultmesh.desktop.biometric");
 
-        scoped.set("user_credential", b"biometric_key_data").unwrap();
+        scoped
+            .set("user_credential", b"biometric_key_data")
+            .unwrap();
         assert_eq!(
             scoped.get("user_credential").unwrap().unwrap().as_slice(),
             b"biometric_key_data"
         );
         assert_eq!(
-            store.get("com.vaultmesh.desktop.biometric", "user_credential").unwrap().unwrap().as_slice(),
+            store
+                .get("com.vaultmesh.desktop.biometric", "user_credential")
+                .unwrap()
+                .unwrap()
+                .as_slice(),
             b"biometric_key_data"
         );
 
         scoped.delete("user_credential").unwrap();
         assert_eq!(scoped.get("user_credential").unwrap(), None);
+    }
+
+    #[test]
+    fn test_scoped_credential_store_migrates_legacy_lan_pairing() {
+        let (store, _, legacy_provider) = temp_store();
+        let scoped = store.scoped("com.vaultmesh.desktop.lan-pairing");
+
+        legacy_provider.items.lock().unwrap().insert(
+            entry_key(
+                "com.vaultmesh.desktop.lan-pairing",
+                "device-assist-registration-scopes-v2",
+            ),
+            b"scopes_json".to_vec(),
+        );
+
+        let retrieved = scoped
+            .get("device-assist-registration-scopes-v2")
+            .unwrap()
+            .expect("migrated");
+        assert_eq!(retrieved.as_slice(), b"scopes_json");
+        assert!(
+            legacy_provider
+                .items
+                .lock()
+                .unwrap()
+                .get(&entry_key(
+                    "com.vaultmesh.desktop.lan-pairing",
+                    "device-assist-registration-scopes-v2"
+                ))
+                .is_none(),
+            "Legacy entry must be cleaned up after migration"
+        );
     }
 }

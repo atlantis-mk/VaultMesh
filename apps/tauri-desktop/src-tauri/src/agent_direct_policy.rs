@@ -1058,11 +1058,75 @@ mod tests {
             &mut runtime,
             &policy,
             &cancellation,
+            None,
         )
         .expect("material collected via managed key");
 
         assert!(!material.private_key.is_empty());
         assert_eq!(material.account_label, "Unraid");
+
+        runtime.lock();
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn ct_agent_ssh_agent_open_ephemeral_key_uses_memory_cache_and_never_pollutes_vault() {
+        let (mut runtime, path, item_id) = runtime_with_ssh();
+        let fingerprint = format!("SHA256:{}", "b".repeat(43));
+        let policy = generate_direct_ssh_policy_with_host_key_inspector(
+            &mut runtime,
+            item_id,
+            "vaultmesh_ssh_agent_open",
+            &json!({ "durationMinutes": 30 }),
+            |_| Ok(fingerprint.clone()),
+        )
+        .expect("ssh agent open policy");
+
+        let items_before = runtime.execute("ssh.list", json!({})).unwrap()
+            .as_array()
+            .unwrap()
+            .len();
+
+        let mut registry = crate::agent_ssh_agent::SshAgentRegistry::new_with_device_id("dev-test-1".to_owned());
+        let fake_priv = zeroize::Zeroizing::new("ephemeral-private-key-test".to_owned());
+        let fake_pub = zeroize::Zeroizing::new("ephemeral-public-key-test".to_owned());
+        registry.store_ephemeral_key(
+            &item_id.to_string(),
+            &fingerprint,
+            fake_pub,
+            fake_priv.clone(),
+        );
+
+        let cancellation = std::sync::atomic::AtomicBool::new(false);
+        let material = crate::agent_ssh_runtime::collect_direct_agent_ssh_agent_material(
+            &mut runtime,
+            &policy,
+            &cancellation,
+            Some(&mut registry),
+        )
+        .expect("material collected via ephemeral cache");
+
+        assert_eq!(material.private_key, fake_priv);
+        assert_eq!(material.account_label, "Unraid");
+
+        // Verify that NO new item was created in the Vault!
+        let items_after = runtime.execute("ssh.list", json!({})).unwrap()
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(items_before, items_after, "Vault items must not increase");
+
+        assert!(
+            runtime
+                .find_managed_ssh_key_for_account(item_id, &fingerprint)
+                .unwrap()
+                .is_none(),
+            "No managed SSH key should be added to the persistent vault"
+        );
+
+        // Verify that closing the registry clears the ephemeral cache
+        registry.close_all();
+        assert!(registry.get_ephemeral_key(&item_id.to_string(), &fingerprint).is_none());
 
         runtime.lock();
         std::fs::remove_file(path).expect("cleanup");

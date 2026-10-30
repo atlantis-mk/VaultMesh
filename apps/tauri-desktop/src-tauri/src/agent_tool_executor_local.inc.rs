@@ -245,12 +245,16 @@ pub(super) fn execute_agent_tool(
                 )
             })?;
             let policy = required_direct_ssh_policy(scope, account_ref, tool)?;
+            let mut registry = context.ssh_agent_registry.lock().map_err(|_| {
+                AgentBrokerError::new("internal-error", "SSH agent registry unavailable.", true)
+            })?;
             let material = {
                 let mut runtime = runtime.lock().map_err(|_| vault_unavailable())?;
                 agent_ssh_runtime::collect_direct_agent_ssh_agent_material(
                     &mut runtime,
                     policy,
                     cancellation,
+                    Some(&mut registry),
                 )
                 .map_err(|_| {
                     AgentBrokerError::new(
@@ -266,9 +270,6 @@ pub(super) fn execute_agent_tool(
                 .unwrap_or(15);
             let base_dir = app.path().app_data_dir().map_err(|_| {
                 AgentBrokerError::new("storage-error", "Failed to resolve app data directory.", false)
-            })?;
-            let mut registry = context.ssh_agent_registry.lock().map_err(|_| {
-                AgentBrokerError::new("internal-error", "SSH agent registry unavailable.", true)
             })?;
             let session_info = registry
                 .start_session(

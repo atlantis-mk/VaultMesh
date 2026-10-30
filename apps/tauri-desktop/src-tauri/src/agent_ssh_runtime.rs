@@ -10,6 +10,7 @@ pub(super) fn collect_direct_agent_ssh_agent_material(
     runtime: &mut DesktopRuntime,
     policy: &crate::agent_broker::AgentDirectSshPolicy,
     cancellation: &std::sync::atomic::AtomicBool,
+    registry: Option<&mut crate::agent_ssh_agent::SshAgentRegistry>,
 ) -> Result<AgentSshAgentOpenMaterial, DesktopRuntimeError> {
     if policy.tool != "vaultmesh_ssh_agent_open" {
         return Err(VAULTMESH_STATUS_INVALID_ARGUMENT.into());
@@ -41,13 +42,32 @@ pub(super) fn collect_direct_agent_ssh_agent_material(
         if cancellation.load(std::sync::atomic::Ordering::Acquire) {
             return Err(VAULTMESH_STATUS_INVALID_ARGUMENT.into());
         }
+        let account_ref_str = policy.account_ref.to_string();
+
+        // 3a. Check if we already have an active ephemeral key in memory cache
+        if let Some(reg) = registry.as_ref() {
+            if let Some(cached_priv_key) = reg.get_ephemeral_key(&account_ref_str, &policy.host_key_sha256) {
+                return Ok(AgentSshAgentOpenMaterial {
+                    account_label: label,
+                    private_key: cached_priv_key,
+                    passphrase: None,
+                });
+            }
+        }
+
         let password = runtime.protected_value(
             VAULTMESH_ITEM_KIND_SSH_CREDENTIAL,
             VAULTMESH_PROTECTED_FIELD_SSH_PASSWORD,
             &account.id,
             None,
         )?;
-        let alias = format!("auto-{}", &policy.account_ref.to_string()[..8]);
+
+        // Build alias: auto-<device_id[..8]>-<account_id[..8]>
+        let device_id = registry.as_ref().map(|r| r.device_id()).unwrap_or("local");
+        let dev_prefix = if device_id.len() >= 8 { &device_id[..8] } else { device_id };
+        let acc_prefix = &account_ref_str[..8.min(account_ref_str.len())];
+        let alias = format!("auto-{dev_prefix}-{acc_prefix}");
+
         let identity = crate::ssh_host_setup::generate_ssh_host_identity(&alias)
             .map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_INVALID_ARGUMENT))?;
 
@@ -65,17 +85,19 @@ pub(super) fn collect_direct_agent_ssh_agent_material(
         ssh_service::install_public_key_cancellable(install_request, cancellation)
             .map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_INVALID_ARGUMENT))?;
 
-        let managed_key = runtime.add_managed_ssh_host_key(
-            policy.account_ref,
-            alias,
-            policy.host_key_sha256.clone(),
-            identity.public_key,
-            identity.private_key,
-        )?;
+        let private_key = identity.private_key.clone();
+        if let Some(reg) = registry {
+            reg.store_ephemeral_key(
+                &account_ref_str,
+                &policy.host_key_sha256,
+                identity.public_key,
+                identity.private_key,
+            );
+        }
 
         return Ok(AgentSshAgentOpenMaterial {
             account_label: label,
-            private_key: managed_key.private_key,
+            private_key,
             passphrase: None,
         });
     }
@@ -420,6 +442,7 @@ pub(super) fn collect_ssh_external_launch_material(
     client_id: ssh_external::ExternalClientId,
     copy_password: bool,
     permits_transient_secret: bool,
+    registry: Option<&mut crate::agent_ssh_agent::SshAgentRegistry>,
 ) -> Result<SshExternalLaunchMaterial, DesktopRuntimeError> {
     let detail = runtime_ssh_detail(runtime, account_id)?;
     let target = ssh_target(&detail).map_err(|_| VAULTMESH_STATUS_INVALID_ARGUMENT)?;
@@ -445,40 +468,50 @@ pub(super) fn collect_ssh_external_launch_material(
                 username: target.username().to_owned(),
             };
             if let Ok(host_key_preview) = ssh_service::inspect_host_key(target_endpoint.clone()) {
-                if let Ok(Some(managed_key)) = runtime.find_managed_ssh_key_for_account(
-                    account_ref,
-                    &host_key_preview.fingerprint,
-                ) {
-                    private_key = Some(managed_key.private_key);
-                } else if let Ok(password) = runtime.protected_value(
-                    VAULTMESH_ITEM_KIND_SSH_CREDENTIAL,
-                    VAULTMESH_PROTECTED_FIELD_SSH_PASSWORD,
-                    &detail.id,
-                    None,
-                ) {
-                    let alias = format!("auto-{}", &account_ref.to_string()[..8]);
-                    if let Ok(identity) = crate::ssh_host_setup::generate_ssh_host_identity(&alias) {
-                        let cancellation = std::sync::atomic::AtomicBool::new(false);
-                        let install_request = PublicKeyInstallRequest {
-                            target: target_endpoint,
-                            expected_host_key_fingerprint: host_key_preview.fingerprint.clone(),
-                            public_key: identity.public_key.clone(),
-                            authentication: AuthenticationMaterial::StoredPassword(password),
-                            verification_key: Some(PrivateKeyMaterial {
-                                public_key: Some(identity.public_key.clone()),
-                                private_key: identity.private_key.clone(),
-                                passphrase: None,
-                            }),
-                        };
-                        if ssh_service::install_public_key_cancellable(install_request, &cancellation).is_ok() {
-                            if let Ok(managed_key) = runtime.add_managed_ssh_host_key(
-                                account_ref,
-                                alias,
-                                host_key_preview.fingerprint,
-                                identity.public_key,
-                                identity.private_key,
-                            ) {
-                                private_key = Some(managed_key.private_key);
+                if let Some(reg) = registry.as_ref() {
+                    if let Some(cached_priv_key) = reg.get_ephemeral_key(account_id, &host_key_preview.fingerprint) {
+                        private_key = Some(cached_priv_key);
+                    }
+                }
+                if private_key.is_none() {
+                    if let Ok(Some(managed_key)) = runtime.find_managed_ssh_key_for_account(
+                        account_ref,
+                        &host_key_preview.fingerprint,
+                    ) {
+                        private_key = Some(managed_key.private_key);
+                    } else if let Ok(password) = runtime.protected_value(
+                        VAULTMESH_ITEM_KIND_SSH_CREDENTIAL,
+                        VAULTMESH_PROTECTED_FIELD_SSH_PASSWORD,
+                        &detail.id,
+                        None,
+                    ) {
+                        let device_id = registry.as_ref().map(|r| r.device_id()).unwrap_or("local");
+                        let dev_prefix = if device_id.len() >= 8 { &device_id[..8] } else { device_id };
+                        let acc_prefix = &account_id[..8.min(account_id.len())];
+                        let alias = format!("auto-{dev_prefix}-{acc_prefix}");
+                        if let Ok(identity) = crate::ssh_host_setup::generate_ssh_host_identity(&alias) {
+                            let cancellation = std::sync::atomic::AtomicBool::new(false);
+                            let install_request = PublicKeyInstallRequest {
+                                target: target_endpoint,
+                                expected_host_key_fingerprint: host_key_preview.fingerprint.clone(),
+                                public_key: identity.public_key.clone(),
+                                authentication: AuthenticationMaterial::StoredPassword(password),
+                                verification_key: Some(PrivateKeyMaterial {
+                                    public_key: Some(identity.public_key.clone()),
+                                    private_key: identity.private_key.clone(),
+                                    passphrase: None,
+                                }),
+                            };
+                            if ssh_service::install_public_key_cancellable(install_request, &cancellation).is_ok() {
+                                private_key = Some(identity.private_key.clone());
+                                if let Some(reg) = registry {
+                                    reg.store_ephemeral_key(
+                                        account_id,
+                                        &host_key_preview.fingerprint,
+                                        identity.public_key,
+                                        identity.private_key,
+                                    );
+                                }
                             }
                         }
                     }

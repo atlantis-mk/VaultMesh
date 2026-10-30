@@ -3056,8 +3056,7 @@ mod tests {
     #[test]
     fn ct_lan_pairing_skips_automatic_identity_probes_before_first_trust() {
         let store = empty_store("first-trust-probe");
-        let mut service = LanPairingService::new(store.path.clone());
-        service.trust = store.clone();
+        let service = LanPairingService::new_with_credentials(store.path.clone(), store.credentials.clone());
         assert!(!service.has_trusted_peers());
 
         store
@@ -3074,8 +3073,9 @@ mod tests {
 
     #[test]
     fn ct_lan_pairing_failed_handshake_clears_in_flight_and_allows_retry() {
-        let mut service = LanPairingService::new(
+        let mut service = LanPairingService::new_with_credentials(
             std::env::temp_dir().join(format!("vaultmesh-lan-retry-{}.json", random_token())),
+            Arc::new(MemoryCredentials::default()),
         );
         let instance = "00112233445566778899aabbccddeeff";
         let reference = format!("lan-peer-{instance}");
@@ -3148,8 +3148,9 @@ mod tests {
         let mut byte = [0; 1];
         assert_eq!(client.read(&mut byte).unwrap(), 0);
 
-        let mut service = LanPairingService::new(
+        let mut service = LanPairingService::new_with_credentials(
             std::env::temp_dir().join(format!("vaultmesh-lan-stop-{}.json", random_token())),
+            Arc::new(MemoryCredentials::default()),
         );
         let reference = "lan-peer-00112233445566778899aabbccddeeff".to_owned();
         service.in_flight.insert(reference);
@@ -3160,8 +3161,9 @@ mod tests {
 
     #[test]
     fn ct_lan_pairing_rejects_invalid_code_before_connecting() {
-        let mut service = LanPairingService::new(
+        let mut service = LanPairingService::new_with_credentials(
             std::env::temp_dir().join(format!("vaultmesh-lan-expiry-{}.json", random_token())),
+            Arc::new(MemoryCredentials::default()),
         );
         let reference = "lan-peer-00112233445566778899aabbccddeeff".to_owned();
         assert_eq!(

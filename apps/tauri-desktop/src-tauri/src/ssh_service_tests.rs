@@ -70,6 +70,13 @@ fn install_command_uses_stdin_and_never_interpolates_key_material() {
     assert!(!INSTALL_PUBLIC_KEY_COMMAND.contains("ssh-ed25519"));
 }
 
+#[test]
+fn install_command_replaces_matching_auto_keys_atomically() {
+    assert!(INSTALL_PUBLIC_KEY_COMMAND.contains("vaultmesh:auto-"));
+    assert!(INSTALL_PUBLIC_KEY_COMMAND.contains("awk -v t=\"$tag\""));
+    assert!(INSTALL_PUBLIC_KEY_COMMAND.contains("mv -f"));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "requires the local OpenSSH daemon"]

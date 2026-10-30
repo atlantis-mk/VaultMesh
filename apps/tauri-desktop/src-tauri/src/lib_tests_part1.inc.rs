@@ -566,6 +566,7 @@ fn ssh_external_launch_keeps_private_material_in_rust_and_honors_reprompt() {
         ssh_external::ExternalClientId::SystemTerminal,
         true,
         true,
+        None,
     )
     .expect("key launch material");
     assert_eq!(
@@ -587,6 +588,7 @@ fn ssh_external_launch_keeps_private_material_in_rust_and_honors_reprompt() {
         ssh_external::ExternalClientId::Vscode,
         true,
         true,
+        None,
     )
     .expect("vscode launch material");
     assert_eq!(vscode_material.authentication, "key");
@@ -604,6 +606,7 @@ fn ssh_external_launch_keeps_private_material_in_rust_and_honors_reprompt() {
         ssh_external::ExternalClientId::SystemTerminal,
         true,
         false,
+        None,
     )
     .expect("lock-on-blur launch material");
     assert_eq!(locked_on_blur_material.authentication, "sshAgent");
@@ -629,6 +632,7 @@ fn ssh_external_launch_keeps_private_material_in_rust_and_honors_reprompt() {
         ssh_external::ExternalClientId::SystemTerminal,
         true,
         true,
+        None,
     )
     .expect("reprompt launch material");
     assert_eq!(reprompt_material.authentication, "password");

@@ -2,9 +2,10 @@ use crate::{
     browser_broker::BrowserPlatformError,
     browser_fill::{device_assignment, validate_device_discovery},
 };
-use serde_json::{Map, Value, json};
-use std::{collections::HashMap, path::PathBuf};
+use serde_json::{json, Map, Value};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use vaultmesh_lan_pairing::assist::{AssistClient, Kind};
+use vaultmesh_lan_pairing::CredentialStore;
 struct Request {
     discovery: Value,
     kind: Kind,
@@ -13,6 +14,7 @@ struct Request {
 }
 pub struct DeviceAssistBroker {
     path: PathBuf,
+    credentials: Arc<dyn CredentialStore>,
     client: Option<AssistClient>,
     scope: Option<String>,
     requests: HashMap<String, Request>,
@@ -24,18 +26,23 @@ fn error() -> BrowserPlatformError {
     }
 }
 impl DeviceAssistBroker {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf, credentials: Arc<dyn CredentialStore>) -> Self {
         Self {
             path,
+            credentials,
             client: None,
             scope: None,
             requests: HashMap::new(),
         }
     }
     pub fn prepare(&mut self, scope: String) -> Result<(), BrowserPlatformError> {
-        if self.scope.as_ref() == Some(&scope) && self.client.is_some() { return Ok(()); }
+        if self.scope.as_ref() == Some(&scope) && self.client.is_some() {
+            return Ok(());
+        }
         self.clear();
-        let mut client = AssistClient::new(self.path.clone()).map_err(|_| error())?;
+        let mut client =
+            AssistClient::with_credentials(self.path.clone(), self.credentials.clone())
+                .map_err(|_| error())?;
         client.enable_registration(&scope).map_err(|_| error())?;
         self.client = Some(client);
         self.scope = Some(scope);
@@ -88,7 +95,10 @@ impl DeviceAssistBroker {
             .map_err(|_| error())?
             .timestamp_millis();
             if self.client.is_none() {
-                self.client = Some(AssistClient::new(self.path.clone()).map_err(|_| error())?);
+                self.client = Some(
+                    AssistClient::with_credentials(self.path.clone(), self.credentials.clone())
+                        .map_err(|_| error())?,
+                );
             }
             let id = self
                 .client
@@ -151,5 +161,24 @@ impl DeviceAssistBroker {
             }
             _ => Err(error()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device_credentials::test_helpers::temp_store;
+
+    #[test]
+    fn ct_device_assist_broker_uses_injected_credential_store() {
+        let (store, dir, _legacy) = temp_store();
+        let scoped = Arc::new(store.scoped("com.vaultmesh.desktop.lan-pairing"));
+        let trust_path = dir.0.join("lan-peer-trust.json");
+        let mut broker = DeviceAssistBroker::new(trust_path, scoped.clone());
+
+        assert!(broker.prepare("test-scope-1".into()).is_ok());
+        // Verify registration scopes were saved into the scoped credential store, not the OS keyring
+        let scopes = scoped.get("device-assist-registration-scopes-v2").unwrap();
+        assert!(scopes.is_some());
     }
 }
