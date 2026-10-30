@@ -124,7 +124,8 @@ impl SshAgentRegistry {
 
     pub fn start_session(
         &mut self,
-        _base_dir: &Path,
+        #[cfg(windows)] base_dir: &Path,
+        #[cfg(not(windows))] _base_dir: &Path,
         account_ref: &str,
         account_label: &str,
         private_key_pem: Zeroizing<String>,
@@ -507,6 +508,15 @@ mod tests {
                 15,
             )
             .expect("session must start successfully");
+
+        #[cfg(windows)]
+        {
+            assert!(
+                temp_dir.join("agent-sessions").is_dir(),
+                "Windows SSH agent sessions directory must be created under the provided base directory"
+            );
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
 
         #[cfg(unix)]
         {
