@@ -24,14 +24,13 @@ use security_framework::os::macos::access::SecAccess;
 use security_framework::passwords::{
     PasswordOptions, generic_password, set_generic_password_options,
 };
-use security_framework_sys::access::SecAccessRef;
-use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound};
+use security_framework_sys::base::{SecAccessRef, errSecDuplicateItem, errSecItemNotFound};
 use security_framework_sys::code_signing::{
     SecCodeCopySelf, SecCodeRef, SecStaticCodeCreateWithPath, SecStaticCodeRef,
 };
 use security_framework_sys::item::{
     kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecMatchLimit,
-    kSecMatchLimitAll, kSecReturnAttributes, kSecReturnData, kSecReturnRef, kSecValueData,
+    kSecMatchLimitAll, kSecReturnAttributes, kSecReturnRef, kSecValueData,
 };
 use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemUpdate};
 use sha2::Digest;
@@ -47,7 +46,7 @@ use crate::keychain_share::{
 const ERR_SEC_MISSING_ENTITLEMENT: OSStatus = -34018;
 
 #[link(name = "Security", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     static kSecAttrAccess: CFStringRef;
     static kSecCodeInfoEntitlements: CFStringRef;
     static kSecCodeInfoEntitlementsDict: CFStringRef;
@@ -145,10 +144,6 @@ pub fn list_legacy_generic_passwords(service: &str) -> Result<Vec<(String, Vec<u
             static_key(unsafe { kSecReturnAttributes }),
             CFBoolean::from(true).into_CFType(),
         ),
-        (
-            static_key(unsafe { kSecReturnData }),
-            CFBoolean::from(true).into_CFType(),
-        ),
     ]);
     let mut result: CFTypeRef = ptr::null();
     let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
@@ -159,7 +154,17 @@ pub fn list_legacy_generic_passwords(service: &str) -> Result<Vec<(String, Vec<u
         return Err(format!("无法枚举旧钥匙串条目 ({status})"));
     }
     let owned = unsafe { CFType::wrap_under_create_rule(result) };
-    parse_legacy_matches(&owned)
+    let mut secrets = Vec::new();
+    for account in parse_legacy_accounts(&owned)? {
+        match generic_password(PasswordOptions::new_generic_password(service, &account)) {
+            Ok(secret) => secrets.push((account, secret)),
+            Err(error) if error.code() == errSecItemNotFound => {}
+            Err(error) => {
+                return Err(format!("无法读取旧钥匙串条目 ({})", error.code()));
+            }
+        }
+    }
+    Ok(secrets)
 }
 
 fn legacy_root_secret() -> Result<Zeroizing<[u8; 32]>, String> {
@@ -255,7 +260,7 @@ fn ensure_shared_legacy_acl() -> Result<(), String> {
         return Ok(());
     };
     let item = legacy_item_ref()?;
-    if item_already_shared(&item, plan) {
+    if item_already_shared(&item, &plan) {
         return Ok(());
     }
     let access = access_for_plan(&plan)?;
@@ -680,7 +685,7 @@ fn cf_array_strings(value: CFTypeRef) -> Vec<String> {
     groups
 }
 
-fn parse_legacy_matches(value: &CFType) -> Result<Vec<(String, Vec<u8>)>, String> {
+fn parse_legacy_accounts(value: &CFType) -> Result<Vec<String>, String> {
     let mut dicts = Vec::new();
     if unsafe { CFGetTypeID(value.as_CFTypeRef()) } == unsafe { CFArrayGetTypeID() } {
         let count = unsafe { CFArrayGetCount(value.as_CFTypeRef() as _) };
@@ -696,19 +701,14 @@ fn parse_legacy_matches(value: &CFType) -> Result<Vec<(String, Vec<u8>)>, String
     } else {
         dicts.push(value.as_CFTypeRef());
     }
-    let mut secrets = Vec::new();
+    let mut accounts = Vec::new();
     for dict in dicts {
         let Some(account) = dictionary_string(dict, unsafe { kSecAttrAccount }) else {
             continue;
         };
-        let data_ref = unsafe { CFDictionaryGetValue(dict as _, kSecValueData as _) };
-        if data_ref.is_null() || unsafe { CFGetTypeID(data_ref) } != unsafe { CFDataGetTypeID() } {
-            continue;
-        }
-        let data = unsafe { CFData::wrap_under_get_rule(data_ref as _) };
-        secrets.push((account, data.bytes().to_vec()));
+        accounts.push(account);
     }
-    Ok(secrets)
+    Ok(accounts)
 }
 
 fn dictionary(pairs: &[(CFString, CFType)]) -> CFDictionary<CFString, CFType> {

@@ -42,6 +42,11 @@ pub struct PinCredential {
     pub vault_key: Zeroizing<Vec<u8>>,
 }
 
+enum PinUnwrapError {
+    CredentialUnavailable,
+    InvalidPin,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PinRecord {
@@ -352,7 +357,10 @@ impl PinQuickUnlockService {
                     vault_key,
                 })
             }
-            Err(()) => {
+            Err(PinUnwrapError::CredentialUnavailable) => {
+                Err("PIN 快速解锁凭据已失效，请使用主密码解锁后重新创建 PIN。".to_owned())
+            }
+            Err(PinUnwrapError::InvalidPin) => {
                 record.failed_attempts = record
                     .failure_limit
                     .min(record.failed_attempts.saturating_add(1));
@@ -407,21 +415,35 @@ impl PinQuickUnlockService {
         Ok(())
     }
 
-    fn unwrap_key(&self, record: &PinRecord, pin: &str) -> Result<Zeroizing<Vec<u8>>, ()> {
-        let device_secret = self.secrets.get(&record.credential_id).map_err(|_| ())?;
+    fn unwrap_key(
+        &self,
+        record: &PinRecord,
+        pin: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, PinUnwrapError> {
+        let device_secret = self
+            .secrets
+            .get(&record.credential_id)
+            .map_err(|_| PinUnwrapError::CredentialUnavailable)?;
         if device_secret.len() != DEVICE_SECRET_BYTES {
-            return Err(());
+            return Err(PinUnwrapError::CredentialUnavailable);
         }
-        let salt = decode_exact::<SALT_BYTES>(&record.salt)?;
-        let nonce = decode_exact::<NONCE_BYTES>(&record.nonce)?;
-        let tag = decode_exact::<TAG_BYTES>(&record.authentication_tag)?;
-        let wrapping_key =
-            derive_wrapping_key(pin, device_secret.as_slice(), &salt).map_err(|_| ())?;
-        let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref()).map_err(|_| ())?;
-        let mut vault_key =
-            Zeroizing::new(BASE64.decode(&record.wrapped_vault_key).map_err(|_| ())?);
+        let salt =
+            decode_exact::<SALT_BYTES>(&record.salt).map_err(|_| PinUnwrapError::InvalidPin)?;
+        let nonce =
+            decode_exact::<NONCE_BYTES>(&record.nonce).map_err(|_| PinUnwrapError::InvalidPin)?;
+        let tag = decode_exact::<TAG_BYTES>(&record.authentication_tag)
+            .map_err(|_| PinUnwrapError::InvalidPin)?;
+        let wrapping_key = derive_wrapping_key(pin, device_secret.as_slice(), &salt)
+            .map_err(|_| PinUnwrapError::InvalidPin)?;
+        let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
+            .map_err(|_| PinUnwrapError::InvalidPin)?;
+        let mut vault_key = Zeroizing::new(
+            BASE64
+                .decode(&record.wrapped_vault_key)
+                .map_err(|_| PinUnwrapError::InvalidPin)?,
+        );
         if vault_key.len() != QUICK_UNLOCK_KEY_BYTES {
-            return Err(());
+            return Err(PinUnwrapError::InvalidPin);
         }
         cipher
             .decrypt_in_place_detached(
@@ -430,7 +452,7 @@ impl PinQuickUnlockService {
                 &mut vault_key,
                 GenericArray::from_slice(&tag),
             )
-            .map_err(|_| ())?;
+            .map_err(|_| PinUnwrapError::InvalidPin)?;
         Ok(vault_key)
     }
 
@@ -613,6 +635,23 @@ mod tests {
         service.disable().unwrap();
         assert!(!service.status().enabled);
         assert!(store.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_device_secret_requires_recreation_without_counting_a_pin_failure() {
+        let case = TestCase::new();
+        let store = Arc::new(MemorySecretStore::default());
+        let service = PinQuickUnlockService::with_store(case.root.join("pin.json"), store.clone());
+        service
+            .enable(case.vault.clone(), &[1_u8; 32], "123456", 5)
+            .unwrap();
+        store.0.lock().unwrap().clear();
+
+        let error = service.unlock("123456").unwrap_err();
+
+        assert!(error.contains("重新创建 PIN"));
+        assert_eq!(service.status().failed_attempts, 0);
+        assert_eq!(service.status().remaining_attempts, 5);
     }
 
     #[test]
