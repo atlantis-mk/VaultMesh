@@ -38,10 +38,9 @@ fn macos_browser_host_plan(
             "host paths must be absolute",
         ));
     }
-    let native_host_path = desktop_executable
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "desktop has no directory"))?
-        .join("vaultmesh-native-host");
+    let native_host_path = crate::keychain_share::in_bundle_executable_paths(desktop_executable)
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
+        .native_host;
     let host = native_host_path.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -290,6 +289,22 @@ mod tests {
             assert_eq!(value["name"], BROWSER_HOST_NAME);
             assert_eq!(value["type"], "stdio");
         }
+        assert!(
+            plan.native_host_path
+                .ends_with("Contents/MacOS/vaultmesh-native-host")
+        );
+        assert!(
+            !plan
+                .native_host_path
+                .to_string_lossy()
+                .contains("bitwarden")
+        );
+        assert!(
+            !plan
+                .native_host_path
+                .to_string_lossy()
+                .contains("agent-mcp")
+        );
         assert_eq!(values[1], values[2]);
         assert_eq!(
             values[1]["allowed_origins"],
@@ -303,6 +318,45 @@ mod tests {
             json!([FIREFOX_EXTENSION_ID])
         );
         assert!(values[3].get("allowed_origins").is_none());
+    }
+
+    #[test]
+    fn macos_registration_rejects_hosts_outside_the_app_bundle() {
+        let fixture = Fixture::new();
+        let loose = fixture.0.join("vaultmesh-tauri-desktop");
+        assert!(
+            macos_browser_host_plan(
+                &fixture.0.join("home"),
+                Path::new("/tmp"),
+                &loose,
+                DEFAULT_DEVELOPMENT_EXTENSION_ID,
+            )
+            .is_err()
+        );
+        let dev_host = fixture
+            .0
+            .join("VaultMesh.app/Contents/MacOS/vaultmesh-bitwarden-dev-host");
+        assert!(
+            macos_browser_host_plan(
+                &fixture.0.join("home"),
+                Path::new("/tmp"),
+                &dev_host,
+                DEFAULT_DEVELOPMENT_EXTENSION_ID,
+            )
+            .is_err()
+        );
+        let agent = fixture
+            .0
+            .join("VaultMesh.app/Contents/MacOS/vaultmesh-agent-mcp");
+        assert!(
+            macos_browser_host_plan(
+                &fixture.0.join("home"),
+                Path::new("/tmp"),
+                &agent,
+                DEFAULT_DEVELOPMENT_EXTENSION_ID,
+            )
+            .is_err()
+        );
     }
 
     #[test]

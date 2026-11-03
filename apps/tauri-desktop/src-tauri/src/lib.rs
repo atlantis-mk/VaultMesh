@@ -99,6 +99,9 @@ pub mod device_credentials;
 mod electron_migration;
 mod email_otp;
 mod import_service;
+mod keychain_share;
+#[cfg(target_os = "macos")]
+mod macos_root_secret;
 use vaultmesh_lan_pairing as lan_pairing;
 mod passkey_service;
 mod pin_service;

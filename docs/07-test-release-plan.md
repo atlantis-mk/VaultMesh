@@ -54,7 +54,7 @@ pnpm typecheck
 | `CT-API-REQUEST-SEC-001` | Tauri Rust WebPKI、public/private/loopback/metadata/link-local/mixed DNS 分类与固定、native-confirmation predicate、redirect/proxy/compression/header smuggling denial、timeout/quota/JSON depth、secret canary、lock/window/exit cleanup tests；无生产凭据本地 fixture |
 | `CT-SEC-*`、`CT-IMPORT-*`、`CT-SSH-SCAN-*` | Tauri Rust runtime/command tests；`CT-SEC-003` 解析全部产品窗口配置并拒绝 renderer 关闭内容保护 |
 | `CT-BROWSER-*` | Tauri shared policy/capability、Rust broker + WXT extension non-secret preference tests；`CT-ITEM-001` 同时覆盖 Login 编辑字段保留、特权详情短期草稿、确认删除、防重复写入和结果不确定时不重试 |
-| `CT-BROWSER-PACKAGE-001` | WXT Chrome MV3/Firefox MV2 manifest 与 ZIP contract、固定双 identity、macOS/Windows browser-specific Native Messaging manifest/注册/卸载、macOS 启动注册的首次安装/重复执行/删除修复/App 移位/权限修复/不安全目标拒绝/配对记录保留与普通/updater App sidecar 漏包检查、Rust Host Chrome origin 与 Firefox manifest-path/Gecko-ID 启动参数拒绝测试、Review workflow 六资产同 source gate，以及两个 ZIP 的不可变 R2 路径与公网逐字节校验 |
+| `CT-BROWSER-PACKAGE-001` | WXT Chrome MV3/Firefox MV2 manifest 与 ZIP contract、固定双 identity、macOS/Windows browser-specific Native Messaging manifest/注册/卸载、macOS 启动注册的首次安装/重复执行/删除修复/App 移位/权限修复/不安全目标拒绝/配对记录保留与普通/updater App sidecar 漏包检查、注册路径必须保持在 `.app/Contents/MacOS/vaultmesh-native-host` 且拒绝包外、开发 Host 与 Agent sidecar、Rust Host Chrome origin 与 Firefox manifest-path/Gecko-ID 启动参数拒绝测试、Review workflow 六资产同 source gate，以及两个 ZIP 的不可变 R2 路径与公网逐字节校验 |
 | `CT-AUTOFILL-*` | Tauri Rust broker tests + `apps/browser-extension/src/lib/*.test.ts`，验证来源、handle、gesture、锁定、单次 assignment 与失效拒绝 |
 | `CT-AUTHENTICATOR-*` | extension QR target/UI/protocol/background tests + Tauri Login update/autofill broker regression |
 | `CT-RECOVERY-CODES-*` | core Login payload/reauth/redaction + Tauri typed operation/clipboard/file parse（逐行与 Google 编号双栏）-confirm-delete/foreground-parenting + desktop/extension editor 逐次查看/复制复验和瞬时状态 contract tests |
@@ -217,6 +217,8 @@ pnpm typecheck
 - `CT-BROWSER-001` 必须以 Broker 实际事件形状验证空闲锁定后 PIN 重新解锁仍可读取历史 `vault-locked` 和新增 `vault-changed`；后者应刷新当前授权摘要，未知事件仍须拒绝，不得把合法事件解析失败显示为桌面断连。
 - `CT-SEC-002` / `CT-BROWSER-001` 还必须覆盖桌面配置跟随、自动一次 Touch ID、StrictMode/重复点击、失败显式重试、密码/PIN 取消、popup 隐藏/关闭与迟到结果、凭据替换/关闭、错误 Vault、单次消费、30 秒总期限及 3 秒无轮询过期；`CT-BROWSER-002` 必须覆盖三项认证操作的 Rust/TypeScript 路由、鉴权和 policy parity。`AT-BROWSER-001` / `AT-BROWSER-FIREFOX-001` 必须在 macOS 实测系统弹窗期间 popup 生命周期与真实指纹成功、取消和回退，不得以模拟认证代替。
 - `CT-SEC-002` / `CT-BROWSER-001` 必须覆盖解锁页无快捷方式、仅 PIN、仅生物识别、两者均可用、未启用/不可用/PIN 锁定、状态读取失败/超时及迟到响应；验证默认优先级、切换清空、6 位 PIN 单次提交、失败次数刷新、生物识别取消、主密码回退与隐藏/销毁清理。系统指纹弹窗仍须真机验收。
+- `CT-SEC-002` 必须覆盖设备凭据一次性迁移：已知旧 Service 迁入 `device-credentials.enc` 后被删除，统一存储再次打开或读取缺失账户时不得再访问这些旧条目；空 AAD 旧文件必须重封。生产 PIN/生物识别在 Release 中不得走直接 `keyring` 旁路。
+- `AT-SEC-001` / `AT-BROWSER-001` 必须在带同一 Team ID 的签名 macOS 包上验证：对共享根钥匙串条目授权一次后，完全退出并冷启动主程序，再触发浏览器自动填充，不得再次出现钥匙串密码弹窗。Native Messaging 路径必须保持在 `VaultMesh.app/Contents/MacOS/vaultmesh-native-host`。Ad-hoc 签名没有 Team ID，不能把该结果当成 Access Group 验收。
 - `CT-BROWSER-001` 必须覆盖连接即时反馈、重复点击、权限/状态无回调超时、后台无响应、Native Host 安全错误分类、断连与迟到状态竞争；诊断不得回显原始错误或改变 mutation 重试语义。
 - 初始化回归必须覆盖状态成功而列表无响应的超时，以及连续刷新与轮询复用同一轮读取；授权失效后的新轮次不能被旧轮次覆盖。
 - `CT-BROWSER-001` 必须以至少 500 条虚构摘要验证分页渲染上限、末页可达、跨页搜索、列表缩短与锁定清理；WXT 构建产物不得一次性创建全量条目的操作控件。

@@ -43,6 +43,7 @@ Summary/detail 省略 protected value。有界且用户授权的 reveal/fill pre
 - Extension 是 authenticated remote UI，不是 Vault client；native host 不能打开 Vault。
 - Extension 不接收 Vault Key、envelope、recovery material、provider token 或 native path，也不持久化 Vault response。
 - Desktop unlock 不授权 extension；pairing secret 受 OS 保护；revoke 清除 session/pending request。当前 WXT Touch ID 跟随 desktop 的本机配置，认证及短时凭据读取仍全部由 Rust 执行；授权独立和认证会话约束由 REQ-BROWSER-001 与 Browser 专项规格拥有（ADR-0051）。
+- 桌面设备根密钥只有一把钥匙串条目。macOS 上只有同一 Team ID 签名、且位于同一个 `.app` 内的主程序和 `vaultmesh-native-host` 可以共享它（ADR-0053）。开发 Host、Agent sidecar 和包外程序没有该 Access Group，也不得被写入 Trusted Applications。配对秘密和其他设备凭据只存在于这把根密钥加密的 `device-credentials.enc`。
 - RPC v2 请求 size-bounded、correlated、authenticated、expiring、replay-protected；main 执行 capability policy。
 - Discovery 只包含 metadata/empty bit。Origin、tab、frame document、handle 和 expiry 一直绑定到 assignment。
 - 自动 disclosure 只允许启用且匹配的 empty login/OTP field；card、identity、secret、SSH、re-prompt、signup 和 password maintenance 不自动填充。

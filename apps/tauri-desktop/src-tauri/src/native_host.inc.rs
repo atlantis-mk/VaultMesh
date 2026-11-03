@@ -46,14 +46,34 @@ mod windows_host {
     };
     use zeroize::Zeroizing;
 
-    const CONFIG_NAME: &str = if DEV { dev::CONFIG_NAME } else { "browser-host-config.json" };
+    const CONFIG_NAME: &str = if DEV {
+        dev::CONFIG_NAME
+    } else {
+        "browser-host-config.json"
+    };
     const APP_DATA_NAME: &str = "com.vaultmesh.desktop";
     const DEFAULT_EXTENSION_ID: &str = "bdneegbnjbheblmamalplnddbodcghbg";
     const DEFAULT_FIREFOX_EXTENSION_ID: &str = "vaultmesh@atlantis-mk.github.io";
-    const FIREFOX_MANIFEST_NAME: &str = if DEV { "com.vaultmesh.bitwarden.dev.firefox.json" } else { "com.vaultmesh.browser.firefox.json" };
-    const EXPECTED_PIPE: &str = if DEV { dev::PIPE_NAME } else { r"\\.\pipe\VaultMesh.BrowserBroker.v2" };
-    const EXPECTED_KEYCHAIN_SERVICE: &str = if DEV { dev::PAIRING_SERVICE } else { "com.vaultmesh.desktop.browser-pairing" };
-    const EXPECTED_KEYCHAIN_ACCOUNT: &str = if DEV { dev::PAIRING_ACCOUNT } else { "native-host-hmac-v1" };
+    const FIREFOX_MANIFEST_NAME: &str = if DEV {
+        "com.vaultmesh.bitwarden.dev.firefox.json"
+    } else {
+        "com.vaultmesh.browser.firefox.json"
+    };
+    const EXPECTED_PIPE: &str = if DEV {
+        dev::PIPE_NAME
+    } else {
+        r"\\.\pipe\VaultMesh.BrowserBroker.v2"
+    };
+    const EXPECTED_KEYCHAIN_SERVICE: &str = if DEV {
+        dev::PAIRING_SERVICE
+    } else {
+        "com.vaultmesh.desktop.browser-pairing"
+    };
+    const EXPECTED_KEYCHAIN_ACCOUNT: &str = if DEV {
+        dev::PAIRING_ACCOUNT
+    } else {
+        "native-host-hmac-v1"
+    };
     const MAX_CONFIG_BYTES: u64 = 4096;
     const MAX_NATIVE_REQUEST_BYTES: usize = 256 * 1024;
     const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -116,7 +136,9 @@ mod windows_host {
     }
 
     fn run() -> Result<(), ()> {
-        if DEV && !cfg!(debug_assertions) { return Err(()); }
+        if DEV && !cfg!(debug_assertions) {
+            return Err(());
+        }
         let config = load_config().map_err(|_| ())?;
         let launch_arguments: Vec<String> = std::env::args().skip(1).collect();
         if !valid_browser_launch(&config, &launch_arguments) {
@@ -178,7 +200,9 @@ mod windows_host {
     }
 
     fn compiled_extension_id() -> io::Result<&'static str> {
-        if DEV { return Ok(dev::EXTENSION_ID); }
+        if DEV {
+            return Ok(dev::EXTENSION_ID);
+        }
         let value = option_env!("VAULTMESH_BROWSER_EXTENSION_ID").unwrap_or(DEFAULT_EXTENSION_ID);
         (value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte)))
             .then_some(value)
@@ -186,7 +210,9 @@ mod windows_host {
     }
 
     fn compiled_firefox_extension_id() -> io::Result<&'static str> {
-        if DEV { return Ok(dev::FIREFOX_ID); }
+        if DEV {
+            return Ok(dev::FIREFOX_ID);
+        }
         let value =
             option_env!("VAULTMESH_FIREFOX_EXTENSION_ID").unwrap_or(DEFAULT_FIREFOX_EXTENSION_ID);
         (value == DEFAULT_FIREFOX_EXTENSION_ID)
@@ -207,43 +233,21 @@ mod windows_host {
     }
 
     fn load_pairing_secret(config: &HostConfig) -> Result<Zeroizing<[u8; 32]>, ()> {
-        let app_data: Option<PathBuf> = {
-            #[cfg(target_os = "macos")]
-            {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .map(|home| home.join("Library").join("Application Support").join(APP_DATA_NAME))
-            }
-            #[cfg(target_os = "windows")]
-            {
-                std::env::var_os("APPDATA")
-                    .map(PathBuf::from)
-                    .map(|dir| dir.join(APP_DATA_NAME))
-            }
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            {
-                None
-            }
-        };
-
-        let encoded_bytes = if let Some(ref dir) = app_data {
-            if let Ok(store) = vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::platform(dir) {
-                store.get(&config.keychain_service, &config.keychain_account).ok().flatten()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let encoded = if let Some(bytes) = encoded_bytes {
-            Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| ())?)
-        } else {
+        let encoded = if DEV {
             Zeroizing::new(
                 keyring::Entry::new(&config.keychain_service, &config.keychain_account)
                     .and_then(|entry| entry.get_password())
                     .map_err(|_| ())?,
             )
+        } else {
+            let dir = vaultmesh_tauri_desktop::device_credentials::default_desktop_app_data_dir()
+                .ok_or(())?;
+            let store =
+                vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::platform(&dir)
+                    .map_err(|_| ())?;
+            let bytes =
+                store.read_unified_secret(&config.keychain_service, &config.keychain_account)?;
+            Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| ())?)
         };
         let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded.as_bytes()).map_err(|_| ())?);
         if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(decoded.as_slice()) != encoded.as_str() {
@@ -672,10 +676,18 @@ mod macos_host {
     use uuid::Uuid;
     use zeroize::Zeroizing;
 
-    const CONFIG_NAME: &str = if DEV { dev::CONFIG_NAME } else { "browser-host-config.json" };
+    const CONFIG_NAME: &str = if DEV {
+        dev::CONFIG_NAME
+    } else {
+        "browser-host-config.json"
+    };
     const APP_DATA_NAME: &str = "com.vaultmesh.desktop";
     const DEFAULT_FIREFOX_EXTENSION_ID: &str = "vaultmesh@atlantis-mk.github.io";
-    const FIREFOX_MANIFEST_NAME: &str = if DEV { "com.vaultmesh.bitwarden.dev.json" } else { "com.vaultmesh.browser.json" };
+    const FIREFOX_MANIFEST_NAME: &str = if DEV {
+        "com.vaultmesh.bitwarden.dev.json"
+    } else {
+        "com.vaultmesh.browser.json"
+    };
     const MAX_CONFIG_BYTES: u64 = 4096;
     const MAX_NATIVE_REQUEST_BYTES: usize = 256 * 1024;
     const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -715,7 +727,9 @@ mod macos_host {
     }
 
     fn run() -> Result<(), ()> {
-        if DEV && !cfg!(debug_assertions) { return Err(()); }
+        if DEV && !cfg!(debug_assertions) {
+            return Err(());
+        }
         let config = load_config().map_err(|_| ())?;
         let launch_arguments: Vec<String> = std::env::args().skip(1).collect();
         if !valid_browser_launch(&config, &launch_arguments) {
@@ -778,9 +792,11 @@ mod macos_host {
             || config.firefox_extension_id != compiled_firefox_extension_id()?
             || config.firefox_manifest_path != expected_firefox_manifest
             || !valid_socket_path(&config.broker_socket)
-            || (DEV && (config.keychain_service != dev::PAIRING_SERVICE
-                || config.keychain_account != dev::PAIRING_ACCOUNT
-                || config.chromium_allowed_origin != format!("chrome-extension://{}/", dev::EXTENSION_ID)))
+            || (DEV
+                && (config.keychain_service != dev::PAIRING_SERVICE
+                    || config.keychain_account != dev::PAIRING_ACCOUNT
+                    || config.chromium_allowed_origin
+                        != format!("chrome-extension://{}/", dev::EXTENSION_ID)))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -808,7 +824,9 @@ mod macos_host {
     }
 
     fn compiled_firefox_extension_id() -> io::Result<&'static str> {
-        if DEV { return Ok(dev::FIREFOX_ID); }
+        if DEV {
+            return Ok(dev::FIREFOX_ID);
+        }
         let value =
             option_env!("VAULTMESH_FIREFOX_EXTENSION_ID").unwrap_or(DEFAULT_FIREFOX_EXTENSION_ID);
         (value == DEFAULT_FIREFOX_EXTENSION_ID)
@@ -878,47 +896,32 @@ mod macos_host {
             && path
                 .file_name()
                 .and_then(|value| value.to_str())
-                .is_some_and(|value| value == if DEV { dev::SOCKET_NAME } else { "vaultmesh-tauri-browser.sock" })
+                .is_some_and(|value| {
+                    value
+                        == if DEV {
+                            dev::SOCKET_NAME
+                        } else {
+                            "vaultmesh-tauri-browser.sock"
+                        }
+                })
     }
 
     fn load_pairing_secret(config: &HostConfig) -> Result<Zeroizing<[u8; 32]>, ()> {
-        let app_data: Option<PathBuf> = {
-            #[cfg(target_os = "macos")]
-            {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .map(|home| home.join("Library").join("Application Support").join(APP_DATA_NAME))
-            }
-            #[cfg(target_os = "windows")]
-            {
-                std::env::var_os("APPDATA")
-                    .map(PathBuf::from)
-                    .map(|dir| dir.join(APP_DATA_NAME))
-            }
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            {
-                None
-            }
-        };
-
-        let encoded_bytes = if let Some(ref dir) = app_data {
-            if let Ok(store) = vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::platform(dir) {
-                store.get(&config.keychain_service, &config.keychain_account).ok().flatten()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let encoded = if let Some(bytes) = encoded_bytes {
-            Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| ())?)
-        } else {
+        let encoded = if DEV {
             Zeroizing::new(
                 keyring::Entry::new(&config.keychain_service, &config.keychain_account)
                     .and_then(|entry| entry.get_password())
                     .map_err(|_| ())?,
             )
+        } else {
+            let dir = vaultmesh_tauri_desktop::device_credentials::default_desktop_app_data_dir()
+                .ok_or(())?;
+            let store =
+                vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::platform(&dir)
+                    .map_err(|_| ())?;
+            let bytes =
+                store.read_unified_secret(&config.keychain_service, &config.keychain_account)?;
+            Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| ())?)
         };
         let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded.as_bytes()).map_err(|_| ())?);
         if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(decoded.as_slice()) != encoded.as_str() {
