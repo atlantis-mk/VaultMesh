@@ -6036,6 +6036,7 @@ dependencies = [
  "reqwest",
  "rustls 0.23.42",
  "scrypt",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "sha2",

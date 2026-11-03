@@ -60,6 +60,7 @@ libc = "0.2.174"
 block2 = "0.6.2"
 core-foundation = "0.10.1"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", features = ["NSError", "NSProcessInfo", "NSString"] }
 objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["LAContext", "LABiometryType", "block2"] }
@@ -68,7 +69,8 @@ objc2-local-authentication = { version = "0.3.2", default-features = false, feat
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
-  "Win32_Security",
+    "Win32_Security",
+    "Win32_Security_Credentials",
   "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
   "Win32_System_Memory",

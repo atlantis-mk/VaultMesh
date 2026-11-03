@@ -185,6 +185,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：macOS 主窗口的 UnlockPage 在已启用 Touch ID、可见且激活时通过平台适配器挂载原生嵌入式认证视图，持续等待指纹而不设应用固定超时；等待期间主密码/PIN 始终可提交，不占用全局 busy；指纹通过后到安全摘要就绪前必须显示打开进度。
 - 必须：失焦、隐藏、系统锁定、页面卸载、切换保险库或提交密码/PIN 时取消当前认证；恢复激活可重新等待。取消、凭据变化和旧会话的迟到回调不得解锁；重渲染和重复激活不得创建重复认证。失败保留显式重试和密码/PIN 回退。Windows 适配器首版明确暂不支持，不能隐式调用 macOS 逻辑；MCP 独立认证和超时不变。
 - 必须：PIN/生物识别两项无凭据状态查询作为同一轮并发读取并共用在途事件检查；后台最多接纳两项此类只读查询，仍逐项验证来源、会话、版本、期限和防重放，不能与受控工具写操作并行。解锁、设置及其他特权操作不得借此绕过串行保护。
+- 必须：桌面设备凭据只保留一把操作系统钥匙串根条目（服务 `com.vaultmesh.desktop`、账户 `root-secret-v1`），并用它保护应用支持目录 `com.vaultmesh.desktop` 中的 `device-credentials.enc`。macOS 上同一 Team ID 签名的包内主程序和包内 `vaultmesh-native-host` 必须通过 Keychain Access Group `$(TeamIdentifierPrefix)com.vaultmesh.desktop` 共享该条目；没有 Team ID 时，创建和更新文件钥匙串条目都必须只信任这两个包内可执行文件。未签名程序、开发专用 Host、Agent sidecar 和其他第三方二进制不得加入 Access Group 或 Trusted Applications。
+- 必须：主程序与 Native Host 使用同一 `device-credentials.enc`。主程序首次打开统一存储时一次性扫描已知旧 Service，迁入该文件并删除旧钥匙串条目；Native Host 在迁移标记还不存在时不得枚举这些旧 Service。迁移完成后不得再回退读取旧 `keyring` 条目。生产 PIN 与生物识别必须经过 `DeviceCredentialStore`。文件必须使用绑定应用标识、当前 OS 用户和协议版本的 AAD；空 AAD 的旧文件在解密成功后必须重封。给已签名主程序或包内 Host 补上 Keychain Access Group 时，必须合并进该二进制现有 entitlements，不得用只含访问组的 plist 覆盖其他 entitlement。
 - 验收：`CT-SEC-002`、`CT-NATIVE-PRIVILEGED-001`、
   `CT-NATIVE-QUICK-UNLOCK-001`、`CT-NATIVE-CLIPBOARD-001`、`CT-TAURI-DESKTOP-001`、`AT-SEC-001`、
   `AT-NATIVE-MACOS-003`、`CT-DESKTOP-AUTH-001`、`AT-DESKTOP-AUTH-001`。
@@ -543,7 +545,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：当前 WXT popup 进入需要解锁的页面时，若当前 Vault 的桌面 Touch ID 配置可用且已启用，必须自动请求一次 macOS 系统认证；不得新建认证页面、自动重试或因重渲染重复弹窗。取消或失败后必须保留显式 Touch ID 重试与 PIN/主密码回退；用户开始输入或选择回退后不得由迟到状态查询启动认证。认证成功后必须显示摘要加载进度，摘要就绪前不得展示空主页。
 - 必须：Touch ID 由 privileged desktop runtime 调用，仅授予独立 Browser 授权。认证会话绑定当前已鉴权 Browser 通道、随机 session ID、Vault 和桌面 credential ID，最长 30 秒并以 3 秒轮询租约限制存活；关闭/隐藏 popup、切换 PIN/主密码、断连、锁定、撤销、凭据变化或期限结束必须取消并拒绝迟到结果；原生等待不得持有 broker 或凭据锁。
 
-- 必须：扩展通过固定 ID/native host 配对；桌面 unlock 不授权扩展，撤销立即清除浏览器访问。
+- 必须：扩展通过固定 ID/native host 配对；桌面 unlock 不授权扩展，撤销立即清除浏览器访问。生产 Host 与桌面使用同一 `device-credentials.enc`；统一存储打开后不得回退到旧配对钥匙串条目。同一 Team ID 的签名包完成一次根钥匙串授权后，冷启动和自动填充不得再次弹出钥匙串密码。
 - 必须：当前 WXT 原插件的 popup 使用 Broker `browser.autofill.candidates` 作为 Login、Secret 与 SSH 当前页建议的权威来源，不得以本地 hostname 猜测替代；无来源字段上下文时不得把全部 card/identity 误标为当前页建议。摘要列表、搜索和类型筛选覆盖完整授权集合，每页最多 25 条；单条与批量删除必须明确区分可恢复条目和永久删除的 Secret/Passkey。
 - 必须：当前 WXT popup 打开期间持续读取桌面授权与事件序列；锁定、配对撤销、Host 停止或断连立即清除摘要、候选、编辑页、恢复列表、确认、生成结果与历史，并使迟到响应失效。Login、card、identity、SSH 与 Secret 编辑草稿隐藏时清除且最长保留 5 分钟；恢复码原生文件框只允许既有 45 秒有界例外，不能延长编辑期限。
 - 必须：插件必须接受 Broker 发出的 `vault-changed` 事件并在仍获授权时重新读取安全摘要；该事件不得被误判为桌面断连。空闲锁定产生的既有 `vault-locked` 事件在 PIN、主密码或生物识别重新解锁后，不得使已恢复的会话错误地进入断连状态。
@@ -585,7 +587,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：macOS/Windows 桌面包分别安装 Chrome/Edge `allowed_origins` 与 Firefox
   `allowed_extensions` Native Messaging manifest。Host 必须在读取配对 secret 前验证精确的编译期
   Chrome origin，或精确的 Firefox manifest path 与 Gecko ID；缺失、伪造或混合参数必须拒绝。
-- 必须：macOS 正式构建的桌面客户端每次启动必须幂等安装或修复当前用户的 Chrome/Edge/Firefox Host 注册，Host 路径以实际 App 内的可执行文件位置为准，不依赖 Node、开发脚本或固定 `/Applications` 路径；注册不得重建配对或借用桌面解锁授权。普通与 updater 打包都必须包含可执行的 Native Host，缺失时打包必须失败。
+- 必须：macOS 正式构建的桌面客户端每次启动必须幂等安装或修复当前用户的 Chrome/Edge/Firefox Host 注册，Host 路径以实际 App 内 `Contents/MacOS/vaultmesh-native-host` 为准，不依赖 Node、开发脚本、包外二进制或固定 `/Applications` 路径；注册不得重建配对或借用桌面解锁授权。普通与 updater 打包都必须包含可执行的 Native Host，缺失时打包必须失败。
+- 必须：生产 Native Host 只从与桌面相同的 `device-credentials.enc` 读取配对秘密。统一存储已打开后，凭据缺失不得再读取旧 browser-pairing 钥匙串条目。带同一 Team ID 的签名包在用户对共享根条目完成一次授权后，冷启动主程序和浏览器自动填充不得再次弹出钥匙串密码。
 - 必须：完整 Review workflow 从同一 source SHA 构建并验证两个扩展 ZIP，并在桌面 R2 发布成功后，
   先把它们发布到同一版本的不可变 R2 `releases/v<version>/` 路径并验证公网下载内容，再与四个桌面
   安装包一起上传到无 Git Tag 的 GitHub Draft Prerelease；扩展 ZIP 不进入桌面 updater manifest，

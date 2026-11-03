@@ -5,13 +5,13 @@ use std::{
 };
 
 use aes_gcm::{
-    aead::{generic_array::GenericArray, AeadInPlace},
     Aes256Gcm, KeyInit,
+    aead::{AeadInPlace, generic_array::GenericArray},
 };
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rand_core::{OsRng, RngCore};
-use scrypt::{scrypt, Params as ScryptParams};
+use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -72,16 +72,7 @@ impl DeviceSecretStore for PlatformSecretStore {
         if let Some(ref store) = self.store {
             return store.set(account, secret);
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            keyring::Entry::new(self.service, account)
-                .and_then(|entry| entry.set_secret(secret))
-                .map_err(|_| "无法保存设备安全凭据。".to_owned())
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            Err("这台设备当前不支持安全的 PIN 快速解锁。".to_owned())
-        }
+        direct_pin_keyring_set(self.service, account, secret)
     }
 
     fn get(&self, account: &str) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -91,34 +82,52 @@ impl DeviceSecretStore for PlatformSecretStore {
                 None => Err("无法读取设备安全凭据。".to_owned()),
             };
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            keyring::Entry::new(self.service, account)
-                .and_then(|entry| entry.get_secret())
-                .map(Zeroizing::new)
-                .map_err(|_| "无法读取设备安全凭据。".to_owned())
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            Err("这台设备当前不支持安全的 PIN 快速解锁。".to_owned())
-        }
+        direct_pin_keyring_get(self.service, account)
     }
 
     fn delete(&self, account: &str) -> Result<(), String> {
         if let Some(ref store) = self.store {
             return store.delete(account);
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            keyring::Entry::new(self.service, account)
-                .and_then(|entry| entry.delete_credential())
-                .map_err(|_| "无法删除设备安全凭据。".to_owned())
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            Ok(())
-        }
+        direct_pin_keyring_delete(self.service, account)
     }
+}
+
+#[cfg(all(debug_assertions, any(target_os = "macos", target_os = "windows")))]
+fn direct_pin_keyring_set(service: &str, account: &str, secret: &[u8]) -> Result<(), String> {
+    keyring::Entry::new(service, account)
+        .and_then(|entry| entry.set_secret(secret))
+        .map_err(|_| "无法保存设备安全凭据。".to_owned())
+}
+
+#[cfg(all(debug_assertions, any(target_os = "macos", target_os = "windows")))]
+fn direct_pin_keyring_get(service: &str, account: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    keyring::Entry::new(service, account)
+        .and_then(|entry| entry.get_secret())
+        .map(Zeroizing::new)
+        .map_err(|_| "无法读取设备安全凭据。".to_owned())
+}
+
+#[cfg(all(debug_assertions, any(target_os = "macos", target_os = "windows")))]
+fn direct_pin_keyring_delete(service: &str, account: &str) -> Result<(), String> {
+    keyring::Entry::new(service, account)
+        .and_then(|entry| entry.delete_credential())
+        .map_err(|_| "无法删除设备安全凭据。".to_owned())
+}
+
+#[cfg(not(all(debug_assertions, any(target_os = "macos", target_os = "windows"))))]
+fn direct_pin_keyring_set(_service: &str, _account: &str, _secret: &[u8]) -> Result<(), String> {
+    Err("生产环境的 PIN 凭据必须使用 DeviceCredentialStore。".to_owned())
+}
+
+#[cfg(not(all(debug_assertions, any(target_os = "macos", target_os = "windows"))))]
+fn direct_pin_keyring_get(_service: &str, _account: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    Err("生产环境的 PIN 凭据必须使用 DeviceCredentialStore。".to_owned())
+}
+
+#[cfg(not(all(debug_assertions, any(target_os = "macos", target_os = "windows"))))]
+fn direct_pin_keyring_delete(_service: &str, _account: &str) -> Result<(), String> {
+    Err("生产环境的 PIN 凭据必须使用 DeviceCredentialStore。".to_owned())
 }
 
 pub struct PinQuickUnlockService {
@@ -615,12 +624,16 @@ mod tests {
             case.root.join("pin.json"),
             Arc::new(MemorySecretStore::default()),
         );
-        assert!(service
-            .enable(case.vault.clone(), &[1_u8; 31], "123456", 5)
-            .is_err());
-        assert!(service
-            .enable(case.vault.clone(), &[1_u8; 32], "12345x", 5)
-            .is_err());
+        assert!(
+            service
+                .enable(case.vault.clone(), &[1_u8; 31], "123456", 5)
+                .is_err()
+        );
+        assert!(
+            service
+                .enable(case.vault.clone(), &[1_u8; 32], "12345x", 5)
+                .is_err()
+        );
         service
             .enable(case.vault.clone(), &[1_u8; 32], "123456", 5)
             .unwrap();

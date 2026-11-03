@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { browserIdentityEnvironment } from "./browser-identity.mjs";
 import { prepareAgentSidecar } from "./prepare-agent-sidecar.mjs";
+import { applyMacOSKeychainEntitlements } from "./macos-keychain-entitlements.mjs";
 import { prepareBrowserHostSidecar } from "./prepare-browser-host-sidecar.mjs";
 
 const workspace = path.resolve(import.meta.dirname, "..");
@@ -202,10 +203,12 @@ export async function buildTauri({
   const invocation = tauriCliInvocation(arguments_);
   await run(invocation.command, invocation.arguments, buildEnvironment, invocation.cwd);
   if (target ? target.endsWith("-apple-darwin") : process.platform === "darwin") {
-    await verifyPackagedMacOSSidecars(path.join(
+    const appPath = path.join(
       workspace, "target", ...(target ? [target] : []), "release", "bundle", "macos",
       `${tauriConfiguration.productName}.app`,
-    ));
+    );
+    await verifyPackagedMacOSSidecars(appPath);
+    await applyMacOSKeychainEntitlements(appPath, buildEnvironment.APPLE_SIGNING_IDENTITY);
   }
   return buildEnvironment.VAULTMESH_BROWSER_EXTENSION_ID;
 }

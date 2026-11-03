@@ -41,7 +41,7 @@ Native Messaging 使用浏览器特定 manifest，不能共享一份宽松 allow
 - Chrome 与 Firefox Host connection 继续使用既有每连接 authorization/session 生命周期；任一浏览器
   都不得把配对状态、Vault response 或受保护值写入 extension storage。
 
-macOS 正式构建每次启动必须从当前 desktop executable 的同目录定位 `vaultmesh-native-host`，先确认它是非空普通可执行文件，再幂等写入用户级 Chrome、Edge、Mozilla 的生产 Host manifest 和既有 v2 Host 配置。App 被移动后必须刷新 manifest 路径；文件缺失、旧路径或过宽文件权限必须可修复，内容和权限已正确时不得重写。各文件必须原子提交并保持 `0600`，新建目录使用 `0700`；不安全的目标或写入失败只报告非秘密错误类别，不读取、覆盖或重建配对记录及 OS 凭据。debug desktop 不执行此生产注册，仍由 `browser:dev` 管理开发 Host/profile。普通与 updater App bundle 必须包含 Native Host，macOS 构建和本地安装流程必须检查 App 内的 sidecar，而不能靠签名后的手工补拷贝掩盖漏包。显式卸载注册前必须先退出客户端，否则后续正式版启动会重新注册。
+macOS 正式构建每次启动必须从当前 desktop executable 所在的 `Contents/MacOS` 定位包内 `vaultmesh-native-host`，拒绝包外、开发 Host 和 Agent sidecar 路径，先确认它是非空普通可执行文件，再幂等写入用户级 Chrome、Edge、Mozilla 的生产 Host manifest 和既有 v2 Host 配置。生产 Host 读取配对秘密时使用与主程序相同的 `device-credentials.enc`，统一存储打开后不得再读旧钥匙串条目。App 被移动后必须刷新 manifest 路径；文件缺失、旧路径或过宽文件权限必须可修复，内容和权限已正确时不得重写。各文件必须原子提交并保持 `0600`，新建目录使用 `0700`；不安全的目标或写入失败只报告非秘密错误类别，不读取、覆盖或重建配对记录及 OS 凭据。debug desktop 不执行此生产注册，仍由 `browser:dev` 管理开发 Host/profile。普通与 updater App bundle 必须包含 Native Host，macOS 构建和本地安装流程必须检查 App 内的 sidecar，而不能靠签名后的手工补拷贝掩盖漏包。显式卸载注册前必须先退出客户端，否则后续正式版启动会重新注册。
 
 `pnpm extension:release:zip:all` 必须从同一 source/version 生成命名稳定的 Chrome 与 Firefox ZIP，
 解析内部 manifest、验证目标/身份/permission/版本、执行 ZIP 完整性检查，并排除 source map、环境文件、

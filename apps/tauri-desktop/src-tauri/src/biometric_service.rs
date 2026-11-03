@@ -187,7 +187,7 @@ impl BiometricQuickUnlockService {
         if let Some(ref store) = self.credentials {
             return store.set(&record.credential_id, key);
         }
-        set_credential(self.keyring_service, record, key)
+        direct_biometric_set(self.keyring_service, record, key)
     }
 
     fn get_credential(&self, record: &BiometricRecord) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -197,14 +197,14 @@ impl BiometricQuickUnlockService {
                 None => Err("无法读取 Touch ID 快速解锁凭据，请使用主密码重新启用。".to_owned()),
             };
         }
-        get_credential(self.keyring_service, record)
+        direct_biometric_get(self.keyring_service, record)
     }
 
     fn delete_credential(&self, record: &BiometricRecord) -> Result<(), String> {
         if let Some(ref store) = self.credentials {
             return store.delete(&record.credential_id);
         }
-        delete_credential(self.keyring_service, record)
+        direct_biometric_delete(self.keyring_service, record)
     }
 
     fn credential_exists(&self, record: &BiometricRecord) -> bool {
@@ -267,33 +267,26 @@ fn prompt_biometric(_reason: &str) -> Result<(), String> {
     Err("这台设备当前不支持 Touch ID 快速解锁。".to_owned())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn set_credential(service: &str, record: &BiometricRecord, key: &[u8]) -> Result<(), String> {
+#[cfg(all(debug_assertions, any(target_os = "macos", target_os = "windows")))]
+fn direct_biometric_set(service: &str, record: &BiometricRecord, key: &[u8]) -> Result<(), String> {
     keyring::Entry::new(service, &record.credential_id)
         .and_then(|entry| entry.set_secret(key))
         .map_err(|_| "无法保存 Touch ID 快速解锁凭据。".to_owned())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn set_credential(_service: &str, _record: &BiometricRecord, _key: &[u8]) -> Result<(), String> {
-    Err("当前平台不支持生物识别凭据存储。".to_owned())
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn get_credential(service: &str, record: &BiometricRecord) -> Result<Zeroizing<Vec<u8>>, String> {
+#[cfg(all(debug_assertions, any(target_os = "macos", target_os = "windows")))]
+fn direct_biometric_get(
+    service: &str,
+    record: &BiometricRecord,
+) -> Result<Zeroizing<Vec<u8>>, String> {
     keyring::Entry::new(service, &record.credential_id)
         .and_then(|entry| entry.get_secret())
         .map(Zeroizing::new)
         .map_err(|_| "无法读取 Touch ID 快速解锁凭据，请使用主密码重新启用。".to_owned())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn get_credential(_service: &str, _record: &BiometricRecord) -> Result<Zeroizing<Vec<u8>>, String> {
-    Err("当前平台不支持生物识别凭据存储。".to_owned())
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn delete_credential(service: &str, record: &BiometricRecord) -> Result<(), String> {
+#[cfg(all(debug_assertions, any(target_os = "macos", target_os = "windows")))]
+fn direct_biometric_delete(service: &str, record: &BiometricRecord) -> Result<(), String> {
     let entry = keyring::Entry::new(service, &record.credential_id)
         .map_err(|_| "无法删除 Touch ID 快速解锁凭据。".to_owned())?;
     match entry.delete_credential() {
@@ -302,12 +295,29 @@ fn delete_credential(service: &str, record: &BiometricRecord) -> Result<(), Stri
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn delete_credential(_service: &str, _record: &BiometricRecord) -> Result<(), String> {
-    Ok(())
+#[cfg(not(all(debug_assertions, any(target_os = "macos", target_os = "windows"))))]
+fn direct_biometric_set(
+    _service: &str,
+    _record: &BiometricRecord,
+    _key: &[u8],
+) -> Result<(), String> {
+    Err("生产环境的生物识别凭据必须使用 DeviceCredentialStore。".to_owned())
+}
+
+#[cfg(not(all(debug_assertions, any(target_os = "macos", target_os = "windows"))))]
+fn direct_biometric_get(
+    _service: &str,
+    _record: &BiometricRecord,
+) -> Result<Zeroizing<Vec<u8>>, String> {
+    Err("生产环境的生物识别凭据必须使用 DeviceCredentialStore。".to_owned())
+}
+
+#[cfg(not(all(debug_assertions, any(target_os = "macos", target_os = "windows"))))]
+fn direct_biometric_delete(_service: &str, _record: &BiometricRecord) -> Result<(), String> {
+    Err("生产环境的生物识别凭据必须使用 DeviceCredentialStore。".to_owned())
 }
 
 #[allow(dead_code)]
 fn credential_exists(service: &str, record: &BiometricRecord) -> bool {
-    get_credential(service, record).is_ok()
+    direct_biometric_get(service, record).is_ok()
 }

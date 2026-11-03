@@ -112,6 +112,14 @@ pub fn run() {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             setup_desktop_tray(app)?;
             let app_data = app.path().app_data_dir()?;
+            if app_data.file_name().and_then(|name| name.to_str())
+                != Some(crate::device_credentials::APP_DATA_DIR_NAME)
+            {
+                return Err(std::io::Error::other(
+                    "设备凭据目录必须是 com.vaultmesh.desktop",
+                )
+                .into());
+            }
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if !cfg!(debug_assertions) {
                 let manager = app.autolaunch();
