@@ -39,8 +39,9 @@ use zeroize::Zeroizing;
 
 use crate::device_credentials::{ROOT_KEYRING_ACCOUNT, ROOT_KEYRING_SERVICE};
 use crate::keychain_share::{
-    description_contains_partitions, entitled_access_group, in_bundle_executable_paths,
+    SEC_CS_SIGNING_INFORMATION, entitled_access_group, in_bundle_executable_paths,
     is_direct_bundle_executable, partition_ids_for_share, partition_plist_hex,
+    partitions_are_exact, same_executable_set, select_keychain_access_groups,
 };
 
 const ERR_SEC_MISSING_ENTITLEMENT: OSStatus = -34018;
@@ -49,6 +50,7 @@ const ERR_SEC_MISSING_ENTITLEMENT: OSStatus = -34018;
 extern "C" {
     static kSecAttrAccess: CFStringRef;
     static kSecCodeInfoEntitlements: CFStringRef;
+    static kSecCodeInfoEntitlementsDict: CFStringRef;
     static kSecCodeInfoTeamIdentifier: CFStringRef;
     static kSecCodeInfoUnique: CFStringRef;
 
@@ -82,6 +84,10 @@ extern "C" {
     fn SecACLCopyAuthorizations(acl: CFTypeRef, tags: *mut CFTypeRef) -> OSStatus;
     fn SecKeychainItemCopyAccess(item: CFTypeRef, access: *mut SecAccessRef) -> OSStatus;
     fn SecKeychainItemSetAccess(item: CFTypeRef, access: SecAccessRef) -> OSStatus;
+    fn SecTrustedApplicationCopyData(
+        app: CFTypeRef,
+        data: *mut core_foundation_sys::data::CFDataRef,
+    ) -> OSStatus;
 }
 
 use core_foundation_sys::string::CFStringRef;
@@ -249,7 +255,7 @@ fn ensure_shared_legacy_acl() -> Result<(), String> {
         return Ok(());
     };
     let item = legacy_item_ref()?;
-    if item_already_shared(&item, &plan.partitions) {
+    if item_already_shared(&item, plan) {
         return Ok(());
     }
     let access = access_for_plan(&plan)?;
@@ -408,7 +414,7 @@ fn acl_is_partition(acl: CFTypeRef) -> bool {
     false
 }
 
-fn item_already_shared(item: &CFType, partitions: &[String]) -> bool {
+fn item_already_shared(item: &CFType, plan: &SharePlan) -> bool {
     let mut access: SecAccessRef = ptr::null_mut();
     if unsafe { SecKeychainItemCopyAccess(item.as_CFTypeRef(), &mut access) } != 0
         || access.is_null()
@@ -424,7 +430,7 @@ fn item_already_shared(item: &CFType, partitions: &[String]) -> bool {
     }
     let list = unsafe { CFType::wrap_under_create_rule(acl_list) };
     let count = unsafe { CFArrayGetCount(list.as_CFTypeRef() as _) };
-    let mut saw_two_trusted_apps = false;
+    let mut saw_exact_clients = false;
     let mut saw_partitions = false;
     for index in 0..count {
         let acl = unsafe { CFArrayGetValueAtIndex(list.as_CFTypeRef() as _, index) };
@@ -438,20 +444,51 @@ fn item_already_shared(item: &CFType, partitions: &[String]) -> bool {
             continue;
         }
         if !apps.is_null() {
-            let app_count = unsafe { CFArrayGetCount(apps as _) };
-            if app_count >= 2 {
-                saw_two_trusted_apps = true;
+            let paths = trusted_application_paths(apps);
+            let expected = [
+                plan.paths.main_executable.clone(),
+                plan.paths.native_host.clone(),
+            ];
+            if same_executable_set(&paths, &expected) {
+                saw_exact_clients = true;
             }
             unsafe { CFRelease(apps) };
         }
         if !description.is_null() {
             let text = unsafe { CFString::wrap_under_create_rule(description) }.to_string();
-            if description_contains_partitions(&text, partitions) {
+            if partitions_are_exact(&text, &plan.partitions) {
                 saw_partitions = true;
             }
         }
     }
-    saw_two_trusted_apps && saw_partitions
+    saw_exact_clients && saw_partitions
+}
+
+fn trusted_application_paths(apps: CFTypeRef) -> Vec<std::path::PathBuf> {
+    let count = unsafe { CFArrayGetCount(apps as _) };
+    let mut paths = Vec::new();
+    for index in 0..count {
+        let app = unsafe { CFArrayGetValueAtIndex(apps as _, index) };
+        if app.is_null() {
+            continue;
+        }
+        let mut data: core_foundation_sys::data::CFDataRef = ptr::null_mut();
+        if unsafe { SecTrustedApplicationCopyData(app, &mut data) } != 0 || data.is_null() {
+            continue;
+        }
+        let data = unsafe { CFData::wrap_under_create_rule(data) };
+        let bytes = data.bytes();
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        if let Ok(text) = std::str::from_utf8(&bytes[..end]) {
+            if !text.is_empty() {
+                paths.push(std::path::PathBuf::from(text));
+            }
+        }
+    }
+    paths
 }
 
 fn legacy_item_ref() -> Result<CFType, String> {
@@ -506,18 +543,28 @@ fn signing_facts_for_path(path: &Path) -> Result<SigningFacts, ()> {
 
 fn signing_facts_from_code(code: SecStaticCodeRef) -> Result<SigningFacts, ()> {
     let mut info: CFDictionaryRef = ptr::null_mut();
-    if unsafe { SecCodeCopySigningInformation(code, 0, &mut info) } != 0 || info.is_null() {
+    if unsafe { SecCodeCopySigningInformation(code, SEC_CS_SIGNING_INFORMATION, &mut info) } != 0
+        || info.is_null()
+    {
         return Err(());
     }
     let info = unsafe { CFType::wrap_under_create_rule(info as CFTypeRef) };
     let team = dictionary_string(info.as_CFTypeRef(), unsafe { kSecCodeInfoTeamIdentifier });
     let cdhash = dictionary_data_hex(info.as_CFTypeRef(), unsafe { kSecCodeInfoUnique });
-    let groups = nested_string_array(
+    let dict_groups = nested_string_array(
         info.as_CFTypeRef(),
-        unsafe { kSecCodeInfoEntitlements },
+        unsafe { kSecCodeInfoEntitlementsDict },
         "keychain-access-groups",
-    )
-    .unwrap_or_default();
+    );
+    let blob = dictionary_data_bytes(info.as_CFTypeRef(), unsafe { kSecCodeInfoEntitlements });
+    let mut groups = select_keychain_access_groups(dict_groups, blob.as_deref());
+    if groups.is_empty() {
+        if let Some(bytes) = blob.as_deref() {
+            if let Some(parsed) = access_groups_from_property_list(bytes) {
+                groups = parsed;
+            }
+        }
+    }
     if cdhash.is_none() {
         return Err(());
     }
@@ -565,11 +612,44 @@ fn dictionary_data_hex(dict: CFTypeRef, key: CFStringRef) -> Option<String> {
 }
 
 fn dictionary_string_array(dict: CFTypeRef, key: CFStringRef) -> Option<Vec<String>> {
+    if dict.is_null()
+        || unsafe { CFGetTypeID(dict) }
+            != unsafe { core_foundation_sys::dictionary::CFDictionaryGetTypeID() }
+    {
+        return None;
+    }
     let value = unsafe { CFDictionaryGetValue(dict as _, key as _) };
-    if value.is_null() {
+    if value.is_null() || unsafe { CFGetTypeID(value) } != unsafe { CFArrayGetTypeID() } {
         return None;
     }
     Some(cf_array_strings(value))
+}
+
+fn dictionary_data_bytes(dict: CFTypeRef, key: CFStringRef) -> Option<Vec<u8>> {
+    if dict.is_null()
+        || unsafe { CFGetTypeID(dict) }
+            != unsafe { core_foundation_sys::dictionary::CFDictionaryGetTypeID() }
+    {
+        return None;
+    }
+    let value = unsafe { CFDictionaryGetValue(dict as _, key as _) };
+    if value.is_null() || unsafe { CFGetTypeID(value) } != unsafe { CFDataGetTypeID() } {
+        return None;
+    }
+    let data = unsafe { CFData::wrap_under_get_rule(value as _) };
+    Some(data.bytes().to_vec())
+}
+
+fn access_groups_from_property_list(bytes: &[u8]) -> Option<Vec<String>> {
+    use core_foundation::propertylist::{CFPropertyList, create_with_data};
+    use core_foundation_sys::propertylist::kCFPropertyListImmutable;
+
+    let data = CFData::from_buffer(bytes);
+    let (raw, _) = create_with_data(data, kCFPropertyListImmutable).ok()?;
+    let plist = unsafe { CFPropertyList::wrap_under_create_rule(raw as _) };
+    let dict = plist.downcast::<core_foundation::dictionary::CFDictionary>()?;
+    let key = CFString::from("keychain-access-groups");
+    dictionary_string_array(dict.as_CFTypeRef(), key.as_concrete_TypeRef())
 }
 
 fn nested_string_array(dict: CFTypeRef, key: CFStringRef, nested_key: &str) -> Option<Vec<String>> {

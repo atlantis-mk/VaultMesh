@@ -22,7 +22,8 @@
    * 带同一 Team ID 的签名包只在该条目建立时向用户索权一次。之后主程序冷启动和包内 Native Host 自动填充都不得再次索权。
 
 2. **谁可以共享根条目**：
-   * macOS 优先使用数据保护钥匙串和 Keychain Access Group `$(TeamIdentifierPrefix)com.vaultmesh.desktop`。主程序与包内 `Contents/MacOS/vaultmesh-native-host` 必须带同一 Team ID 的该 entitlement。
+   * macOS 优先使用数据保护钥匙串和 Keychain Access Group `$(TeamIdentifierPrefix)com.vaultmesh.desktop`。主程序与包内 `Contents/MacOS/vaultmesh-native-host` 必须带同一 Team ID 的该 entitlement。读取签名信息必须使用 `kSecCSSigningInformation`；访问组来自 `kSecCodeInfoEntitlementsDict`，该字典不存在时再解析 `kSecCodeInfoEntitlements` 的 `CFData`。不得把这份 Data 当作字典。
+   * 给已签名二进制补上访问组时，必须先导出现有 entitlements，合并访问组后再重签。不得用只含访问组的 plist 覆盖 Hardened Runtime、WebKit/JIT 或其他既有 entitlement。
    * 没有 Team ID 的 ad-hoc 签名包不能使用 Access Group。此时根条目仍可留在文件钥匙串，但创建和每一次更新都必须把信任应用写成且仅写成上述两个包内可执行文件，并把分区列表写成二者的 cdhash；两者 Team ID 相同时再追加同一个 `teamid:`。
    * 未签名二进制、`vaultmesh-bitwarden-dev-host`、`vaultmesh-agent-mcp` 以及其他包外或第三方程序不得进入 Access Group 或 Trusted Applications。Native Messaging 注册路径必须指向 `.app` 内的 Host。
 
@@ -34,7 +35,7 @@
    * 生产环境的 PIN 与生物识别必须经过 `DeviceCredentialStore`。Release 构建不得再直接调用 `keyring::Entry` 保存或读取这些凭据。
 
 4. **一次性迁移，命中后禁止回退**：
-   * 统一存储首次打开时扫描已知旧 Service，把读到的账户迁入 `device-credentials.enc`，成功落盘后 `delete_credential` 删除这些旧条目，并在文件内记录迁移标记。
+   * 主程序首次打开统一存储时扫描已知旧 Service，把读到的账户迁入 `device-credentials.enc`，成功落盘后 `delete_credential` 删除这些旧条目，并在文件内记录迁移标记。Native Host 在标记还不存在时不得枚举这些旧 Service，以免 Host 先启动时按条目重复弹窗。
    * 标记存在后，后续 `get` 只读加密文件。统一存储已经打开时，即使目标凭据缺失，也不得再调用旧 `keyring::Entry`。生产 Native Host 读取配对秘密时同样不得回退。
    * 开发专用 Host 不得打开生产根条目。
    * 既有已配对客户端、已配对局域网设备与 Touch ID 配置在升级后保持可用，无需用户重新配对或重新录入。

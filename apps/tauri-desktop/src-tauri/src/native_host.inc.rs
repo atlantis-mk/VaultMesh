@@ -243,7 +243,7 @@ mod windows_host {
             let dir = vaultmesh_tauri_desktop::device_credentials::default_desktop_app_data_dir()
                 .ok_or(())?;
             let store =
-                vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::platform(&dir)
+                vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::open_without_legacy_scan(&dir)
                     .map_err(|_| ())?;
             let bytes =
                 store.read_unified_secret(&config.keychain_service, &config.keychain_account)?;
@@ -917,7 +917,7 @@ mod macos_host {
             let dir = vaultmesh_tauri_desktop::device_credentials::default_desktop_app_data_dir()
                 .ok_or(())?;
             let store =
-                vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::platform(&dir)
+                vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::open_without_legacy_scan(&dir)
                     .map_err(|_| ())?;
             let bytes =
                 store.read_unified_secret(&config.keychain_service, &config.keychain_account)?;

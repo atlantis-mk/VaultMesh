@@ -12,6 +12,11 @@ pub const MAIN_EXECUTABLE_NAME: &str = "vaultmesh-tauri-desktop";
 pub const NATIVE_HOST_EXECUTABLE_NAME: &str = "vaultmesh-native-host";
 pub const KEYCHAIN_ACCESS_GROUP_SUFFIX: &str = "com.vaultmesh.desktop";
 
+/// `SecCode.h` `kSecCSSigningInformation`.
+/// `kSecCodeInfoEntitlements` is the embedded blob (`CFData`).
+/// The parsed dictionary is `kSecCodeInfoEntitlementsDict`.
+pub const SEC_CS_SIGNING_INFORMATION: u32 = 1 << 1;
+
 pub const LEGACY_CREDENTIAL_SERVICES: &[&str] = &[
     "com.vaultmesh.desktop.desktop-biometric",
     "com.vaultmesh.desktop.agent-biometric",
@@ -224,6 +229,101 @@ pub fn description_contains_partitions(description: &str, partitions: &[String])
         .all(|partition| decoded.contains(partition))
 }
 
+/// The ACL partition list must be exactly the two in-bundle clients, not a superset.
+pub fn partitions_are_exact(description: &str, expected: &[String]) -> bool {
+    let Some(found) = partition_ids_in_description(description) else {
+        return false;
+    };
+    if found.len() != expected.len() || expected.is_empty() {
+        return false;
+    }
+    expected
+        .iter()
+        .all(|partition| found.iter().any(|item| item == partition))
+}
+
+pub fn partition_ids_in_description(description: &str) -> Option<Vec<String>> {
+    let decoded = decode_hex_text(description).unwrap_or_else(|| description.to_owned());
+    let mut ids = Vec::new();
+    let mut rest = decoded.as_str();
+    while let Some(start) = rest.find("<string>") {
+        let after = &rest[start + "<string>".len()..];
+        let Some(end) = after.find("</string>") else {
+            return None;
+        };
+        let value = xml_unescape(&after[..end]);
+        if !(value.starts_with("cdhash:") || value.starts_with("teamid:")) {
+            return None;
+        }
+        ids.push(value);
+        rest = &after[end + "</string>".len()..];
+    }
+    (!ids.is_empty()).then_some(ids)
+}
+
+pub fn same_executable_set(found: &[impl AsRef<Path>], expected: &[impl AsRef<Path>]) -> bool {
+    if found.len() != 2 || expected.len() != 2 {
+        return false;
+    }
+    let mut left: Vec<String> = found.iter().map(|path| path_key(path.as_ref())).collect();
+    let mut right: Vec<String> = expected
+        .iter()
+        .map(|path| path_key(path.as_ref()))
+        .collect();
+    left.sort();
+    right.sort();
+    left == right
+}
+
+fn path_key(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Prefer `kSecCodeInfoEntitlementsDict`. If that dictionary is absent, parse the
+/// `kSecCodeInfoEntitlements` XML blob. A data blob is not itself a dictionary.
+pub fn select_keychain_access_groups(
+    entitlement_dict_groups: Option<Vec<String>>,
+    entitlement_blob: Option<&[u8]>,
+) -> Vec<String> {
+    if let Some(groups) = entitlement_dict_groups.filter(|groups| !groups.is_empty()) {
+        return groups;
+    }
+    entitlement_blob
+        .and_then(access_groups_from_entitlements_xml)
+        .unwrap_or_default()
+}
+
+pub fn access_groups_from_entitlements_xml(bytes: &[u8]) -> Option<Vec<String>> {
+    let xml = std::str::from_utf8(bytes).ok()?;
+    let key = "<key>keychain-access-groups</key>";
+    let start = xml.find(key)?;
+    let after_key = &xml[start + key.len()..];
+    let array_start = after_key.find("<array>")?;
+    let array = &after_key[array_start..];
+    let array_end = array.find("</array>")?;
+    let mut groups = Vec::new();
+    let mut rest = &array[..array_end];
+    while let Some(open) = rest.find("<string>") {
+        let after = &rest[open + "<string>".len()..];
+        let close = after.find("</string>")?;
+        groups.push(xml_unescape(&after[..close]));
+        rest = &after[close + "</string>".len()..];
+    }
+    Some(groups)
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
 fn decode_hex_text(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.len() < 2 || trimmed.len() % 2 != 0 {
@@ -253,6 +353,7 @@ const _: () = assert!(!production_direct_keyring_allowed());
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
     fn touch_executable(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -359,6 +460,63 @@ mod tests {
         assert!(description_contains_partitions(&hex, &adhoc));
         assert!(partition_plist_hex(&["apple:".to_owned()]).is_none());
         assert!(partition_plist_hex(&["cdhash:<script>".to_owned()]).is_none());
+        let hex = partition_plist_hex(&adhoc).unwrap();
+        assert!(partitions_are_exact(&hex, &adhoc));
+        let mut extra = adhoc.clone();
+        extra.push(format!("cdhash:{}", "c".repeat(40)));
+        let extra_hex = partition_plist_hex(&extra).unwrap();
+        assert!(!partitions_are_exact(&extra_hex, &adhoc));
+        assert!(!same_executable_set(
+            &[
+                PathBuf::from("/Applications/Other.app/Contents/MacOS/a"),
+                PathBuf::from("/Applications/Other.app/Contents/MacOS/b")
+            ],
+            &[
+                PathBuf::from("/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-tauri-desktop"),
+                PathBuf::from("/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-native-host")
+            ],
+        ));
+        assert!(same_executable_set(
+            &[
+                PathBuf::from("/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-native-host"),
+                PathBuf::from("/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-tauri-desktop"),
+            ],
+            &[
+                PathBuf::from("/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-tauri-desktop"),
+                PathBuf::from("/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-native-host"),
+            ],
+        ));
+    }
+
+    #[test]
+    fn access_group_detection_uses_entitlements_dict_or_parses_data_blob() {
+        assert_eq!(SEC_CS_SIGNING_INFORMATION, 1 << 1);
+        assert_ne!(SEC_CS_SIGNING_INFORMATION, 0);
+        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>ABCD123456.com.vaultmesh.desktop</string>
+	</array>
+</dict>
+</plist>
+"#;
+        let from_data = select_keychain_access_groups(None, Some(xml));
+        assert_eq!(
+            entitled_access_group("ABCD123456", &from_data).as_deref(),
+            Some("ABCD123456.com.vaultmesh.desktop")
+        );
+        let dict = vec!["ABCD123456.com.vaultmesh.desktop".to_owned()];
+        assert_eq!(
+            select_keychain_access_groups(Some(dict.clone()), Some(b"not-a-dictionary")),
+            dict
+        );
+        assert!(select_keychain_access_groups(None, Some(b"bplist00not-xml")).is_empty());
+        assert!(access_groups_from_entitlements_xml(b"bplist00").is_none());
     }
 
     #[test]

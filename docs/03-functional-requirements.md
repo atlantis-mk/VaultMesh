@@ -186,7 +186,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：失焦、隐藏、系统锁定、页面卸载、切换保险库或提交密码/PIN 时取消当前认证；恢复激活可重新等待。取消、凭据变化和旧会话的迟到回调不得解锁；重渲染和重复激活不得创建重复认证。失败保留显式重试和密码/PIN 回退。Windows 适配器首版明确暂不支持，不能隐式调用 macOS 逻辑；MCP 独立认证和超时不变。
 - 必须：PIN/生物识别两项无凭据状态查询作为同一轮并发读取并共用在途事件检查；后台最多接纳两项此类只读查询，仍逐项验证来源、会话、版本、期限和防重放，不能与受控工具写操作并行。解锁、设置及其他特权操作不得借此绕过串行保护。
 - 必须：桌面设备凭据只保留一把操作系统钥匙串根条目（服务 `com.vaultmesh.desktop`、账户 `root-secret-v1`），并用它保护应用支持目录 `com.vaultmesh.desktop` 中的 `device-credentials.enc`。macOS 上同一 Team ID 签名的包内主程序和包内 `vaultmesh-native-host` 必须通过 Keychain Access Group `$(TeamIdentifierPrefix)com.vaultmesh.desktop` 共享该条目；没有 Team ID 时，创建和更新文件钥匙串条目都必须只信任这两个包内可执行文件。未签名程序、开发专用 Host、Agent sidecar 和其他第三方二进制不得加入 Access Group 或 Trusted Applications。
-- 必须：主程序与 Native Host 使用同一 `device-credentials.enc`。进程首次打开统一存储时一次性扫描已知旧 Service，迁入该文件并删除旧钥匙串条目；迁移完成后不得再回退读取旧 `keyring` 条目。生产 PIN 与生物识别必须经过 `DeviceCredentialStore`。文件必须使用绑定应用标识、当前 OS 用户和协议版本的 AAD；空 AAD 的旧文件在解密成功后必须重封。
+- 必须：主程序与 Native Host 使用同一 `device-credentials.enc`。主程序首次打开统一存储时一次性扫描已知旧 Service，迁入该文件并删除旧钥匙串条目；Native Host 在迁移标记还不存在时不得枚举这些旧 Service。迁移完成后不得再回退读取旧 `keyring` 条目。生产 PIN 与生物识别必须经过 `DeviceCredentialStore`。文件必须使用绑定应用标识、当前 OS 用户和协议版本的 AAD；空 AAD 的旧文件在解密成功后必须重封。给已签名主程序或包内 Host 补上 Keychain Access Group 时，必须合并进该二进制现有 entitlements，不得用只含访问组的 plist 覆盖其他 entitlement。
 - 验收：`CT-SEC-002`、`CT-NATIVE-PRIVILEGED-001`、
   `CT-NATIVE-QUICK-UNLOCK-001`、`CT-NATIVE-CLIPBOARD-001`、`CT-TAURI-DESKTOP-001`、`AT-SEC-001`、
   `AT-NATIVE-MACOS-003`、`CT-DESKTOP-AUTH-001`、`AT-DESKTOP-AUTH-001`。
