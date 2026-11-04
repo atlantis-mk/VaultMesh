@@ -111,3 +111,13 @@ Direct change 是默认路径，覆盖能在同一任务完成的日常功能、
 - 新 Work 只有一个 `change.yaml`，只保存目标、路由、边界、风险和后续动作；复杂推理使用 ADR、专项规格或可选 design 文档。
 - 发布从 `releases/_template.md` 创建记录并建立同名 Git Tag，只引用 schema-v2 Done 或已封存 legacy Work。
 - `pnpm docs:check` 必须验证 schema、路由、生成的 Traceability、Release 引用和 legacy archive 的完整性。CI 通过 `VAULTMESH_ARCHIVE_BASE_REF` 保护既有 archive 条目。
+
+## 11. Cursor Cloud 开发环境
+
+Linux Cloud Agent 验证 core、文档、脚本、桌面 renderer 契约和浏览器扩展。Tauri 2 产品 shell 只在 macOS / Windows 上编译和运行。
+
+- 工具链以 Node.js 22、根目录 `packageManager` 的 pnpm 11.24.0 和 `rust-toolchain.toml` 为准。环境 `install` 安装 WebKitGTK 4.1 等 Tauri Linux 系统依赖、`rustfmt` 与 `clippy`，然后执行 `pnpm install --frozen-lockfile` 和 `cargo fetch --locked`。
+- Linux 上必须使用这些命令完成日常验证：`pnpm docs:check`、`pnpm scripts:test`、`pnpm typecheck`、`pnpm --filter @vaultmesh/tauri-desktop test`、`pnpm extension:test`、`pnpm extension:build`、`cargo test -p vaultmesh-core`。
+- `pnpm test` 与 `pnpm tauri:dev` 会编译 `vaultmesh-tauri-desktop`。该 crate 的主窗口和 Unix socket 凭据只覆盖 macOS / Windows，Linux 上不能启动产品 shell。
+- Android SDK / NDK 不在默认环境中。`pnpm android:build` 需要单独准备 SDK。
+- 不得把 Vault 文件、主密码或受保护字段写入仓库、日志或环境配置。
