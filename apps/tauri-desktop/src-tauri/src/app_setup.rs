@@ -147,9 +147,29 @@ pub fn run() {
                 std::io::Error::other("无法安全迁移现有 Electron 保险库；旧数据未被删除。")
             })?;
             let settings_path = app_data.join("security-settings.json");
+            // A keychain failure must never abort launch: Tauri turns a setup
+            // error into a panic inside the AppKit launch callback, which is
+            // a silent SIGABRT. Degrade to a fail-closed store instead; master
+            // password unlock keeps working and quick unlock/pairing stay off.
             let credentials_store = Arc::new(
-                crate::device_credentials::DeviceCredentialStore::platform(&app_data)
-                    .map_err(|e| std::io::Error::other(format!("无法初始化设备凭据存储: {e}")))?,
+                match crate::device_credentials::DeviceCredentialStore::platform(&app_data) {
+                    Ok(store) => store,
+                    Err(reason) => {
+                        // `reason` carries only fixed text and OSStatus codes.
+                        eprintln!("设备凭据存储不可用: {reason}");
+                        let store =
+                            crate::device_credentials::DeviceCredentialStore::unavailable(
+                                reason.clone(),
+                            );
+                        app.dialog()
+                            .message(format!(
+                                "VaultMesh 无法访问设备钥匙串，PIN、Touch ID 和设备配对已暂时停用，主密码解锁不受影响。\n\n{reason}"
+                            ))
+                            .title("钥匙串不可用")
+                            .show(|_| {});
+                        store
+                    }
+                },
             );
             let agent_access_settings_path = app_data.join("agent-access-settings.json");
             let email_settings_path = app_data.join("email-otp-settings.json");

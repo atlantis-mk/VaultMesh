@@ -45,13 +45,12 @@ use zeroize::Zeroizing;
 
 use crate::device_credentials::{ROOT_KEYRING_ACCOUNT, ROOT_KEYRING_SERVICE};
 use crate::keychain_share::{
-    SEC_CS_SIGNING_INFORMATION, entitled_access_group, in_bundle_executable_paths,
-    is_direct_bundle_executable, partition_ids_for_share, partition_plist_hex,
-    partitions_are_exact, select_keychain_access_groups,
+    NATIVE_HOST_EXECUTABLE_NAME, SEC_CS_SIGNING_INFORMATION, entitled_access_group,
+    in_bundle_executable_paths, is_direct_bundle_executable, partition_ids_for_share,
+    partition_plist_hex, partitions_are_exact, select_keychain_access_groups,
 };
 
 const ERR_SEC_MISSING_ENTITLEMENT: OSStatus = -34018;
-const ERR_SEC_USER_CANCELED: OSStatus = -128;
 const KEYCHAIN_DESCRIPTOR: &str = "VaultMesh device root";
 const ACL_AUTH_ENCRYPT: &str = "ACLAuthorizationEncrypt";
 const ACL_AUTH_DECRYPT: &str = "ACLAuthorizationDecrypt";
@@ -60,6 +59,7 @@ const ACL_AUTH_CHANGE: &str = "ACLAuthorizationChangeACL";
 const ACL_AUTH_INTEGRITY: &str = "ACLAuthorizationIntegrity";
 const ACL_AUTH_PARTITION: &str = "ACLAuthorizationPartitionID";
 const ACL_LOCK_FILE_NAME: &str = ".keychain-acl.lock";
+const ACL_PLAN_MARKER_FILE_NAME: &str = ".keychain-acl-plan";
 
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
@@ -106,7 +106,6 @@ unsafe extern "C" {
     fn SecACLCopyAuthorizations(acl: CFTypeRef) -> CFArrayRef;
     fn SecACLUpdateAuthorizations(acl: CFTypeRef, authorizations: CFArrayRef) -> OSStatus;
     fn SecKeychainItemCopyAccess(item: CFTypeRef, access: *mut SecAccessRef) -> OSStatus;
-    fn SecKeychainItemSetAccess(item: CFTypeRef, access: SecAccessRef) -> OSStatus;
     fn SecTrustedApplicationCopyData(
         app: CFTypeRef,
         data: *mut core_foundation_sys::data::CFDataRef,
@@ -193,8 +192,31 @@ pub fn list_legacy_generic_passwords(service: &str) -> Result<Vec<(String, Vec<u
     Ok(secrets)
 }
 
+/// A release `.app` whose binaries cannot produce a complete share plan
+/// (unsigned, or main/host signed inconsistently) must not touch the production
+/// root item: the plain `keyring` fallback makes macOS ask for access and the
+/// user's "Always Allow" then pollutes the ACL with that build's identity.
+fn must_refuse_unplanned_bundle(release_build: bool, in_bundle: bool, has_plan: bool) -> bool {
+    release_build && in_bundle && !has_plan
+}
+
+fn running_inside_app_bundle() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| in_bundle_executable_paths(&path).ok())
+        .is_some()
+}
+
 fn legacy_root_secret() -> Result<Zeroizing<[u8; 32]>, String> {
-    if let Some(plan) = share_plan() {
+    let plan = share_plan();
+    if must_refuse_unplanned_bundle(
+        !cfg!(debug_assertions),
+        running_inside_app_bundle(),
+        plan.is_some(),
+    ) {
+        return Err("应用包未签名或签名不完整，拒绝访问生产根钥匙串条目".to_owned());
+    }
+    if let Some(plan) = plan {
         return legacy_root_secret_with_plan(&plan);
     }
     let entry = keyring::Entry::new(ROOT_KEYRING_SERVICE, ROOT_KEYRING_ACCOUNT)
@@ -213,16 +235,55 @@ fn legacy_root_secret() -> Result<Zeroizing<[u8; 32]>, String> {
 
 fn legacy_root_secret_with_plan(plan: &SharePlan) -> Result<Zeroizing<[u8; 32]>, String> {
     let _lock = LegacyAclLock::acquire()?;
-    match legacy_item_ref()? {
-        Some(item) => {
-            ensure_shared_legacy_acl_once(&item, plan)?;
-            read_legacy_root()
+    let item = legacy_item_ref()?;
+    let migrated = plan_marker_matches(plan);
+    match legacy_acl_action(is_native_host_process(), item.is_some(), migrated) {
+        LegacyAclAction::Read => {}
+        LegacyAclAction::Migrate => run_legacy_acl_once(|| migrate_legacy_root(plan))?,
+        LegacyAclAction::Create => run_legacy_acl_once(|| create_fresh_legacy_root(plan))?,
+        LegacyAclAction::RequireDesktopMigrate => {
+            return Err("根钥匙串需要由桌面主程序迁移".to_owned());
         }
-        None => {
-            ensure_shared_legacy_acl_once_for_missing(plan)?;
-            read_legacy_root()
+        LegacyAclAction::RequireDesktopCreate => {
+            return Err("根钥匙串条目需要由桌面主程序创建".to_owned());
         }
     }
+    read_legacy_root()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyAclAction {
+    Read,
+    Migrate,
+    Create,
+    RequireDesktopMigrate,
+    RequireDesktopCreate,
+}
+
+/// `migrated` means this exact main/host cdhash pair already ran the one-time
+/// migration. A system-added default PartitionID ACL always sits next to ours,
+/// so structural ACL equality is unreachable and must never gate repairs.
+fn legacy_acl_action(
+    native_host: bool,
+    item_exists: bool,
+    migrated: bool,
+) -> LegacyAclAction {
+    match (native_host, item_exists, migrated) {
+        (_, true, true) => LegacyAclAction::Read,
+        (false, true, false) => LegacyAclAction::Migrate,
+        (false, false, _) => LegacyAclAction::Create,
+        (true, true, false) => LegacyAclAction::RequireDesktopMigrate,
+        (true, false, _) => LegacyAclAction::RequireDesktopCreate,
+    }
+}
+
+fn is_native_host_process() -> bool {
+    std::env::current_exe()
+        .is_ok_and(|path| is_native_host_path(&path))
+}
+
+fn is_native_host_path(path: &Path) -> bool {
+    path.file_name() == Some(std::ffi::OsStr::new(NATIVE_HOST_EXECUTABLE_NAME))
 }
 
 struct LegacyAclLock {
@@ -341,30 +402,68 @@ fn share_plan() -> Option<SharePlan> {
     Some(SharePlan { paths, partitions })
 }
 
-fn ensure_shared_legacy_acl_once(item: &CFType, plan: &SharePlan) -> Result<(), String> {
-    run_legacy_acl_once(|| {
-        if acl_is_exact(item, plan)? {
-            return Ok(());
-        }
-        repair_and_verify_legacy_acl(item, plan)
-    })
+/// One-time, never additive. `SecKeychainItemSetAccess` appends ACLs (three
+/// more on every call) and always asks for the login password, so it is not
+/// used. The item is rebuilt instead: read the secret, delete the polluted
+/// item, add a clean one that trusts only the two bundle executables.
+fn migrate_legacy_root(plan: &SharePlan) -> Result<(), String> {
+    let secret = read_legacy_root()?;
+    delete_legacy_root()?;
+    if let Err(error) = create_legacy_root_with_plan(&secret, plan) {
+        // Never lose the root secret: put it back with default access.
+        let restored = keyring::Entry::new(ROOT_KEYRING_SERVICE, ROOT_KEYRING_ACCOUNT)
+            .and_then(|entry| entry.set_secret(secret.as_slice()));
+        return Err(match (error, restored) {
+            (CreateLegacyRootError::Message(message), Ok(())) => {
+                format!("{message}；已恢复原根钥匙串条目")
+            }
+            (CreateLegacyRootError::Duplicate, Ok(())) => "根钥匙串条目并发出现；已恢复".to_owned(),
+            (_, Err(_)) => "无法重建根钥匙串条目，且恢复失败".to_owned(),
+        });
+    }
+    write_plan_marker(plan)
 }
 
-fn ensure_shared_legacy_acl_once_for_missing(plan: &SharePlan) -> Result<(), String> {
-    run_legacy_acl_once(|| {
-        let secret = random_secret();
-        match create_legacy_root_with_plan(&secret, plan) {
-            Ok(()) => Ok(()),
-            Err(CreateLegacyRootError::Duplicate) => {
-                let item = legacy_item_ref()?.ok_or("共享根钥匙串条目并发消失")?;
-                if acl_is_exact(&item, plan)? {
-                    return Ok(());
-                }
-                repair_and_verify_legacy_acl(&item, plan)
-            }
-            Err(CreateLegacyRootError::Message(error)) => Err(error),
-        }
-    })
+fn create_fresh_legacy_root(plan: &SharePlan) -> Result<(), String> {
+    let secret = random_secret();
+    match create_legacy_root_with_plan(&secret, plan) {
+        Ok(()) => write_plan_marker(plan),
+        // Another desktop process created it with the same plan under the lock.
+        Err(CreateLegacyRootError::Duplicate) => write_plan_marker(plan),
+        Err(CreateLegacyRootError::Message(error)) => Err(error),
+    }
+}
+
+fn plan_digest(plan: &SharePlan) -> String {
+    let digest = sha2::Sha256::digest(plan.partitions.join("\n").as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn plan_marker_in(app_data: &Path) -> std::path::PathBuf {
+    app_data.join(ACL_PLAN_MARKER_FILE_NAME)
+}
+
+fn plan_marker_matches(plan: &SharePlan) -> bool {
+    crate::device_credentials::default_desktop_app_data_dir()
+        .is_some_and(|dir| plan_marker_matches_in(&dir, plan))
+}
+
+fn plan_marker_matches_in(app_data: &Path, plan: &SharePlan) -> bool {
+    fs::read_to_string(plan_marker_in(app_data))
+        .is_ok_and(|text| text.trim() == plan_digest(plan))
+}
+
+fn write_plan_marker(plan: &SharePlan) -> Result<(), String> {
+    let app_data = crate::device_credentials::default_desktop_app_data_dir()
+        .ok_or("无法解析 VaultMesh 应用支持目录")?;
+    write_plan_marker_in(&app_data, plan)
+}
+
+fn write_plan_marker_in(app_data: &Path, plan: &SharePlan) -> Result<(), String> {
+    let path = plan_marker_in(app_data);
+    fs::write(&path, plan_digest(plan)).map_err(|_| "无法记录根钥匙串迁移标记".to_owned())?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .map_err(|_| "无法保护根钥匙串迁移标记".to_owned())
 }
 
 fn run_legacy_acl_once(operation: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
@@ -453,6 +552,7 @@ fn access_for_plan(plan: &SharePlan) -> Result<SecAccess, String> {
 
 struct TrustedApplications {
     array: CFType,
+    #[cfg_attr(not(test), allow(dead_code))]
     identities: BTreeSet<Vec<u8>>,
 }
 
@@ -592,7 +692,6 @@ struct AclRecord {
     applications: Vec<Vec<u8>>,
     authorizations: Vec<String>,
     description: String,
-    prompt_selector: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -632,7 +731,6 @@ fn copy_access_acl_records(access: SecAccessRef) -> Result<Vec<AclRecord>, Strin
             applications: contents.applications,
             authorizations: copy_acl_authorizations(raw_acl)?,
             description: contents.description,
-            prompt_selector: contents.prompt_selector,
             acl,
         });
     }
@@ -642,14 +740,15 @@ fn copy_access_acl_records(access: SecAccessRef) -> Result<Vec<AclRecord>, Strin
 struct AclContents {
     applications: Vec<Vec<u8>>,
     description: String,
-    prompt_selector: u16,
 }
 
 fn copy_acl_contents(acl: CFTypeRef) -> Result<AclContents, String> {
     let mut apps: CFTypeRef = ptr::null();
     let mut description: CFStringRef = ptr::null_mut();
-    let mut prompt = 0_u16;
-    let status = unsafe { SecACLCopyContents(acl, &mut apps, &mut description, &mut prompt) };
+    let mut prompt_selector = 0_u16;
+    let status = unsafe {
+        SecACLCopyContents(acl, &mut apps, &mut description, &mut prompt_selector)
+    };
     if status != 0 {
         return Err(format!("无法读取钥匙串 ACL 内容 ({status})"));
     }
@@ -672,13 +771,9 @@ fn copy_acl_contents(acl: CFTypeRef) -> Result<AclContents, String> {
         }
     }
     identities.sort();
-    if identities.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err("钥匙串信任应用列表包含重复身份".to_owned());
-    }
     Ok(AclContents {
         applications: identities,
         description,
-        prompt_selector: prompt,
     })
 }
 
@@ -691,6 +786,7 @@ fn copy_acl_authorizations(acl: CFTypeRef) -> Result<Vec<String>, String> {
     Ok(cf_array_strings(tags.as_CFTypeRef()))
 }
 
+#[cfg(test)]
 fn acl_is_exact(item: &CFType, plan: &SharePlan) -> Result<bool, String> {
     let access = copy_item_access(item)?;
     let trusted = trusted_applications(&[&plan.paths.main_executable, &plan.paths.native_host])?;
@@ -702,6 +798,7 @@ fn acl_is_exact(item: &CFType, plan: &SharePlan) -> Result<bool, String> {
     ))
 }
 
+#[cfg(test)]
 fn acl_records_are_exact(
     records: &[AclRecord],
     expected_applications: &BTreeSet<Vec<u8>>,
@@ -747,95 +844,6 @@ fn copy_item_access(item: &CFType) -> Result<SecAccess, String> {
         return Err(format!("无法读取根钥匙串访问控制 ({status})"));
     }
     Ok(unsafe { SecAccess::wrap_under_create_rule(access) })
-}
-
-fn repair_and_verify_legacy_acl(item: &CFType, plan: &SharePlan) -> Result<(), String> {
-    let access = copy_item_access(item)?;
-    normalize_access(access.as_concrete_TypeRef(), plan)?;
-    let status =
-        unsafe { SecKeychainItemSetAccess(item.as_CFTypeRef(), access.as_concrete_TypeRef()) };
-    if status == ERR_SEC_USER_CANCELED {
-        return Err("已取消 macOS 根钥匙串访问权限修复".to_owned());
-    }
-    if status != 0 {
-        return Err(format!("无法更新根钥匙串授权 ({status})"));
-    }
-    if !acl_is_exact(item, plan)? {
-        return Err("根钥匙串 ACL 写入后仍未收敛到唯一主程序和 Native Host".to_owned());
-    }
-    Ok(())
-}
-
-fn normalize_access(access: SecAccessRef, plan: &SharePlan) -> Result<(), String> {
-    let trusted = trusted_applications(&[&plan.paths.main_executable, &plan.paths.native_host])?;
-    let empty = empty_trusted_applications();
-    let records = copy_access_acl_records(access)?;
-    let canonical_decrypt = choose_canonical_acl(&records, AclRole::Decrypt, |record| {
-        record.applications.len() == 2
-            && record.applications.iter().cloned().collect::<BTreeSet<_>>() == trusted.identities
-    })
-    .ok_or("根钥匙串 ACL 缺少可修复的解密授权")?;
-    if choose_canonical_acl(&records, AclRole::Encrypt, |_| true).is_none() {
-        return Err("根钥匙串 ACL 缺少加密授权".to_owned());
-    }
-    if choose_canonical_acl(&records, AclRole::Change, |_| true).is_none() {
-        return Err("根钥匙串 ACL 缺少修改授权".to_owned());
-    }
-    let canonical_partition = choose_canonical_acl(&records, AclRole::Partition, |record| {
-        partitions_are_exact(&record.description, &plan.partitions)
-    });
-    let hex = partition_plist_hex(&plan.partitions).ok_or("分区列表无效")?;
-
-    for (index, record) in records.iter().enumerate() {
-        let role = acl_role(&record.authorizations);
-        match role {
-            AclRole::Decrypt if index == canonical_decrypt => {
-                set_acl_contents(
-                    record.acl.as_CFTypeRef(),
-                    &trusted.array,
-                    KEYCHAIN_DESCRIPTOR,
-                    0,
-                )?;
-            }
-            AclRole::Decrypt | AclRole::Encrypt | AclRole::Change => {
-                set_acl_contents(record.acl.as_CFTypeRef(), &empty, KEYCHAIN_DESCRIPTOR, 0)?;
-            }
-            AclRole::Partition => {
-                set_acl_contents(record.acl.as_CFTypeRef(), &empty, &hex, 0)?;
-            }
-            AclRole::Integrity | AclRole::Other if !record.applications.is_empty() => {
-                set_acl_contents(
-                    record.acl.as_CFTypeRef(),
-                    &empty,
-                    &record.description,
-                    record.prompt_selector,
-                )?;
-            }
-            AclRole::Integrity | AclRole::Other => {}
-        }
-    }
-    if canonical_partition.is_none() {
-        create_partition_acl(access, &empty, &hex)?;
-    }
-    Ok(())
-}
-
-fn choose_canonical_acl(
-    records: &[AclRecord],
-    role: AclRole,
-    preferred: impl Fn(&AclRecord) -> bool,
-) -> Option<usize> {
-    canonical_index(records, role, preferred).or_else(|| canonical_index(records, role, |_| true))
-}
-
-fn canonical_index(
-    records: &[AclRecord],
-    role: AclRole,
-    preferred: impl Fn(&AclRecord) -> bool,
-) -> Option<usize> {
-    records
-        .iter()
-        .position(|record| acl_role(&record.authorizations) == role && preferred(record))
 }
 
 fn set_acl_contents(
@@ -1219,6 +1227,17 @@ mod tests {
             KEYCHAIN_DESCRIPTOR,
         ));
         assert!(!acl_facts_are_exact(&polluted, &expected, &partitions));
+
+        polluted.pop();
+        polluted.push(fact(
+            &[ACL_AUTH_DECRYPT, ACL_AUTH_DERIVE],
+            &[
+                b"/Applications/VaultMesh.app\0",
+                b"/Applications/VaultMesh.app\0",
+            ],
+            KEYCHAIN_DESCRIPTOR,
+        ));
+        assert!(!acl_facts_are_exact(&polluted, &expected, &partitions));
     }
 
     #[test]
@@ -1330,6 +1349,181 @@ mod tests {
         assert_eq!(run_once(&cache, &operation).unwrap_err(), "cancelled");
         assert_eq!(run_once(&cache, &operation).unwrap_err(), "cancelled");
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn native_host_never_mutates_legacy_acl_or_creates_the_root_item() {
+        assert_eq!(
+            legacy_acl_action(false, true, true),
+            LegacyAclAction::Read
+        );
+        assert_eq!(
+            legacy_acl_action(false, true, false),
+            LegacyAclAction::Migrate
+        );
+        assert_eq!(
+            legacy_acl_action(false, false, false),
+            LegacyAclAction::Create
+        );
+        assert_eq!(
+            legacy_acl_action(true, true, true),
+            LegacyAclAction::Read
+        );
+        assert_eq!(
+            legacy_acl_action(true, true, false),
+            LegacyAclAction::RequireDesktopMigrate
+        );
+        assert_eq!(
+            legacy_acl_action(true, false, false),
+            LegacyAclAction::RequireDesktopCreate
+        );
+    }
+
+    #[test]
+    fn unsigned_release_bundle_never_reaches_the_production_root_item() {
+        assert!(must_refuse_unplanned_bundle(true, true, false));
+        assert!(!must_refuse_unplanned_bundle(true, true, true));
+        // Development builds and non-bundle executables keep the plain path.
+        assert!(!must_refuse_unplanned_bundle(false, true, false));
+        assert!(!must_refuse_unplanned_bundle(true, false, false));
+    }
+
+    fn sample_plan(main_hash: char) -> SharePlan {
+        let hash = |c: char| c.to_string().repeat(40);
+        SharePlan {
+            paths: crate::keychain_share::InBundleExecutables {
+                macos_dir: "/Applications/VaultMesh.app/Contents/MacOS".into(),
+                main_executable: "/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-tauri-desktop".into(),
+                native_host: "/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-native-host".into(),
+            },
+            partitions: vec![format!("cdhash:{}", hash(main_hash)), format!("cdhash:{}", hash('b'))],
+        }
+    }
+
+    #[test]
+    fn migration_marker_is_bound_to_the_cdhash_pair_so_each_build_migrates_once() {
+        let root = std::env::temp_dir().join(format!("vaultmesh-marker-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let first = sample_plan('a');
+        assert!(!plan_marker_matches_in(&root, &first));
+        write_plan_marker_in(&root, &first).unwrap();
+        assert!(plan_marker_matches_in(&root, &first));
+        // A new build changes the cdhash, so exactly one new migration is due.
+        assert!(!plan_marker_matches_in(&root, &sample_plan('c')));
+        assert_eq!(
+            fs::metadata(plan_marker_in(&root)).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrated_item_is_read_without_any_acl_change_by_main_and_host() {
+        assert_eq!(legacy_acl_action(false, true, true), LegacyAclAction::Read);
+        assert_eq!(legacy_acl_action(true, true, true), LegacyAclAction::Read);
+    }
+
+    #[test]
+    fn the_product_native_host_name_is_read_only() {
+        assert!(is_native_host_path(Path::new(
+            "/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-native-host"
+        )));
+        assert!(is_native_host_path(Path::new(
+            "/tmp/vaultmesh-native-host"
+        )));
+        assert!(!is_native_host_path(Path::new(
+            "/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-tauri-desktop"
+        )));
+        assert!(!is_native_host_path(Path::new(
+            "/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-bitwarden-dev-host"
+        )));
+    }
+
+    #[test]
+    fn inspect_live_acl_metadata_when_requested() {
+        if std::env::var_os("VAULTMESH_INSPECT_ACL").is_none() {
+            return;
+        }
+        let main = std::env::var_os("VAULTMESH_INSPECT_APP")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(
+                    "target/release/bundle/macos/VaultMesh.app/Contents/MacOS/vaultmesh-tauri-desktop",
+                )
+            });
+        let main = main.as_path();
+        let paths = in_bundle_executable_paths(main).unwrap();
+        let host = signing_facts_for_path(&paths.native_host).unwrap();
+        let expected = signing_facts_for_path(&paths.main_executable).unwrap();
+        let partitions = partition_ids_for_share(
+            expected.team.as_deref(),
+            host.team.as_deref(),
+            expected.cdhash.as_deref().unwrap(),
+            host.cdhash.as_deref().unwrap(),
+        )
+        .unwrap();
+        let plan = SharePlan { paths, partitions };
+        let trusted =
+            trusted_applications(&[&plan.paths.main_executable, &plan.paths.native_host]).unwrap();
+        let item = legacy_item_ref().unwrap().expect("root item missing");
+        let access = copy_item_access(&item).unwrap();
+        let records = copy_access_acl_records(access.as_concrete_TypeRef()).unwrap();
+        let fingerprint = |identity: &[u8]| {
+            let digest = sha2::Sha256::digest(identity);
+            digest[..8]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        println!(
+            "expected={:?}",
+            trusted
+                .identities
+                .iter()
+                .map(|identity| fingerprint(identity))
+                .collect::<Vec<_>>()
+        );
+        for record in &records {
+            println!(
+                "role={:?} apps={:?} auths={:?} description_bytes={}",
+                acl_role(&record.authorizations),
+                record
+                    .applications
+                    .iter()
+                    .map(|identity| fingerprint(identity))
+                    .collect::<Vec<_>>(),
+                record.authorizations,
+                record.description.len()
+            );
+        }
+        println!(
+            "exact={}",
+            acl_records_are_exact(&records, &trusted.identities, &plan.partitions)
+        );
+        let replacement = access_for_plan(&plan).unwrap();
+        let replacement_records =
+            copy_access_acl_records(replacement.as_concrete_TypeRef()).unwrap();
+        println!(
+            "replacement_exact={}",
+            acl_records_are_exact(
+                &replacement_records,
+                &trusted.identities,
+                &plan.partitions
+            )
+        );
+        for record in &replacement_records {
+            println!(
+                "replacement_role={:?} apps={:?} auths={:?} description_bytes={}",
+                acl_role(&record.authorizations),
+                record
+                    .applications
+                    .iter()
+                    .map(|identity| fingerprint(identity))
+                    .collect::<Vec<_>>(),
+                record.authorizations,
+                record.description.len()
+            );
+        }
     }
 
     #[test]
