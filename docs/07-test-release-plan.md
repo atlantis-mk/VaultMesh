@@ -218,7 +218,9 @@ pnpm typecheck
 - `CT-SEC-002` / `CT-BROWSER-001` 还必须覆盖桌面配置跟随、自动一次 Touch ID、StrictMode/重复点击、失败显式重试、密码/PIN 取消、popup 隐藏/关闭与迟到结果、凭据替换/关闭、错误 Vault、单次消费、30 秒总期限及 3 秒无轮询过期；`CT-BROWSER-002` 必须覆盖三项认证操作的 Rust/TypeScript 路由、鉴权和 policy parity。`AT-BROWSER-001` / `AT-BROWSER-FIREFOX-001` 必须在 macOS 实测系统弹窗期间 popup 生命周期与真实指纹成功、取消和回退，不得以模拟认证代替。
 - `CT-SEC-002` / `CT-BROWSER-001` 必须覆盖解锁页无快捷方式、仅 PIN、仅生物识别、两者均可用、未启用/不可用/PIN 锁定、状态读取失败/超时及迟到响应；验证默认优先级、切换清空、6 位 PIN 单次提交、失败次数刷新、生物识别取消、主密码回退与隐藏/销毁清理。系统指纹弹窗仍须真机验收。
 - `CT-SEC-002` 必须覆盖设备凭据一次性迁移：已知旧 Service 迁入 `device-credentials.enc` 后被删除，统一存储再次打开或读取缺失账户时不得再访问这些旧条目；Host 在没有迁移标记时不得枚举旧 Service；空 AAD 旧文件必须重封。访问组检测必须使用 `kSecCSSigningInformation`，并接受 `EntitlementsDict` 或 `Entitlements` Data。重签必须合并现有 entitlements，不得覆盖。生产 PIN/生物识别在 Release 中不得走直接 `keyring` 旁路。
+- `CT-SEC-002` 的 macOS 文件钥匙串切片必须覆盖 `SecACLCopyAuthorizations` 返回授权标签、主程序身份归一化为 `.app`、所有 ACL 信任应用并集恰好为包内主程序与 Host、至少一个 PartitionID ACL 且所有 PartitionID ACL 精确匹配两个 cdhash；污染的旧 cdhash、`unsigned:`、开发/测试路径、重复 ACL、缺失或陈旧分区必须触发一次规范化并在写后复验，精确 ACL 不得再次写入，取消或复验失败不得回退读取。主程序与 Host 必须通过应用支持目录内 0700/0600 非秘密锁串行检查，且同一进程只缓存一次尝试结果。修复不得删除或枚举其他钥匙串条目。
 - `AT-SEC-001` / `AT-BROWSER-001` 必须在带同一 Team ID 的签名 macOS 包上验证：对共享根钥匙串条目授权一次后，完全退出并冷启动主程序，再触发浏览器自动填充，不得再次出现钥匙串密码弹窗。Native Messaging 路径必须保持在 `VaultMesh.app/Contents/MacOS/vaultmesh-native-host`。Ad-hoc 签名没有 Team ID，不能把该结果当成 Access Group 验收。
+- `AT-SEC-002` 必须在隔离的 ad-hoc macOS 安装中完成一次旧 ACL 修复授权，随后完全退出并冷启动主程序、重复触发浏览器自动填充，不得再次出现根钥匙串读取或访问许可弹窗；不得读取、导出或记录测试根密钥和凭据正文。
 - `CT-BROWSER-001` 必须覆盖连接即时反馈、重复点击、权限/状态无回调超时、后台无响应、Native Host 安全错误分类、断连与迟到状态竞争；诊断不得回显原始错误或改变 mutation 重试语义。
 - 初始化回归必须覆盖状态成功而列表无响应的超时，以及连续刷新与轮询复用同一轮读取；授权失效后的新轮次不能被旧轮次覆盖。
 - `CT-BROWSER-001` 必须以至少 500 条虚构摘要验证分页渲染上限、末页可达、跨页搜索、列表缩短与锁定清理；WXT 构建产物不得一次性创建全量条目的操作控件。

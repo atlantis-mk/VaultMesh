@@ -222,6 +222,7 @@ pub fn partition_plist_hex(partitions: &[String]) -> Option<String> {
     }))
 }
 
+#[cfg(test)]
 pub fn description_contains_partitions(description: &str, partitions: &[String]) -> bool {
     let decoded = decode_hex_text(description).unwrap_or_else(|| description.to_owned());
     partitions
@@ -261,6 +262,7 @@ pub fn partition_ids_in_description(description: &str) -> Option<Vec<String>> {
     (!ids.is_empty()).then_some(ids)
 }
 
+#[cfg(test)]
 pub fn same_executable_set(found: &[impl AsRef<Path>], expected: &[impl AsRef<Path>]) -> bool {
     if found.len() != 2 || expected.len() != 2 {
         return false;
@@ -275,6 +277,7 @@ pub fn same_executable_set(found: &[impl AsRef<Path>], expected: &[impl AsRef<Pa
     left == right
 }
 
+#[cfg(test)]
 fn path_key(path: &Path) -> String {
     fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())

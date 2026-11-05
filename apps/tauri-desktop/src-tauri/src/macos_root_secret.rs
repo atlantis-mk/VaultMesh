@@ -2,10 +2,15 @@
 //! Team-signed, otherwise a legacy item whose ACL names only the two in-bundle
 //! executables.
 
+use std::collections::BTreeSet;
 use std::ffi::CString;
+use std::fs::{self, File, OpenOptions};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::ptr;
+use std::sync::{Mutex, OnceLock};
 
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
@@ -14,7 +19,9 @@ use core_foundation::data::CFData;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 use core_foundation::url::CFURL;
-use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetTypeID, CFArrayGetValueAtIndex};
+use core_foundation_sys::array::{
+    CFArrayGetCount, CFArrayGetTypeID, CFArrayGetValueAtIndex, CFArrayRef,
+};
 use core_foundation_sys::base::{CFGetTypeID, CFRelease, CFTypeRef, OSStatus};
 use core_foundation_sys::data::CFDataGetTypeID;
 use core_foundation_sys::dictionary::{CFDictionaryGetValue, CFDictionaryRef};
@@ -32,7 +39,7 @@ use security_framework_sys::item::{
     kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecMatchLimit,
     kSecMatchLimitAll, kSecReturnAttributes, kSecReturnRef, kSecValueData,
 };
-use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemUpdate};
+use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching};
 use sha2::Digest;
 use zeroize::Zeroizing;
 
@@ -40,10 +47,19 @@ use crate::device_credentials::{ROOT_KEYRING_ACCOUNT, ROOT_KEYRING_SERVICE};
 use crate::keychain_share::{
     SEC_CS_SIGNING_INFORMATION, entitled_access_group, in_bundle_executable_paths,
     is_direct_bundle_executable, partition_ids_for_share, partition_plist_hex,
-    partitions_are_exact, same_executable_set, select_keychain_access_groups,
+    partitions_are_exact, select_keychain_access_groups,
 };
 
 const ERR_SEC_MISSING_ENTITLEMENT: OSStatus = -34018;
+const ERR_SEC_USER_CANCELED: OSStatus = -128;
+const KEYCHAIN_DESCRIPTOR: &str = "VaultMesh device root";
+const ACL_AUTH_ENCRYPT: &str = "ACLAuthorizationEncrypt";
+const ACL_AUTH_DECRYPT: &str = "ACLAuthorizationDecrypt";
+const ACL_AUTH_DERIVE: &str = "ACLAuthorizationDerive";
+const ACL_AUTH_CHANGE: &str = "ACLAuthorizationChangeACL";
+const ACL_AUTH_INTEGRITY: &str = "ACLAuthorizationIntegrity";
+const ACL_AUTH_PARTITION: &str = "ACLAuthorizationPartitionID";
+const ACL_LOCK_FILE_NAME: &str = ".keychain-acl.lock";
 
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
@@ -68,6 +84,13 @@ unsafe extern "C" {
         access: *mut SecAccessRef,
     ) -> OSStatus;
     fn SecAccessCopyACLList(access: SecAccessRef, acl_list: *mut CFTypeRef) -> OSStatus;
+    fn SecACLCreateWithSimpleContents(
+        access: SecAccessRef,
+        application_list: CFArrayRef,
+        description: core_foundation_sys::string::CFStringRef,
+        prompt_selector: u16,
+        new_acl: *mut CFTypeRef,
+    ) -> OSStatus;
     fn SecACLCopyContents(
         acl: CFTypeRef,
         application_list: *mut CFTypeRef,
@@ -80,7 +103,8 @@ unsafe extern "C" {
         description: core_foundation_sys::string::CFStringRef,
         prompt_selector: u16,
     ) -> OSStatus;
-    fn SecACLCopyAuthorizations(acl: CFTypeRef, tags: *mut CFTypeRef) -> OSStatus;
+    fn SecACLCopyAuthorizations(acl: CFTypeRef) -> CFArrayRef;
+    fn SecACLUpdateAuthorizations(acl: CFTypeRef, authorizations: CFArrayRef) -> OSStatus;
     fn SecKeychainItemCopyAccess(item: CFTypeRef, access: *mut SecAccessRef) -> OSStatus;
     fn SecKeychainItemSetAccess(item: CFTypeRef, access: SecAccessRef) -> OSStatus;
     fn SecTrustedApplicationCopyData(
@@ -90,6 +114,8 @@ unsafe extern "C" {
 }
 
 use core_foundation_sys::string::CFStringRef;
+
+static LEGACY_ACL_RESULT: OnceLock<Mutex<Option<Result<(), String>>>> = OnceLock::new();
 
 enum ProtectedRead {
     Secret(Zeroizing<[u8; 32]>),
@@ -108,7 +134,7 @@ pub fn get_or_create_root_secret() -> Result<Zeroizing<[u8; 32]>, String> {
         match read_protected(&group) {
             ProtectedRead::Secret(secret) => return Ok(secret),
             ProtectedRead::Missing => {
-                if let Some(secret) = read_legacy_root() {
+                if let Some(secret) = try_read_legacy_root() {
                     if write_protected(&group, secret.as_slice()).is_ok() {
                         let _ = delete_legacy_root();
                         return Ok(secret);
@@ -168,28 +194,88 @@ pub fn list_legacy_generic_passwords(service: &str) -> Result<Vec<(String, Vec<u
 }
 
 fn legacy_root_secret() -> Result<Zeroizing<[u8; 32]>, String> {
-    if let Some(secret) = read_legacy_root() {
-        let _ = ensure_shared_legacy_acl();
-        return Ok(secret);
-    }
-    let secret = random_secret();
     if let Some(plan) = share_plan() {
-        if write_legacy_with_plan(&secret, &plan).is_ok() {
-            return Ok(secret);
-        }
+        return legacy_root_secret_with_plan(&plan);
     }
     let entry = keyring::Entry::new(ROOT_KEYRING_SERVICE, ROOT_KEYRING_ACCOUNT)
         .map_err(|error| format!("无法创建钥匙串入口 ({})", error_code(&error)))?;
+    match entry.get_secret() {
+        Ok(bytes) => return Ok(normalize_secret(&bytes)),
+        Err(keyring::Error::NoEntry) => {}
+        Err(error) => return Err(format!("无法读取根钥匙串条目 ({})", error_code(&error))),
+    }
+    let secret = random_secret();
     entry
         .set_secret(secret.as_slice())
         .map_err(|error| format!("无法在钥匙串中保存根密钥 ({})", error_code(&error)))?;
     Ok(secret)
 }
 
-fn read_legacy_root() -> Option<Zeroizing<[u8; 32]>> {
-    let entry = keyring::Entry::new(ROOT_KEYRING_SERVICE, ROOT_KEYRING_ACCOUNT).ok()?;
-    let bytes = entry.get_secret().ok()?;
-    Some(normalize_secret(&bytes))
+fn legacy_root_secret_with_plan(plan: &SharePlan) -> Result<Zeroizing<[u8; 32]>, String> {
+    let _lock = LegacyAclLock::acquire()?;
+    match legacy_item_ref()? {
+        Some(item) => {
+            ensure_shared_legacy_acl_once(&item, plan)?;
+            read_legacy_root()
+        }
+        None => {
+            ensure_shared_legacy_acl_once_for_missing(plan)?;
+            read_legacy_root()
+        }
+    }
+}
+
+struct LegacyAclLock {
+    file: File,
+}
+
+impl LegacyAclLock {
+    fn acquire() -> Result<Self, String> {
+        let app_data = crate::device_credentials::default_desktop_app_data_dir()
+            .ok_or("无法解析 VaultMesh 应用支持目录")?;
+        Self::acquire_in(&app_data)
+    }
+
+    fn acquire_in(app_data: &Path) -> Result<Self, String> {
+        fs::create_dir_all(app_data).map_err(|_| "无法创建 VaultMesh 应用支持目录".to_owned())?;
+        fs::set_permissions(app_data, fs::Permissions::from_mode(0o700))
+            .map_err(|_| "无法保护 VaultMesh 应用支持目录".to_owned())?;
+        let lock_path = app_data.join(ACL_LOCK_FILE_NAME);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .map_err(|_| "无法打开根钥匙串 ACL 锁".to_owned())?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|_| "无法保护根钥匙串 ACL 锁".to_owned())?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err("无法等待根钥匙串 ACL 锁".to_owned());
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for LegacyAclLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn read_legacy_root() -> Result<Zeroizing<[u8; 32]>, String> {
+    let entry = keyring::Entry::new(ROOT_KEYRING_SERVICE, ROOT_KEYRING_ACCOUNT)
+        .map_err(|error| format!("无法创建根钥匙串入口 ({})", error_code(&error)))?;
+    let bytes = entry
+        .get_secret()
+        .map_err(|error| format!("无法读取根钥匙串条目 ({})", error_code(&error)))?;
+    Ok(normalize_secret(&bytes))
+}
+
+fn try_read_legacy_root() -> Option<Zeroizing<[u8; 32]>> {
+    read_legacy_root().ok()
 }
 
 fn delete_legacy_root() -> Result<(), String> {
@@ -214,7 +300,7 @@ fn read_protected(group: &str) -> ProtectedRead {
     match generic_password(protected_options(group)) {
         Ok(bytes) => ProtectedRead::Secret(normalize_secret(&bytes)),
         Err(error) => match error.code() {
-            errSecItemNotFound => ProtectedRead::Missing,
+            code if code == errSecItemNotFound => ProtectedRead::Missing,
             ERR_SEC_MISSING_ENTITLEMENT => ProtectedRead::Unavailable,
             _ => ProtectedRead::Unavailable,
         },
@@ -255,24 +341,67 @@ fn share_plan() -> Option<SharePlan> {
     Some(SharePlan { paths, partitions })
 }
 
-fn ensure_shared_legacy_acl() -> Result<(), String> {
-    let Some(plan) = share_plan() else {
-        return Ok(());
-    };
-    let item = legacy_item_ref()?;
-    if item_already_shared(&item, &plan) {
-        return Ok(());
-    }
-    let access = access_for_plan(&plan)?;
-    let status =
-        unsafe { SecKeychainItemSetAccess(item.as_CFTypeRef(), access.as_concrete_TypeRef()) };
-    if status != 0 {
-        return Err(format!("无法更新根钥匙串授权 ({status})"));
-    }
-    Ok(())
+fn ensure_shared_legacy_acl_once(item: &CFType, plan: &SharePlan) -> Result<(), String> {
+    run_legacy_acl_once(|| {
+        if acl_is_exact(item, plan)? {
+            return Ok(());
+        }
+        repair_and_verify_legacy_acl(item, plan)
+    })
 }
 
-fn write_legacy_with_plan(secret: &[u8; 32], plan: &SharePlan) -> Result<(), String> {
+fn ensure_shared_legacy_acl_once_for_missing(plan: &SharePlan) -> Result<(), String> {
+    run_legacy_acl_once(|| {
+        let secret = random_secret();
+        match create_legacy_root_with_plan(&secret, plan) {
+            Ok(()) => Ok(()),
+            Err(CreateLegacyRootError::Duplicate) => {
+                let item = legacy_item_ref()?.ok_or("共享根钥匙串条目并发消失")?;
+                if acl_is_exact(&item, plan)? {
+                    return Ok(());
+                }
+                repair_and_verify_legacy_acl(&item, plan)
+            }
+            Err(CreateLegacyRootError::Message(error)) => Err(error),
+        }
+    })
+}
+
+fn run_legacy_acl_once(operation: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    run_once(&LEGACY_ACL_RESULT, operation)
+}
+
+fn run_once<T: Clone>(
+    cache: &OnceLock<Mutex<Option<Result<T, String>>>>,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let cache = cache.get_or_init(|| Mutex::new(None));
+    let mut state = cache
+        .lock()
+        .map_err(|_| "根钥匙串 ACL 互斥锁中毒".to_owned())?;
+    if let Some(result) = state.as_ref() {
+        return result.clone();
+    }
+    let result = operation();
+    *state = Some(result.clone());
+    result
+}
+
+enum CreateLegacyRootError {
+    Duplicate,
+    Message(String),
+}
+
+impl From<String> for CreateLegacyRootError {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
+}
+
+fn create_legacy_root_with_plan(
+    secret: &[u8; 32],
+    plan: &SharePlan,
+) -> Result<(), CreateLegacyRootError> {
     let access = access_for_plan(plan)?;
     let mut options =
         PasswordOptions::new_generic_password(ROOT_KEYRING_SERVICE, ROOT_KEYRING_ACCOUNT);
@@ -292,43 +421,20 @@ fn write_legacy_with_plan(secret: &[u8; 32], plan: &SharePlan) -> Result<(), Str
     if status == 0 {
         return Ok(());
     }
-    if status != errSecDuplicateItem {
-        return Err(format!("无法创建共享根钥匙串条目 ({status})"));
+    if status == errSecDuplicateItem {
+        return Err(CreateLegacyRootError::Duplicate);
     }
-    let query = PasswordOptions::new_generic_password(ROOT_KEYRING_SERVICE, ROOT_KEYRING_ACCOUNT);
-    let update_access = access_for_plan(plan)?;
-    let update = vec![
-        (
-            static_key(unsafe { kSecValueData }),
-            CFData::from_buffer(secret).into_CFType(),
-        ),
-        (
-            static_key(unsafe { kSecAttrAccess }),
-            update_access.into_CFType(),
-        ),
-    ];
-    let query_dict = CFDictionary::from_CFType_pairs(&query.query);
-    let update_dict = CFDictionary::from_CFType_pairs(&update);
-    let status = unsafe {
-        SecItemUpdate(
-            query_dict.as_concrete_TypeRef(),
-            update_dict.as_concrete_TypeRef(),
-        )
-    };
-    if status != 0 {
-        return Err(format!("无法更新共享根钥匙串条目 ({status})"));
-    }
-    Ok(())
+    Err(format!("无法创建共享根钥匙串条目 ({status})").into())
 }
 
 fn access_for_plan(plan: &SharePlan) -> Result<SecAccess, String> {
     let trusted = trusted_applications(&[&plan.paths.main_executable, &plan.paths.native_host])?;
     let mut raw: SecAccessRef = ptr::null_mut();
-    let descriptor = CFString::from("VaultMesh device root");
+    let descriptor = CFString::from(KEYCHAIN_DESCRIPTOR);
     let status = unsafe {
         SecAccessCreate(
             descriptor.as_concrete_TypeRef(),
-            trusted.as_CFTypeRef() as _,
+            trusted.array.as_CFTypeRef() as _,
             &mut raw,
         )
     };
@@ -337,15 +443,25 @@ fn access_for_plan(plan: &SharePlan) -> Result<SecAccess, String> {
     }
     let access = unsafe { SecAccess::wrap_under_create_rule(raw) };
     let hex = partition_plist_hex(&plan.partitions).ok_or("分区列表无效")?;
-    patch_partition_acl(access.as_concrete_TypeRef(), &trusted, &hex)?;
+    ensure_partition_acl(
+        access.as_concrete_TypeRef(),
+        &empty_trusted_applications(),
+        &hex,
+    )?;
     Ok(access)
 }
 
-fn trusted_applications(paths: &[&Path]) -> Result<CFType, String> {
+struct TrustedApplications {
+    array: CFType,
+    identities: BTreeSet<Vec<u8>>,
+}
+
+fn trusted_applications(paths: &[&Path]) -> Result<TrustedApplications, String> {
     if paths.len() != 2 {
         return Err("共享钥匙串只允许包内主程序和 Native Host".to_owned());
     }
     let mut apps = Vec::with_capacity(paths.len());
+    let mut identities = BTreeSet::new();
     for path in paths {
         let name = path
             .file_name()
@@ -361,16 +477,142 @@ fn trusted_applications(paths: &[&Path]) -> Result<CFType, String> {
         if status != 0 || app.is_null() {
             return Err(format!("无法信任包内可执行文件 ({status})"));
         }
-        apps.push(unsafe { CFType::wrap_under_create_rule(app) });
+        let app = unsafe { CFType::wrap_under_create_rule(app) };
+        let identity = trusted_application_identity(app.as_CFTypeRef())?;
+        if !identities.insert(identity) {
+            return Err("包内主程序和 Native Host 的钥匙串身份重复".to_owned());
+        }
+        apps.push(app);
     }
-    Ok(CFArray::from_CFTypes(&apps).into_CFType())
+    Ok(TrustedApplications {
+        array: CFArray::from_CFTypes(&apps).into_CFType(),
+        identities,
+    })
 }
 
-fn patch_partition_acl(
+fn empty_trusted_applications() -> CFType {
+    CFArray::<CFType>::from_CFTypes(&[]).into_CFType()
+}
+
+fn trusted_application_identity(app: CFTypeRef) -> Result<Vec<u8>, String> {
+    let mut data: core_foundation_sys::data::CFDataRef = ptr::null_mut();
+    let status = unsafe { SecTrustedApplicationCopyData(app, &mut data) };
+    if status != 0 || data.is_null() {
+        return Err(format!("无法读取钥匙串信任应用身份 ({status})"));
+    }
+    let data = unsafe { CFData::wrap_under_create_rule(data) };
+    Ok(data.bytes().to_vec())
+}
+
+fn ensure_partition_acl(
     access: SecAccessRef,
-    trusted: &CFType,
+    applications: &CFType,
     hex_plist: &str,
 ) -> Result<(), String> {
+    let records = copy_access_acl_records(access)?;
+    let partitions: Vec<&AclRecord> = records
+        .iter()
+        .filter(|record| acl_role(&record.authorizations) == AclRole::Partition)
+        .collect();
+    if let Some(partition) = partitions.first() {
+        set_acl_contents(partition.acl.as_CFTypeRef(), applications, hex_plist, 0)?;
+        return Ok(());
+    }
+    create_partition_acl(access, applications, hex_plist)?;
+    Ok(())
+}
+
+fn create_partition_acl(
+    access: SecAccessRef,
+    applications: &CFType,
+    hex_plist: &str,
+) -> Result<CFType, String> {
+    let description = CFString::from(hex_plist);
+    let mut raw_acl: CFTypeRef = ptr::null();
+    let status = unsafe {
+        SecACLCreateWithSimpleContents(
+            access,
+            applications.as_CFTypeRef() as _,
+            description.as_concrete_TypeRef(),
+            0,
+            &mut raw_acl,
+        )
+    };
+    if status != 0 || raw_acl.is_null() {
+        return Err(format!("无法创建钥匙串分区 ACL ({status})"));
+    }
+    let acl = unsafe { CFType::wrap_under_create_rule(raw_acl) };
+    let authorization = [CFString::from_static_string(ACL_AUTH_PARTITION)];
+    let authorizations = CFArray::from_CFTypes(&authorization);
+    let status = unsafe {
+        SecACLUpdateAuthorizations(acl.as_CFTypeRef(), authorizations.as_concrete_TypeRef())
+    };
+    if status != 0 {
+        return Err(format!("无法写入钥匙串分区授权 ({status})"));
+    }
+    Ok(acl)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AclRole {
+    Encrypt,
+    Decrypt,
+    Change,
+    Integrity,
+    Partition,
+    Other,
+}
+
+fn acl_role(authorizations: &[String]) -> AclRole {
+    if authorizations.iter().any(|value| value == ACL_AUTH_CHANGE) {
+        AclRole::Change
+    } else if authorizations
+        .iter()
+        .any(|value| value == ACL_AUTH_PARTITION)
+    {
+        AclRole::Partition
+    } else if authorizations
+        .iter()
+        .any(|value| value == ACL_AUTH_INTEGRITY)
+    {
+        AclRole::Integrity
+    } else if authorizations.iter().any(|value| value == ACL_AUTH_DECRYPT)
+        && authorizations.iter().any(|value| value == ACL_AUTH_DERIVE)
+    {
+        AclRole::Decrypt
+    } else if authorizations.iter().any(|value| value == ACL_AUTH_ENCRYPT) {
+        AclRole::Encrypt
+    } else {
+        AclRole::Other
+    }
+}
+
+struct AclRecord {
+    acl: CFType,
+    applications: Vec<Vec<u8>>,
+    authorizations: Vec<String>,
+    description: String,
+    prompt_selector: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AclFacts {
+    applications: Vec<Vec<u8>>,
+    authorizations: Vec<String>,
+    description: String,
+}
+
+impl From<&AclRecord> for AclFacts {
+    fn from(record: &AclRecord) -> Self {
+        Self {
+            applications: record.applications.clone(),
+            authorizations: record.authorizations.clone(),
+            description: record.description.clone(),
+        }
+    }
+}
+
+fn copy_access_acl_records(access: SecAccessRef) -> Result<Vec<AclRecord>, String> {
     let mut acl_list: CFTypeRef = ptr::null();
     let status = unsafe { SecAccessCopyACLList(access, &mut acl_list) };
     if status != 0 || acl_list.is_null() {
@@ -378,125 +620,246 @@ fn patch_partition_acl(
     }
     let list = unsafe { CFType::wrap_under_create_rule(acl_list) };
     let count = unsafe { CFArrayGetCount(list.as_CFTypeRef() as _) };
-    let description = CFString::from(hex_plist);
+    let mut records = Vec::with_capacity(count.max(0) as usize);
     for index in 0..count {
-        let acl = unsafe { CFArrayGetValueAtIndex(list.as_CFTypeRef() as _, index) };
-        if acl.is_null() || !acl_is_partition(acl) {
-            continue;
+        let raw_acl = unsafe { CFArrayGetValueAtIndex(list.as_CFTypeRef() as _, index) };
+        if raw_acl.is_null() {
+            return Err("钥匙串 ACL 包含空条目".to_owned());
         }
-        let status = unsafe {
-            SecACLSetContents(
-                acl,
-                trusted.as_CFTypeRef() as _,
-                description.as_concrete_TypeRef(),
-                0,
-            )
-        };
-        if status != 0 {
-            return Err(format!("无法写入钥匙串分区 ({status})"));
+        let acl = unsafe { CFType::wrap_under_get_rule(raw_acl) };
+        let contents = copy_acl_contents(raw_acl)?;
+        records.push(AclRecord {
+            applications: contents.applications,
+            authorizations: copy_acl_authorizations(raw_acl)?,
+            description: contents.description,
+            prompt_selector: contents.prompt_selector,
+            acl,
+        });
+    }
+    Ok(records)
+}
+
+struct AclContents {
+    applications: Vec<Vec<u8>>,
+    description: String,
+    prompt_selector: u16,
+}
+
+fn copy_acl_contents(acl: CFTypeRef) -> Result<AclContents, String> {
+    let mut apps: CFTypeRef = ptr::null();
+    let mut description: CFStringRef = ptr::null_mut();
+    let mut prompt = 0_u16;
+    let status = unsafe { SecACLCopyContents(acl, &mut apps, &mut description, &mut prompt) };
+    if status != 0 {
+        return Err(format!("无法读取钥匙串 ACL 内容 ({status})"));
+    }
+    let description = if description.is_null() {
+        String::new()
+    } else {
+        unsafe { CFString::wrap_under_create_rule(description) }.to_string()
+    };
+    let mut identities = Vec::new();
+    if !apps.is_null() {
+        let apps = unsafe { CFType::wrap_under_create_rule(apps) };
+        let count = unsafe { CFArrayGetCount(apps.as_CFTypeRef() as _) };
+        identities.reserve(count.max(0) as usize);
+        for index in 0..count {
+            let app = unsafe { CFArrayGetValueAtIndex(apps.as_CFTypeRef() as _, index) };
+            if app.is_null() {
+                return Err("钥匙串信任应用列表包含空条目".to_owned());
+            }
+            identities.push(trusted_application_identity(app)?);
         }
+    }
+    identities.sort();
+    if identities.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("钥匙串信任应用列表包含重复身份".to_owned());
+    }
+    Ok(AclContents {
+        applications: identities,
+        description,
+        prompt_selector: prompt,
+    })
+}
+
+fn copy_acl_authorizations(acl: CFTypeRef) -> Result<Vec<String>, String> {
+    let tags = unsafe { SecACLCopyAuthorizations(acl) };
+    if tags.is_null() {
+        return Err("无法读取钥匙串 ACL 授权".to_owned());
+    }
+    let tags = unsafe { CFType::wrap_under_create_rule(tags as CFTypeRef) };
+    Ok(cf_array_strings(tags.as_CFTypeRef()))
+}
+
+fn acl_is_exact(item: &CFType, plan: &SharePlan) -> Result<bool, String> {
+    let access = copy_item_access(item)?;
+    let trusted = trusted_applications(&[&plan.paths.main_executable, &plan.paths.native_host])?;
+    let records = copy_access_acl_records(access.as_concrete_TypeRef())?;
+    Ok(acl_records_are_exact(
+        &records,
+        &trusted.identities,
+        &plan.partitions,
+    ))
+}
+
+fn acl_records_are_exact(
+    records: &[AclRecord],
+    expected_applications: &BTreeSet<Vec<u8>>,
+    expected_partitions: &[String],
+) -> bool {
+    let facts: Vec<AclFacts> = records.iter().map(AclFacts::from).collect();
+    acl_facts_are_exact(&facts, expected_applications, expected_partitions)
+}
+
+fn acl_facts_are_exact(
+    records: &[AclFacts],
+    expected_applications: &BTreeSet<Vec<u8>>,
+    expected_partitions: &[String],
+) -> bool {
+    let mut observed_applications = BTreeSet::new();
+    let mut data_acl_count = 0_usize;
+    let mut partition_acl_count = 0_usize;
+    for record in records {
+        let role = acl_role(&record.authorizations);
+        if !record.applications.is_empty() {
+            if role != AclRole::Decrypt || record.applications.len() != 2 {
+                return false;
+            }
+            data_acl_count += 1;
+            observed_applications.extend(record.applications.iter().cloned());
+        }
+        if role == AclRole::Partition {
+            partition_acl_count += 1;
+            if !partitions_are_exact(&record.description, expected_partitions) {
+                return false;
+            }
+        }
+    }
+    data_acl_count == 1
+        && partition_acl_count >= 1
+        && observed_applications == *expected_applications
+}
+
+fn copy_item_access(item: &CFType) -> Result<SecAccess, String> {
+    let mut access: SecAccessRef = ptr::null_mut();
+    let status = unsafe { SecKeychainItemCopyAccess(item.as_CFTypeRef(), &mut access) };
+    if status != 0 || access.is_null() {
+        return Err(format!("无法读取根钥匙串访问控制 ({status})"));
+    }
+    Ok(unsafe { SecAccess::wrap_under_create_rule(access) })
+}
+
+fn repair_and_verify_legacy_acl(item: &CFType, plan: &SharePlan) -> Result<(), String> {
+    let access = copy_item_access(item)?;
+    normalize_access(access.as_concrete_TypeRef(), plan)?;
+    let status =
+        unsafe { SecKeychainItemSetAccess(item.as_CFTypeRef(), access.as_concrete_TypeRef()) };
+    if status == ERR_SEC_USER_CANCELED {
+        return Err("已取消 macOS 根钥匙串访问权限修复".to_owned());
+    }
+    if status != 0 {
+        return Err(format!("无法更新根钥匙串授权 ({status})"));
+    }
+    if !acl_is_exact(item, plan)? {
+        return Err("根钥匙串 ACL 写入后仍未收敛到唯一主程序和 Native Host".to_owned());
     }
     Ok(())
 }
 
-fn acl_is_partition(acl: CFTypeRef) -> bool {
-    let mut tags: CFTypeRef = ptr::null();
-    if unsafe { SecACLCopyAuthorizations(acl, &mut tags) } != 0 || tags.is_null() {
-        return false;
+fn normalize_access(access: SecAccessRef, plan: &SharePlan) -> Result<(), String> {
+    let trusted = trusted_applications(&[&plan.paths.main_executable, &plan.paths.native_host])?;
+    let empty = empty_trusted_applications();
+    let records = copy_access_acl_records(access)?;
+    let canonical_decrypt = choose_canonical_acl(&records, AclRole::Decrypt, |record| {
+        record.applications.len() == 2
+            && record.applications.iter().cloned().collect::<BTreeSet<_>>() == trusted.identities
+    })
+    .ok_or("根钥匙串 ACL 缺少可修复的解密授权")?;
+    if choose_canonical_acl(&records, AclRole::Encrypt, |_| true).is_none() {
+        return Err("根钥匙串 ACL 缺少加密授权".to_owned());
     }
-    let owned = unsafe { CFType::wrap_under_create_rule(tags) };
-    let count = unsafe { CFArrayGetCount(owned.as_CFTypeRef() as _) };
-    for index in 0..count {
-        let tag = unsafe { CFArrayGetValueAtIndex(owned.as_CFTypeRef() as _, index) };
-        if tag.is_null() || unsafe { CFGetTypeID(tag) } != unsafe { CFStringGetTypeID() } {
-            continue;
-        }
-        let text = unsafe { CFString::wrap_under_get_rule(tag as _) }.to_string();
-        if text.contains("Partition") {
-            return true;
+    if choose_canonical_acl(&records, AclRole::Change, |_| true).is_none() {
+        return Err("根钥匙串 ACL 缺少修改授权".to_owned());
+    }
+    let canonical_partition = choose_canonical_acl(&records, AclRole::Partition, |record| {
+        partitions_are_exact(&record.description, &plan.partitions)
+    });
+    let hex = partition_plist_hex(&plan.partitions).ok_or("分区列表无效")?;
+
+    for (index, record) in records.iter().enumerate() {
+        let role = acl_role(&record.authorizations);
+        match role {
+            AclRole::Decrypt if index == canonical_decrypt => {
+                set_acl_contents(
+                    record.acl.as_CFTypeRef(),
+                    &trusted.array,
+                    KEYCHAIN_DESCRIPTOR,
+                    0,
+                )?;
+            }
+            AclRole::Decrypt | AclRole::Encrypt | AclRole::Change => {
+                set_acl_contents(record.acl.as_CFTypeRef(), &empty, KEYCHAIN_DESCRIPTOR, 0)?;
+            }
+            AclRole::Partition => {
+                set_acl_contents(record.acl.as_CFTypeRef(), &empty, &hex, 0)?;
+            }
+            AclRole::Integrity | AclRole::Other if !record.applications.is_empty() => {
+                set_acl_contents(
+                    record.acl.as_CFTypeRef(),
+                    &empty,
+                    &record.description,
+                    record.prompt_selector,
+                )?;
+            }
+            AclRole::Integrity | AclRole::Other => {}
         }
     }
-    false
+    if canonical_partition.is_none() {
+        create_partition_acl(access, &empty, &hex)?;
+    }
+    Ok(())
 }
 
-fn item_already_shared(item: &CFType, plan: &SharePlan) -> bool {
-    let mut access: SecAccessRef = ptr::null_mut();
-    if unsafe { SecKeychainItemCopyAccess(item.as_CFTypeRef(), &mut access) } != 0
-        || access.is_null()
-    {
-        return false;
-    }
-    let access = unsafe { SecAccess::wrap_under_create_rule(access) };
-    let mut acl_list: CFTypeRef = ptr::null();
-    if unsafe { SecAccessCopyACLList(access.as_concrete_TypeRef(), &mut acl_list) } != 0
-        || acl_list.is_null()
-    {
-        return false;
-    }
-    let list = unsafe { CFType::wrap_under_create_rule(acl_list) };
-    let count = unsafe { CFArrayGetCount(list.as_CFTypeRef() as _) };
-    let mut saw_exact_clients = false;
-    let mut saw_partitions = false;
-    for index in 0..count {
-        let acl = unsafe { CFArrayGetValueAtIndex(list.as_CFTypeRef() as _, index) };
-        if acl.is_null() {
-            continue;
-        }
-        let mut apps: CFTypeRef = ptr::null();
-        let mut description: CFStringRef = ptr::null_mut();
-        let mut prompt = 0_u16;
-        if unsafe { SecACLCopyContents(acl, &mut apps, &mut description, &mut prompt) } != 0 {
-            continue;
-        }
-        if !apps.is_null() {
-            let paths = trusted_application_paths(apps);
-            let expected = [
-                plan.paths.main_executable.clone(),
-                plan.paths.native_host.clone(),
-            ];
-            if same_executable_set(&paths, &expected) {
-                saw_exact_clients = true;
-            }
-            unsafe { CFRelease(apps) };
-        }
-        if !description.is_null() {
-            let text = unsafe { CFString::wrap_under_create_rule(description) }.to_string();
-            if partitions_are_exact(&text, &plan.partitions) {
-                saw_partitions = true;
-            }
-        }
-    }
-    saw_exact_clients && saw_partitions
+fn choose_canonical_acl(
+    records: &[AclRecord],
+    role: AclRole,
+    preferred: impl Fn(&AclRecord) -> bool,
+) -> Option<usize> {
+    canonical_index(records, role, preferred).or_else(|| canonical_index(records, role, |_| true))
 }
 
-fn trusted_application_paths(apps: CFTypeRef) -> Vec<std::path::PathBuf> {
-    let count = unsafe { CFArrayGetCount(apps as _) };
-    let mut paths = Vec::new();
-    for index in 0..count {
-        let app = unsafe { CFArrayGetValueAtIndex(apps as _, index) };
-        if app.is_null() {
-            continue;
-        }
-        let mut data: core_foundation_sys::data::CFDataRef = ptr::null_mut();
-        if unsafe { SecTrustedApplicationCopyData(app, &mut data) } != 0 || data.is_null() {
-            continue;
-        }
-        let data = unsafe { CFData::wrap_under_create_rule(data) };
-        let bytes = data.bytes();
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(bytes.len());
-        if let Ok(text) = std::str::from_utf8(&bytes[..end]) {
-            if !text.is_empty() {
-                paths.push(std::path::PathBuf::from(text));
-            }
-        }
-    }
-    paths
+fn canonical_index(
+    records: &[AclRecord],
+    role: AclRole,
+    preferred: impl Fn(&AclRecord) -> bool,
+) -> Option<usize> {
+    records
+        .iter()
+        .position(|record| acl_role(&record.authorizations) == role && preferred(record))
 }
 
-fn legacy_item_ref() -> Result<CFType, String> {
+fn set_acl_contents(
+    acl: CFTypeRef,
+    applications: &CFType,
+    description: &str,
+    prompt_selector: u16,
+) -> Result<(), String> {
+    let description = CFString::from(description);
+    let status = unsafe {
+        SecACLSetContents(
+            acl,
+            applications.as_CFTypeRef() as _,
+            description.as_concrete_TypeRef(),
+            prompt_selector,
+        )
+    };
+    if status != 0 {
+        return Err(format!("无法写入钥匙串 ACL ({status})"));
+    }
+    Ok(())
+}
+
+fn legacy_item_ref() -> Result<Option<CFType>, String> {
     let query = dictionary(&[
         (
             static_key(unsafe { kSecClass }),
@@ -517,10 +880,13 @@ fn legacy_item_ref() -> Result<CFType, String> {
     ]);
     let mut result: CFTypeRef = ptr::null();
     let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
+    if status == errSecItemNotFound {
+        return Ok(None);
+    }
     if status != 0 || result.is_null() {
         return Err(format!("无法定位根钥匙串条目 ({status})"));
     }
-    Ok(unsafe { CFType::wrap_under_create_rule(result) })
+    Ok(Some(unsafe { CFType::wrap_under_create_rule(result) }))
 }
 
 fn signing_facts_for_self() -> Result<SigningFacts, ()> {
@@ -744,5 +1110,247 @@ fn error_code(error: &keyring::Error) -> String {
     match error {
         keyring::Error::NoEntry => "missing".to_owned(),
         _ => "platform".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn expected_applications() -> BTreeSet<Vec<u8>> {
+        BTreeSet::from([
+            b"/Applications/VaultMesh.app\0".to_vec(),
+            b"/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-native-host\0".to_vec(),
+        ])
+    }
+
+    fn partition_description(extra: Option<&str>) -> String {
+        let mut partitions = vec![
+            format!("cdhash:{}", "a".repeat(40)),
+            format!("cdhash:{}", "b".repeat(40)),
+        ];
+        if let Some(extra) = extra {
+            partitions.push(extra.to_owned());
+        }
+        let mut xml = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Partitions</key><array>",
+        );
+        for partition in partitions {
+            xml.push_str("<string>");
+            xml.push_str(&partition);
+            xml.push_str("</string>");
+        }
+        xml.push_str("</array></dict></plist>");
+        xml.bytes().fold(String::new(), |mut hex, byte| {
+            hex.push_str(&format!("{byte:02x}"));
+            hex
+        })
+    }
+
+    fn fact(authorizations: &[&str], applications: &[&[u8]], description: &str) -> AclFacts {
+        AclFacts {
+            applications: applications.iter().map(|value| value.to_vec()).collect(),
+            authorizations: authorizations
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            description: description.to_owned(),
+        }
+    }
+
+    fn expected_partitions() -> Vec<String> {
+        vec![
+            format!("cdhash:{}", "a".repeat(40)),
+            format!("cdhash:{}", "b".repeat(40)),
+        ]
+    }
+
+    #[test]
+    fn exact_acl_requires_only_two_trusted_apps_and_one_exact_partition() {
+        let expected = expected_applications();
+        let partitions = expected_partitions();
+        let exact = [
+            fact(&[ACL_AUTH_ENCRYPT], &[], KEYCHAIN_DESCRIPTOR),
+            fact(
+                &[ACL_AUTH_DECRYPT, ACL_AUTH_DERIVE],
+                &[
+                    b"/Applications/VaultMesh.app\0",
+                    b"/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-native-host\0",
+                ],
+                KEYCHAIN_DESCRIPTOR,
+            ),
+            fact(&[ACL_AUTH_CHANGE], &[], KEYCHAIN_DESCRIPTOR),
+            fact(&[ACL_AUTH_PARTITION], &[], &partition_description(None)),
+        ];
+        assert!(acl_facts_are_exact(&exact, &expected, &partitions));
+    }
+
+    #[test]
+    fn polluted_acl_rejects_extra_debug_unsigned_and_duplicate_trust() {
+        let expected = expected_applications();
+        let partitions = expected_partitions();
+        let mut polluted = vec![
+            fact(&[ACL_AUTH_ENCRYPT], &[], KEYCHAIN_DESCRIPTOR),
+            fact(
+                &[ACL_AUTH_DECRYPT, ACL_AUTH_DERIVE],
+                &[
+                    b"/Applications/VaultMesh.app\0",
+                    b"/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-native-host\0",
+                ],
+                KEYCHAIN_DESCRIPTOR,
+            ),
+            fact(&[ACL_AUTH_CHANGE], &[], KEYCHAIN_DESCRIPTOR),
+            fact(&[ACL_AUTH_PARTITION], &[], &partition_description(None)),
+        ];
+        assert!(acl_facts_are_exact(&polluted, &expected, &partitions));
+
+        polluted.push(fact(
+            &[ACL_AUTH_DECRYPT, ACL_AUTH_DERIVE],
+            &[b"/tmp/vaultmesh-tauri-desktop\0"],
+            KEYCHAIN_DESCRIPTOR,
+        ));
+        assert!(!acl_facts_are_exact(&polluted, &expected, &partitions));
+
+        polluted.pop();
+        polluted.push(fact(
+            &[ACL_AUTH_ENCRYPT],
+            &[b"/tmp/vaultmesh-native-host\0"],
+            KEYCHAIN_DESCRIPTOR,
+        ));
+        assert!(!acl_facts_are_exact(&polluted, &expected, &partitions));
+    }
+
+    #[test]
+    fn missing_or_stale_partition_is_not_exact_and_duplicate_partitions_must_agree() {
+        let expected = expected_applications();
+        let partitions = expected_partitions();
+        let mut records = vec![
+            fact(&[ACL_AUTH_ENCRYPT], &[], KEYCHAIN_DESCRIPTOR),
+            fact(
+                &[ACL_AUTH_DECRYPT, ACL_AUTH_DERIVE],
+                &[
+                    b"/Applications/VaultMesh.app\0",
+                    b"/Applications/VaultMesh.app/Contents/MacOS/vaultmesh-native-host\0",
+                ],
+                KEYCHAIN_DESCRIPTOR,
+            ),
+            fact(&[ACL_AUTH_CHANGE], &[], KEYCHAIN_DESCRIPTOR),
+        ];
+        assert!(!acl_facts_are_exact(&records, &expected, &partitions));
+
+        records.push(fact(
+            &[ACL_AUTH_PARTITION],
+            &[],
+            &partition_description(Some("unsigned:")),
+        ));
+        assert!(!acl_facts_are_exact(&records, &expected, &partitions));
+
+        records.pop();
+        records.push(fact(
+            &[ACL_AUTH_PARTITION],
+            &[],
+            &partition_description(None),
+        ));
+        assert!(acl_facts_are_exact(&records, &expected, &partitions));
+
+        records.push(fact(
+            &[ACL_AUTH_PARTITION],
+            &[],
+            &partition_description(None),
+        ));
+        assert!(acl_facts_are_exact(&records, &expected, &partitions));
+
+        records.pop();
+        records.push(fact(
+            &[ACL_AUTH_PARTITION],
+            &[],
+            &partition_description(Some(&format!("cdhash:{}", "c".repeat(40)))),
+        ));
+        assert!(!acl_facts_are_exact(&records, &expected, &partitions));
+    }
+
+    #[test]
+    fn security_authorization_api_can_patch_an_in_memory_partition_acl() {
+        let empty = empty_trusted_applications();
+        let descriptor = CFString::from(KEYCHAIN_DESCRIPTOR);
+        let mut raw_access: SecAccessRef = ptr::null_mut();
+        let status = unsafe {
+            SecAccessCreate(
+                descriptor.as_concrete_TypeRef(),
+                empty.as_CFTypeRef() as _,
+                &mut raw_access,
+            )
+        };
+        assert_eq!(status, 0);
+        assert!(!raw_access.is_null());
+        let access = unsafe { SecAccess::wrap_under_create_rule(raw_access) };
+
+        let initial = copy_access_acl_records(access.as_concrete_TypeRef()).unwrap();
+        assert!(
+            initial
+                .iter()
+                .any(|record| acl_role(&record.authorizations) == AclRole::Decrypt)
+        );
+        assert!(
+            initial
+                .iter()
+                .any(|record| acl_role(&record.authorizations) == AclRole::Encrypt)
+        );
+        assert!(
+            initial
+                .iter()
+                .any(|record| acl_role(&record.authorizations) == AclRole::Change)
+        );
+
+        let partitions = expected_partitions();
+        let description = partition_description(None);
+        ensure_partition_acl(access.as_concrete_TypeRef(), &empty, &description).unwrap();
+        let patched = copy_access_acl_records(access.as_concrete_TypeRef()).unwrap();
+        let partition_records: Vec<_> = patched
+            .iter()
+            .filter(|record| acl_role(&record.authorizations) == AclRole::Partition)
+            .collect();
+        assert_eq!(partition_records.len(), 1);
+        assert!(partitions_are_exact(
+            &partition_records[0].description,
+            &partitions
+        ));
+    }
+
+    #[test]
+    fn acl_repair_attempt_is_cached_for_the_process_lifetime() {
+        let cache = OnceLock::new();
+        let attempts = AtomicUsize::new(0);
+        let operation = || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), String>("cancelled".to_owned())
+        };
+
+        assert_eq!(run_once(&cache, &operation).unwrap_err(), "cancelled");
+        assert_eq!(run_once(&cache, &operation).unwrap_err(), "cancelled");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn acl_lock_file_stays_inside_owner_only_app_data() {
+        let root =
+            std::env::temp_dir().join(format!("vaultmesh-keychain-lock-{}", uuid::Uuid::new_v4()));
+        {
+            let _lock = LegacyAclLock::acquire_in(&root).unwrap();
+            assert_eq!(
+                fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(root.join(ACL_LOCK_FILE_NAME))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }

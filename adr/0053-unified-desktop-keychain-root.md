@@ -3,6 +3,7 @@
 - 状态：Accepted
 - 日期：2026-10-28
 - 修订：2026-11-03（包内双二进制共享根条目，取消命中后的旧钥匙串回退）
+- 修订：2026-11-06（精确化 ad-hoc ACL 身份、全量校验与一次性修复，杜绝重复授权弹窗）
 - 关联 Work：`CHG-2026-079-unified-desktop-keychain-root`
 - 关闭 OPEN：无
 
@@ -25,6 +26,8 @@
    * macOS 优先使用数据保护钥匙串和 Keychain Access Group `$(TeamIdentifierPrefix)com.vaultmesh.desktop`。主程序与包内 `Contents/MacOS/vaultmesh-native-host` 必须带同一 Team ID 的该 entitlement。读取签名信息必须使用 `kSecCSSigningInformation`；访问组来自 `kSecCodeInfoEntitlementsDict`，该字典不存在时再解析 `kSecCodeInfoEntitlements` 的 `CFData`。不得把这份 Data 当作字典。
    * 给已签名二进制补上访问组时，必须先导出现有 entitlements，合并访问组后再重签。不得用只含访问组的 plist 覆盖 Hardened Runtime、WebKit/JIT 或其他既有 entitlement。
    * 没有 Team ID 的 ad-hoc 签名包不能使用 Access Group。此时根条目仍可留在文件钥匙串，但创建和每一次更新都必须把信任应用写成且仅写成上述两个包内可执行文件，并把分区列表写成二者的 cdhash；两者 Team ID 相同时再追加同一个 `teamid:`。
+   * macOS 文件钥匙串必须按 `SecTrustedApplicationCopyData` 的不透明身份比较信任应用，不能把返回值重新解释为可执行文件路径；主程序可被系统归一化为 `.app` 身份。校验必须汇总整个 Access 的全部 ACL，要求非空信任应用并集恰好是双二进制，且至少一个 PartitionID ACL 存在并且所有 PartitionID ACL 都精确匹配当前分区列表。`SecACLCopyAuthorizations` 按 macOS 头文件直接返回 `CFArrayRef`，不得声明错误的 out 参数 ABI。
+   * 读取根条目前先执行上述校验。主程序与 Host 必须用 VaultMesh 应用支持目录内 owner-only 非秘密文件锁串行检查和读取；同一进程只缓存一次 ACL 尝试结果。精确 ACL 不得进入写路径；旧 ACL 只允许在 VaultMesh 根条目内部清空非规范信任，将一个解密 ACL 收敛为双二进制并把所有 PartitionID ACL 更新为当前列表，然后调用一次 `SecKeychainItemSetAccess` 并复读验证。修复不得删除钥匙串条目或 ACL，不得遍历、修改或清理其他软件的条目。取消或复验失败必须 fail closed，同一进程不得通过旧钥匙串读取继续或重复提示。
    * 未签名二进制、`vaultmesh-bitwarden-dev-host`、`vaultmesh-agent-mcp` 以及其他包外或第三方程序不得进入 Access Group 或 Trusted Applications。Native Messaging 注册路径必须指向 `.app` 内的 Host。
 
 3. **本地统一加密凭据库（Device Credentials Store）**：
@@ -66,4 +69,5 @@
 - 覆盖已知旧 Service 的一次性迁移与清理，并证明迁移完成后统一读取不再访问旧条目。
 - 覆盖包内路径约束：Native Messaging 只注册 `.app/Contents/MacOS/vaultmesh-native-host`。
 - `AT-SEC-001` / `AT-BROWSER-001` 在带同一 Team ID 的签名 macOS 包上验证：一次授权后，冷启动和浏览器自动填充不再弹出钥匙串密码。
+- `AT-SEC-002` 在隔离的 ad-hoc macOS 包上验证：污染 ACL 首次修复最多授权一次，之后主程序冷启动与重复浏览器自动填充不再出现根钥匙串读取或访问许可弹窗。
 - 通过 `CT-SEC-002`、`CT-AGENT-AUTH-001`、`cargo test` 与 `pnpm tauri:test` 全量回归。

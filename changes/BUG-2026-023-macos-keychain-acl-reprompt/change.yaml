@@ -1,0 +1,30 @@
+schema: "2"
+id: "BUG-2026-023-macos-keychain-acl-reprompt"
+title: "修复 macOS 根钥匙串 ACL 重复授权弹窗"
+type: "bug"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "修复 ad-hoc 桌面包每次启动反复改写根钥匙串 ACL 并弹窗的问题，同时清理已污染 ACL、保持根密钥和统一凭据库不变并增加可复现回归验证"
+requirements:
+  - "REQ-SEC-002"
+  - "REQ-BROWSER-001"
+tests:
+  - "CT-SEC-002"
+  - "AT-SEC-002"
+adrs:
+  - "ADR-0053"
+context_refs:
+  - "adr/0053-unified-desktop-keychain-root.md"
+  - "docs/07-test-release-plan.md#CT-SEC-002"
+related_changes:
+  - "CHG-2026-079-unified-desktop-keychain-root"
+boundaries:
+  - "macos-keychain-acl"
+  - "desktop-runtime"
+  - "browser-native-host"
+risks:
+  - "ACL 判断或规范化错误可能扩大钥匙串信任、导致用户取消后继续重试，或使根密钥不可读"
+  - "修复不得读取、记录、迁移或替换用户根密钥和 device-credentials.enc 内容"
+next:
+  - "用户在隔离的 ad-hoc macOS 安装中执行 AT-SEC-002，确认首次修复后冷启动与重复浏览器请求不再出现根钥匙串弹窗"
