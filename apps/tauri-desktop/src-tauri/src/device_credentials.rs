@@ -77,6 +77,16 @@ impl RootSecretStore for PlatformRootSecretStore {
 
 pub struct PlatformLegacyKeyring;
 
+struct NoLegacyKeyring;
+
+impl LegacyKeyringProvider for NoLegacyKeyring {
+    fn list_legacy_secrets(&self, _service: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+        Ok(Vec::new())
+    }
+
+    fn delete_legacy_secret(&self, _service: &str, _account: &str) {}
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 impl LegacyKeyringProvider for PlatformLegacyKeyring {
     fn list_legacy_secrets(&self, service: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
@@ -117,6 +127,9 @@ struct DeviceCredentialStoreInner {
     root_secret: Zeroizing<[u8; 32]>,
     legacy_provider: Arc<dyn LegacyKeyringProvider>,
     entries: HashMap<String, String>,
+    /// Set when the OS root secret could not be opened. Every read and write
+    /// then fails closed with this non-secret reason instead of aborting startup.
+    unavailable: Option<String>,
 }
 
 #[derive(Clone)]
@@ -433,6 +446,7 @@ impl DeviceCredentialStore {
                 root_secret,
                 legacy_provider,
                 entries: loaded.entries,
+                unavailable: None,
             })),
         };
         if scan_legacy {
@@ -445,6 +459,25 @@ impl DeviceCredentialStore {
             inner.save()?;
         }
         Ok(store)
+    }
+
+    /// A store that rejects every operation. Used when the root keychain item
+    /// cannot be opened so the app can still start and unlock with the master
+    /// password while PIN, biometric and pairing features stay disabled.
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(DeviceCredentialStoreInner {
+                file_path: PathBuf::new(),
+                root_secret: Zeroizing::new([0u8; 32]),
+                legacy_provider: Arc::new(NoLegacyKeyring),
+                entries: HashMap::new(),
+                unavailable: Some(reason.into()),
+            })),
+        }
+    }
+
+    pub fn unavailable_reason(&self) -> Option<String> {
+        self.inner.lock().ok().and_then(|inner| inner.unavailable.clone())
     }
 
     fn migrate_known_legacy_services(&self, force_reseal: bool) -> Result<(), String> {
@@ -513,6 +546,9 @@ impl DeviceCredentialStore {
             .inner
             .lock()
             .map_err(|_| "凭据互斥锁中毒".to_string())?;
+        if let Some(reason) = &inner.unavailable {
+            return Err(reason.clone());
+        }
         let key = entry_key(service, account);
         let Some(encoded) = inner.entries.get(&key) else {
             return Ok(None);
@@ -539,6 +575,9 @@ impl DeviceCredentialStore {
             .inner
             .lock()
             .map_err(|_| "凭据互斥锁中毒".to_string())?;
+        if let Some(reason) = &inner.unavailable {
+            return Err(reason.clone());
+        }
         let key = entry_key(service, account);
         inner.entries.insert(key, STANDARD.encode(secret));
         inner.save()?;
@@ -554,6 +593,9 @@ impl DeviceCredentialStore {
             .inner
             .lock()
             .map_err(|_| "凭据互斥锁中毒".to_string())?;
+        if let Some(reason) = &inner.unavailable {
+            return Err(reason.clone());
+        }
         let key = entry_key(service, account);
         let removed = inner.entries.remove(&key).is_some();
         if removed {
@@ -674,6 +716,17 @@ mod tests {
 
     use super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn unavailable_store_fails_closed_without_panicking() {
+        let store = DeviceCredentialStore::unavailable("根钥匙串不可用 (-128)");
+        assert_eq!(store.unavailable_reason().as_deref(), Some("根钥匙串不可用 (-128)"));
+        assert!(store.get("svc", "acc").is_err());
+        assert!(store.set("svc", "acc", b"x").is_err());
+        assert!(store.delete("svc", "acc").is_err());
+        assert!(store.scoped("svc").get("acc").is_err());
+        assert!(store.read_unified_secret("svc", "acc").is_err());
+    }
 
     #[test]
     fn test_device_credential_store_crud_and_persistence() {

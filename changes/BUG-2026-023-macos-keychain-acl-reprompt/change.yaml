@@ -5,7 +5,7 @@ type: "bug"
 status: "Active"
 spec_revision: "0.1.53-active"
 target_release: null
-goal: "修复 ad-hoc 桌面包每次启动反复改写根钥匙串 ACL 并弹窗的问题，同时清理已污染 ACL、保持根密钥和统一凭据库不变并增加可复现回归验证"
+goal: "修复 ad-hoc 桌面包每次启动反复改写根钥匙串 ACL 并弹窗的问题，同时清理已污染 ACL、保持根密钥和统一凭据库不变并增加可复现回归验证；钥匙串失败或取消时桌面启动不得 abort，未签名或签名不完整的发布包不得访问生产根条目"
 requirements:
   - "REQ-SEC-002"
   - "REQ-BROWSER-001"
@@ -26,5 +26,6 @@ boundaries:
 risks:
   - "ACL 判断或规范化错误可能扩大钥匙串信任、导致用户取消后继续重试，或使根密钥不可读"
   - "修复不得读取、记录、迁移或替换用户根密钥和 device-credentials.enc 内容"
+  - "降级启动后 PIN、生物识别与配对停用，必须显示原因，不能静默失败或把失败当作已解锁"
 next:
   - "用户在隔离的 ad-hoc macOS 安装中执行 AT-SEC-002，确认首次修复后冷启动与重复浏览器请求不再出现根钥匙串弹窗"
