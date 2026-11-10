@@ -52,6 +52,24 @@ opt-level = 3
 [profile.dev.package.salsa20]
 opt-level = 3
 
+# `cargo test` only: the LAN sync tests move multi-megabyte encrypted Vaults
+# through serde_json, ChaCha20-Poly1305, SHA-256 and zeroize. Their generic
+# hot paths are instantiated in vault-core/sync/ffi, so unoptimized test builds
+# spent over 80 s of CPU in one large-merge test. Optimize third-party crates
+# and the Vault data path in the test profile only; `pnpm tauri:dev` keeps the
+# unoptimized dev profile, and test inputs and assertions are unchanged.
+[profile.test.package."*"]
+opt-level = 2
+
+[profile.test.package.vaultmesh-core]
+opt-level = 1
+
+[profile.test.package.vaultmesh-sync]
+opt-level = 1
+
+[profile.test.package.vaultmesh-ffi]
+opt-level = 1
+
 # macOS 27+ dyld requires 8-byte aligned __LINKEDIT string pools (LC_SYMTAB.stroff),
 # whereas rustc 1.95's implicit `-C strip=debuginfo` with MACOSX_DEPLOYMENT_TARGET=12.0
 # can leave proc-macro dylibs and release binaries 4-byte aligned when indirect symbols
