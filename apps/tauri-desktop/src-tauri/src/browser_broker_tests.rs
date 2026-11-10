@@ -1349,3 +1349,132 @@ fn ct_browser_002_one_shot_fill_enforces_master_password_reprompt_and_lock_free_
     drop(broker);
     fs::remove_dir_all(root).expect("cleanup");
 }
+
+#[test]
+fn test_browser_broker_http_listener_discover_and_security_and_rpc() {
+    let (root, _path, broker, secret) = setup("http-broker-test");
+    let listener = BrowserBrokerHttpListener::start_with_port(
+        Arc::new(Mutex::new(broker)),
+        0,
+    )
+    .expect("start http listener on port 0");
+    let port = listener.port();
+    assert!(port > 0);
+    assert!(listener.is_healthy());
+
+    // 1. GET /discover (valid)
+    {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream.write_all(b"GET /discover HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").expect("write");
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).expect("read");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_str.contains("\"service\":\"vaultmesh-desktop\""));
+        assert!(resp_str.contains(&format!("\"port\":{port}")));
+        assert!(!resp_str.to_lowercase().contains("access-control-allow-origin"));
+    }
+
+    // 2. GET /discover with Origin: header -> MUST BE 403 Forbidden
+    {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream.write_all(b"GET /discover HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.com\r\nConnection: close\r\n\r\n").expect("write");
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).expect("read");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 403 Forbidden"), "evil origin must be blocked");
+    }
+
+    // 3. POST /rpc with Sec-Fetch-Site -> MUST BE 403 Forbidden
+    {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream.write_all(b"POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nSec-Fetch-Site: cross-site\r\nConnection: close\r\n\r\n").expect("write");
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).expect("read");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 403 Forbidden"), "sec-fetch must be blocked");
+    }
+
+    // 4. OPTIONS /rpc -> MUST BE 403 Forbidden
+    {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream.write_all(b"OPTIONS /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").expect("write");
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).expect("read");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 403 Forbidden"), "OPTIONS must be blocked");
+    }
+
+    // 5. POST /rpc with missing or invalid X-VaultMesh-Browser-Origin -> 403
+    {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream.write_all(b"POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nX-VaultMesh-Browser-Origin: invalid-id\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").expect("write");
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).expect("read");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 403 Forbidden"));
+    }
+
+    // 6. POST /rpc with valid origin and valid envelope -> 200 OK
+    {
+        let now = Utc::now();
+        let request_id = Uuid::new_v4();
+        let message = json!({
+            "kind": "vaultmesh.rpc",
+            "version": RPC_VERSION,
+            "requestId": request_id,
+            "issuedAt": now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "expiresAt": (now + chrono::Duration::seconds(60)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            "operation": "vault.status",
+            "input": {}
+        });
+        let body = envelope(&message, &secret);
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let header = format!(
+            "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nX-VaultMesh-Browser-Origin: chrome-extension://bdneegbnjbheblmamalplnddbodcghbg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write header");
+        stream.write_all(&body).expect("write body");
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).expect("read");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"), "{resp_str}");
+        assert!(resp_str.contains("\"ok\":true"));
+        assert!(resp_str.contains(&request_id.to_string()));
+    }
+
+    // 7. POST /rpc with direct raw JSON message (no envelope) -> 200 OK
+    {
+        let now = Utc::now();
+        let request_id = Uuid::new_v4();
+        let raw_message = json!({
+            "kind": "vaultmesh.rpc",
+            "version": RPC_VERSION,
+            "requestId": request_id,
+            "issuedAt": now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "expiresAt": (now + chrono::Duration::seconds(60)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            "operation": "vault.status",
+            "input": {}
+        });
+        let body = serde_json::to_vec(&raw_message).unwrap();
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let header = format!(
+            "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nX-VaultMesh-Browser-Origin: chrome-extension://bdneegbnjbheblmamalplnddbodcghbg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write header");
+        stream.write_all(&body).expect("write body");
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).expect("read");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"), "{resp_str}");
+        assert!(resp_str.contains("\"ok\":true"));
+        assert!(resp_str.contains(&request_id.to_string()));
+    }
+
+    listener.stop();
+    assert!(!listener.is_healthy());
+    drop(listener);
+    let _ = fs::remove_dir_all(root);
+}

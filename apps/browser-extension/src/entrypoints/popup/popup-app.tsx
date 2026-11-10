@@ -653,7 +653,13 @@ export function PopupApp({ initialWorkspace = null }: { initialWorkspace?: Initi
       <section className="flex min-h-0 flex-1 flex-col gap-3" aria-busy={activeTab === "vault" && loading}>
         {activeTab === "vault" && pageInformation ? <PageInformationPanel capture={pageInformation.capture} busy={pageInformationBusy} onCancel={() => setPageInformation(null)} onRescan={() => void recognizeCurrentPage()} onSave={(data) => void saveCurrentPageInformation(data)} /> : activeTab === "vault" && editingItem?.type === "登录" ? <EditLoginPanel id={editingItem.id} onCancel={() => setEditingItem(null)} onPasskeysChanged={async () => { await refreshWorkspace(); setNotice("Passkey 已从 VaultMesh 永久删除；网站端登记不会自动撤销。", "success"); }} onScanTotp={scanCurrentPageTotp} onSaved={async () => { setEditingItem(null); await refreshWorkspace(); setNotice("登录信息已更新。", "success"); }} /> : activeTab === "vault" && editingItem ? <AddItemPanel kind={addKindForType(editingItem.type)} editId={editingItem.id} onCancel={() => setEditingItem(null)} onSaved={async () => { const type = editingItem.type; setEditingItem(null); await refreshWorkspace(); setNotice(`${type}已更新。`, "success"); }} /> : activeTab === "vault" && adding ? <AddItemPanel kind={adding} onCancel={() => setAdding(null)} onSaved={async () => { setAdding(null); await refreshWorkspace(); setNotice("项目已保存到保险库。", "success"); }} /> : activeTab === "vault" ? (
           <>
-          {shouldShowDesktopConnection(desktopState, loading) ? <DesktopConnection state={desktopState} /> : null}
+          {shouldShowDesktopConnection(desktopState, loading) ? (
+            <DesktopConnection
+              state={desktopState}
+              onRetry={() => void refreshWorkspace()}
+              retrying={loading}
+            />
+          ) : null}
           {desktopState === "unavailable" ? <PasskeyUnlockNotice /> : null}
           <div className="flex shrink-0 items-center gap-2">
             <Tabs className="min-w-0 flex-1" value={activeType} onValueChange={(value) => setActiveType(value as VaultItemType)}>
@@ -882,9 +888,51 @@ function VaultWorkspaceSkeleton() {
   );
 }
 
-function DesktopConnection({ state }: { state: DesktopState }) {
-  const text = state === "locked" ? "插件已锁定，需要单独解锁。" : state === "error" ? "无法读取桌面端保险库。" : "未连接 VaultMesh 桌面端。";
-  return <ToastMessage id="desktop-connection" message={text} variant={state === "error" ? "error" : "warning"} />;
+function DesktopConnection({
+  state,
+  onRetry,
+  retrying = false,
+}: {
+  state: DesktopState;
+  onRetry?: () => void;
+  retrying?: boolean;
+}) {
+  if (state === "ready") return null;
+  if (state === "locked") {
+    return <ToastMessage id="desktop-connection" message="插件已锁定，需要单独解锁。" variant="warning" />;
+  }
+
+  const isUnavailable = state === "unavailable";
+  const title = isUnavailable ? "未连接 VaultMesh 桌面端" : "桌面端连接异常";
+  const description = isUnavailable
+    ? "请确保桌面端已在后台运行。若持续断开，可在桌面端「设置 → 浏览器连接」运行 Doctor 一键体检。"
+    : "无法读取桌面端保险库，请重试或在桌面端检查状态。";
+
+  return (
+    <div
+      className="flex flex-col gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-900 dark:text-amber-200"
+      role="alert"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="font-semibold">{title}</div>
+          <div className="mt-0.5 text-muted-foreground">{description}</div>
+        </div>
+        {onRetry ? (
+          <Button
+            size="sm"
+            variant="outline"
+            className="shrink-0 h-6 text-xs px-2"
+            disabled={retrying}
+            onClick={onRetry}
+          >
+            <RefreshCwIcon className={`h-3 w-3 mr-1 ${retrying ? "animate-spin" : ""}`} />
+            重试连接
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 function toVaultItems(snapshot: WorkspaceSnapshot, suggestedIds?: ReadonlySet<string>): VaultItem[] {

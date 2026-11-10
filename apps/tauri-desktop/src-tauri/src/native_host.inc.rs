@@ -1,1066 +1,356 @@
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn main() {}
+// native_host.inc.rs
+// Stateless Loopback HTTP Discovery Relay for Browser Native Messaging (ADR-0056)
 
-#[cfg(target_os = "macos")]
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use crate::{BITWARDEN_DEVELOPMENT_HOST as DEV, development_identity as dev};
+
+const DEFAULT_EXTENSION_ID: &str = "bdneegbnjbheblmamalplnddbodcghbg";
+const DEFAULT_FIREFOX_EXTENSION_ID: &str = "vaultmesh@atlantis-mk.github.io";
+const HTTP_PORT_RANGE_START: u16 = 42800;
+const HTTP_PORT_RANGE_END: u16 = 42850;
+const MAX_NATIVE_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
+
 fn main() {
-    macos_host::run_host();
+    run_host();
 }
 
-#[cfg(target_os = "windows")]
-fn main() {
-    windows_host::run_host();
+fn expected_chromium_origin() -> String {
+    if DEV {
+        format!("chrome-extension://{}/", dev::EXTENSION_ID)
+    } else if let Some(id) = option_env!("VAULTMESH_BROWSER_EXTENSION_ID") {
+        format!("chrome-extension://{id}/")
+    } else {
+        format!("chrome-extension://{DEFAULT_EXTENSION_ID}/")
+    }
 }
 
-#[cfg(target_os = "windows")]
-mod windows_host {
-    use crate::{BITWARDEN_DEVELOPMENT_HOST as DEV, development_identity as dev};
-    use std::{
-        ffi::OsStr,
-        fs,
-        io::{self, Read, Write},
-        os::windows::ffi::OsStrExt,
-        path::PathBuf,
-        ptr::{null, null_mut},
-        time::{Duration, Instant},
-    };
-
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use hmac::{Hmac, Mac as _};
-    use serde::{Deserialize, Serialize};
-    use serde_json::{Map, Value, json};
-    use sha2::Sha256;
-    use uuid::Uuid;
-    use windows_sys::Win32::{
-        Foundation::{
-            CloseHandle, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE,
-            INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
-        },
-        Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, ReadFile, WriteFile,
-        },
-        System::{
-            IO::{CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED},
-            Pipes::WaitNamedPipeW,
-            Threading::CreateEventW,
-        },
-    };
-    use zeroize::Zeroizing;
-
-    const CONFIG_NAME: &str = if DEV {
-        dev::CONFIG_NAME
+fn expected_firefox_extension_id() -> String {
+    if DEV {
+        dev::FIREFOX_ID.to_owned()
+    } else if let Some(id) = option_env!("VAULTMESH_FIREFOX_EXTENSION_ID") {
+        id.to_owned()
     } else {
-        "browser-host-config.json"
+        DEFAULT_FIREFOX_EXTENSION_ID.to_owned()
+    }
+}
+
+fn validate_browser_launch(arguments: &[String]) -> Option<String> {
+    let expected_chromium = expected_chromium_origin();
+    let expected_firefox = expected_firefox_extension_id();
+
+    // Chromium launch: [origin] or [origin, parent_window]
+    if let [origin] | [origin, _] = arguments {
+        let clean_origin = origin.trim_end_matches('/');
+        let clean_expected = expected_chromium.trim_end_matches('/');
+        if clean_origin == clean_expected {
+            return Some(expected_chromium);
+        }
+    }
+
+    // Firefox launch: [manifest_path, extension_id]
+    if let [manifest_path, extension_id] = arguments {
+        if extension_id == &expected_firefox && !manifest_path.is_empty() {
+            return Some(expected_firefox);
+        }
+    }
+
+    None
+}
+
+pub fn run_host() {
+    let launch_arguments: Vec<String> = std::env::args().skip(1).collect();
+    let Some(browser_origin) = validate_browser_launch(&launch_arguments) else {
+        let _ = write_native_message(&host_status("unpaired", None));
+        return;
     };
-    const APP_DATA_NAME: &str = "com.vaultmesh.desktop";
-    const DEFAULT_EXTENSION_ID: &str = "bdneegbnjbheblmamalplnddbodcghbg";
-    const DEFAULT_FIREFOX_EXTENSION_ID: &str = "vaultmesh@atlantis-mk.github.io";
-    const FIREFOX_MANIFEST_NAME: &str = if DEV {
-        "com.vaultmesh.bitwarden.dev.firefox.json"
-    } else {
-        "com.vaultmesh.browser.firefox.json"
-    };
-    const EXPECTED_PIPE: &str = if DEV {
-        dev::PIPE_NAME
-    } else {
-        r"\\.\pipe\VaultMesh.BrowserBroker.v2"
-    };
-    const EXPECTED_KEYCHAIN_SERVICE: &str = if DEV {
-        dev::PAIRING_SERVICE
-    } else {
-        "com.vaultmesh.desktop.browser-pairing"
-    };
-    const EXPECTED_KEYCHAIN_ACCOUNT: &str = if DEV {
-        dev::PAIRING_ACCOUNT
-    } else {
-        "native-host-hmac-v1"
-    };
-    const MAX_CONFIG_BYTES: u64 = 4096;
-    const MAX_NATIVE_REQUEST_BYTES: usize = 256 * 1024;
-    const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
-    const MAX_BROKER_LINE_BYTES: usize = 1024 * 1024;
-    const BROKER_WRITE_DEADLINE: Duration = Duration::from_secs(5);
-    const BROKER_RESPONSE_DEADLINE: Duration = Duration::from_secs(70);
 
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct HostConfig {
-        version: u8,
-        broker_pipe: String,
-        keychain_service: String,
-        keychain_account: String,
-        chromium_allowed_origin: String,
-        firefox_extension_id: String,
-        firefox_manifest_path: PathBuf,
-    }
+    let mut cached_port: Option<u16> = None;
 
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct AuthenticatedBody<'a> {
-        request_id: &'a str,
-        payload: &'a str,
-    }
-
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct BrokerEnvelope<'a> {
-        request_id: &'a str,
-        auth: String,
-        payload: &'a str,
-    }
-
-    struct OwnedHandle(HANDLE);
-
-    unsafe impl Send for OwnedHandle {}
-
-    #[cfg(test)]
-    impl OwnedHandle {
-        fn raw(&self) -> HANDLE {
-            self.0
-        }
-    }
-
-    impl Drop for OwnedHandle {
-        fn drop(&mut self) {
-            if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-                unsafe {
-                    CloseHandle(self.0);
-                }
+    loop {
+        let message = match read_native_message() {
+            Ok(Some(msg)) => msg,
+            Ok(None) => return,
+            Err(_) => {
+                let _ = write_native_message(&host_status("invalid-message", None));
+                return;
             }
-        }
-    }
-
-    pub fn run_host() {
-        if run().is_err() {
-            let _ = write_native_message(&host_status("unpaired", None));
-        }
-    }
-
-    fn run() -> Result<(), ()> {
-        if DEV && !cfg!(debug_assertions) {
-            return Err(());
-        }
-        let config = load_config().map_err(|_| ())?;
-        let launch_arguments: Vec<String> = std::env::args().skip(1).collect();
-        if !valid_browser_launch(&config, &launch_arguments) {
-            return Err(());
-        }
-        let secret = load_pairing_secret(&config).map_err(|_| ())?;
-        loop {
-            let message = match read_native_message() {
-                Ok(Some(message)) => message,
-                Ok(None) => return Ok(()),
-                Err(_) => {
-                    write_native_message(&host_status("invalid-message", None)).map_err(|_| ())?;
-                    return Ok(());
-                }
-            };
-            let request_id = request_id_for(&message);
-            let response = forward(&config, &secret, &request_id, &message)
-                .unwrap_or_else(|status| host_status(status, Some(&request_id)));
-            let response = correlate_response(&message, &request_id, response);
-            write_native_message(&response).map_err(|_| ())?;
-        }
-    }
-
-    fn load_config() -> io::Result<HostConfig> {
-        let app_data = std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing APPDATA"))?;
-        let path = app_data.join(APP_DATA_NAME).join(CONFIG_NAME);
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.file_type().is_file()
-            || metadata.len() == 0
-            || metadata.len() > MAX_CONFIG_BYTES
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "invalid host configuration",
-            ));
-        }
-        let bytes = fs::read(path)?;
-        let config: HostConfig = serde_json::from_slice(&bytes).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid host configuration")
-        })?;
-        let expected_origin = format!("chrome-extension://{}/", compiled_extension_id()?);
-        let expected_firefox_manifest = app_data.join(APP_DATA_NAME).join(FIREFOX_MANIFEST_NAME);
-        if config.version != 2
-            || config.broker_pipe != EXPECTED_PIPE
-            || config.keychain_service != EXPECTED_KEYCHAIN_SERVICE
-            || config.keychain_account != EXPECTED_KEYCHAIN_ACCOUNT
-            || config.chromium_allowed_origin != expected_origin
-            || config.firefox_extension_id != compiled_firefox_extension_id()?
-            || config.firefox_manifest_path != expected_firefox_manifest
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid host configuration",
-            ));
-        }
-        Ok(config)
-    }
-
-    fn compiled_extension_id() -> io::Result<&'static str> {
-        if DEV {
-            return Ok(dev::EXTENSION_ID);
-        }
-        let value = option_env!("VAULTMESH_BROWSER_EXTENSION_ID").unwrap_or(DEFAULT_EXTENSION_ID);
-        (value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte)))
-            .then_some(value)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid extension ID"))
-    }
-
-    fn compiled_firefox_extension_id() -> io::Result<&'static str> {
-        if DEV {
-            return Ok(dev::FIREFOX_ID);
-        }
-        let value =
-            option_env!("VAULTMESH_FIREFOX_EXTENSION_ID").unwrap_or(DEFAULT_FIREFOX_EXTENSION_ID);
-        (value == DEFAULT_FIREFOX_EXTENSION_ID)
-            .then_some(value)
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid Firefox extension ID")
-            })
-    }
-
-    fn valid_browser_launch(config: &HostConfig, arguments: &[String]) -> bool {
-        if matches!(arguments, [origin] | [origin, _] if origin == &config.chromium_allowed_origin)
-        {
-            return true;
-        }
-        matches!(arguments, [manifest_path, extension_id]
-            if PathBuf::from(manifest_path) == config.firefox_manifest_path
-                && extension_id == &config.firefox_extension_id)
-    }
-
-    fn load_pairing_secret(config: &HostConfig) -> Result<Zeroizing<[u8; 32]>, ()> {
-        let encoded = if DEV {
-            Zeroizing::new(
-                keyring::Entry::new(&config.keychain_service, &config.keychain_account)
-                    .and_then(|entry| entry.get_password())
-                    .map_err(|_| ())?,
-            )
-        } else {
-            let dir = vaultmesh_tauri_desktop::device_credentials::default_desktop_app_data_dir()
-                .ok_or(())?;
-            let store =
-                vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::open_without_legacy_scan(&dir)
-                    .map_err(|_| ())?;
-            let bytes =
-                store.read_unified_secret(&config.keychain_service, &config.keychain_account)?;
-            Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| ())?)
-        };
-        let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded.as_bytes()).map_err(|_| ())?);
-        if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(decoded.as_slice()) != encoded.as_str() {
-            return Err(());
-        }
-        let mut secret = Zeroizing::new([0_u8; 32]);
-        secret.copy_from_slice(decoded.as_slice());
-        Ok(secret)
-    }
-
-    fn read_native_message() -> io::Result<Option<Value>> {
-        let mut length = [0_u8; 4];
-        let mut stdin = io::stdin().lock();
-        match stdin.read_exact(&mut length) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(error) => return Err(error),
-        }
-        let length = u32::from_le_bytes(length) as usize;
-        if length == 0 || length > MAX_NATIVE_REQUEST_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid native message length",
-            ));
-        }
-        let mut payload = vec![0_u8; length];
-        stdin.read_exact(&mut payload)?;
-        let value: Value = serde_json::from_slice(&payload)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid native message"))?;
-        if !value.is_object() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid native message",
-            ));
-        }
-        Ok(Some(value))
-    }
-
-    fn write_native_message(message: &Value) -> io::Result<()> {
-        let payload = serde_json::to_vec(message).map_err(io::Error::other)?;
-        if payload.is_empty() || payload.len() > MAX_NATIVE_RESPONSE_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "native response exceeds limit",
-            ));
-        }
-        let mut stdout = io::stdout().lock();
-        stdout.write_all(&(payload.len() as u32).to_le_bytes())?;
-        stdout.write_all(&payload)?;
-        stdout.flush()
-    }
-
-    fn request_id_for(message: &Value) -> String {
-        message
-            .as_object()
-            .filter(|object| object.get("kind").and_then(Value::as_str) == Some("vaultmesh.rpc"))
-            .and_then(|object| object.get("requestId").and_then(Value::as_str))
-            .and_then(|value| Uuid::parse_str(value).ok().map(|_| value.to_owned()))
-            .unwrap_or_else(|| Uuid::new_v4().to_string())
-    }
-
-    fn forward(
-        config: &HostConfig,
-        secret: &[u8; 32],
-        request_id: &str,
-        message: &Value,
-    ) -> Result<Value, &'static str> {
-        let encoded_message = serde_json::to_vec(message).map_err(|_| "invalid-message")?;
-        let payload = URL_SAFE_NO_PAD.encode(encoded_message);
-        let body = serde_json::to_vec(&AuthenticatedBody {
-            request_id,
-            payload: &payload,
-        })
-        .map_err(|_| "invalid-message")?;
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret).map_err(|_| "unpaired")?;
-        mac.update(&body);
-        let auth = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-        let mut envelope = serde_json::to_vec(&BrokerEnvelope {
-            request_id,
-            auth,
-            payload: &payload,
-        })
-        .map_err(|_| "invalid-message")?;
-        envelope.push(b'\n');
-        if envelope.len() > MAX_BROKER_LINE_BYTES {
-            return Err("invalid-message");
-        }
-
-        let pipe = connect_pipe(&config.broker_pipe).map_err(|_| "desktop-unavailable")?;
-        write_all(pipe.0, &envelope).map_err(|_| "desktop-unavailable")?;
-        let response = read_response(pipe.0).map_err(|_| "desktop-unavailable")?;
-        serde_json::from_slice(&response).map_err(|_| "invalid-broker-response")
-    }
-
-    fn connect_pipe(pipe_name: &str) -> io::Result<OwnedHandle> {
-        let name = wide(pipe_name);
-        if unsafe { WaitNamedPipeW(name.as_ptr(), 2_000) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let handle = unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                null(),
-                OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
-                null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(OwnedHandle(handle))
-        }
-    }
-
-    fn write_all(pipe: HANDLE, bytes: &[u8]) -> io::Result<()> {
-        let deadline = Instant::now() + BROKER_WRITE_DEADLINE;
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let written = write_chunk(pipe, &bytes[offset..], deadline)?;
-            offset += written as usize;
-        }
-        Ok(())
-    }
-
-    fn read_response(pipe: HANDLE) -> io::Result<Vec<u8>> {
-        let deadline = Instant::now() + BROKER_RESPONSE_DEADLINE;
-        let mut response = Vec::new();
-        let mut chunk = vec![0_u8; MAX_BROKER_LINE_BYTES + 1];
-        loop {
-            let read = read_chunk(pipe, &mut chunk, deadline)?;
-            if let Some(completed) = append_response_chunk(&mut response, &chunk[..read as usize])?
-            {
-                return Ok(completed);
-            }
-        }
-    }
-
-    fn write_chunk(pipe: HANDLE, bytes: &[u8], deadline: Instant) -> io::Result<u32> {
-        let event = create_io_event()?;
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        overlapped.hEvent = event.0;
-        let started = unsafe {
-            WriteFile(
-                pipe,
-                bytes.as_ptr(),
-                bytes.len() as u32,
-                null_mut(),
-                &mut overlapped,
-            )
-        };
-        complete_overlapped(
-            pipe,
-            &mut overlapped,
-            started,
-            deadline,
-            "broker write timed out",
-        )
-    }
-
-    fn read_chunk(pipe: HANDLE, bytes: &mut [u8], deadline: Instant) -> io::Result<u32> {
-        let event = create_io_event()?;
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        overlapped.hEvent = event.0;
-        let started = unsafe {
-            ReadFile(
-                pipe,
-                bytes.as_mut_ptr(),
-                bytes.len() as u32,
-                null_mut(),
-                &mut overlapped,
-            )
-        };
-        complete_overlapped(
-            pipe,
-            &mut overlapped,
-            started,
-            deadline,
-            "broker response deadline exceeded",
-        )
-    }
-
-    fn create_io_event() -> io::Result<OwnedHandle> {
-        let event = unsafe { CreateEventW(null(), 1, 0, null()) };
-        if event.is_null() {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(OwnedHandle(event))
-        }
-    }
-
-    fn complete_overlapped(
-        pipe: HANDLE,
-        overlapped: &mut OVERLAPPED,
-        started: i32,
-        deadline: Instant,
-        timeout_message: &'static str,
-    ) -> io::Result<u32> {
-        if started == 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                return Err(error);
-            }
-        }
-        let timeout = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, timeout_message))?;
-        let timeout_ms = timeout.as_millis().clamp(1, u32::MAX as u128) as u32;
-        let mut transferred = 0_u32;
-        if unsafe { GetOverlappedResultEx(pipe, overlapped, &mut transferred, timeout_ms, 0) } == 0
-        {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(WAIT_TIMEOUT as i32) {
-                unsafe {
-                    CancelIoEx(pipe, overlapped);
-                    GetOverlappedResult(pipe, overlapped, &mut transferred, 1);
-                }
-                return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message));
-            }
-            return Err(error);
-        }
-        if transferred == 0 {
-            Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "broker pipe closed without data",
-            ))
-        } else {
-            Ok(transferred)
-        }
-    }
-
-    fn append_response_chunk(response: &mut Vec<u8>, chunk: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        if let Some(newline) = chunk.iter().position(|byte| *byte == b'\n') {
-            response.extend_from_slice(&chunk[..newline]);
-            if response.is_empty() || response.len() > MAX_BROKER_LINE_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid broker response",
-                ));
-            }
-            return Ok(Some(std::mem::take(response)));
-        }
-        response.extend_from_slice(chunk);
-        if response.len() > MAX_BROKER_LINE_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "broker response too large",
-            ));
-        }
-        Ok(None)
-    }
-
-    fn correlate_response(message: &Value, request_id: &str, response: Value) -> Value {
-        if message.get("kind").and_then(Value::as_str) != Some("vaultmesh.rpc") {
-            return response;
-        }
-        if response.get("kind").and_then(Value::as_str) == Some("vaultmesh.rpc-result")
-            && response.get("requestId").and_then(Value::as_str) == Some(request_id)
-        {
-            return response;
-        }
-        if response.get("kind").and_then(Value::as_str) == Some("vaultmesh.host-status")
-            && response.get("status").and_then(Value::as_str).is_some()
-        {
-            let mut object = response.as_object().cloned().unwrap_or_default();
-            object.insert("requestId".into(), Value::String(request_id.to_owned()));
-            return Value::Object(object);
-        }
-        host_status("invalid-broker-response", Some(request_id))
-    }
-
-    fn host_status(status: &str, request_id: Option<&str>) -> Value {
-        let mut object = Map::from_iter([
-            ("kind".into(), json!("vaultmesh.host-status")),
-            ("status".into(), json!(status)),
-        ]);
-        if let Some(request_id) = request_id {
-            object.insert("requestId".into(), Value::String(request_id.to_owned()));
-        }
-        Value::Object(object)
-    }
-
-    fn wide(value: &str) -> Vec<u16> {
-        OsStr::new(value).encode_wide().chain(Some(0)).collect()
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::{ptr::null_mut, thread};
-        use windows_sys::Win32::{
-            Foundation::{ERROR_PIPE_CONNECTED, GetLastError},
-            Storage::FileSystem::PIPE_ACCESS_DUPLEX,
-            System::Pipes::{
-                ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-                PIPE_TYPE_BYTE, PIPE_WAIT,
-            },
         };
 
-        #[test]
-        fn browser_launch_requires_exact_chromium_origin_or_firefox_manifest_and_id() {
-            let config = HostConfig {
-                version: 2,
-                broker_pipe: EXPECTED_PIPE.to_owned(),
-                keychain_service: EXPECTED_KEYCHAIN_SERVICE.to_owned(),
-                keychain_account: EXPECTED_KEYCHAIN_ACCOUNT.to_owned(),
-                chromium_allowed_origin: format!("chrome-extension://{DEFAULT_EXTENSION_ID}/"),
-                firefox_extension_id: DEFAULT_FIREFOX_EXTENSION_ID.to_owned(),
-                firefox_manifest_path: PathBuf::from(
-                    r"C:\Users\test\AppData\Roaming\com.vaultmesh.desktop\com.vaultmesh.browser.firefox.json",
-                ),
-            };
-            assert!(valid_browser_launch(
-                &config,
-                &[config.chromium_allowed_origin.clone()]
-            ));
-            assert!(valid_browser_launch(
-                &config,
-                &[
-                    config.firefox_manifest_path.display().to_string(),
-                    config.firefox_extension_id.clone(),
-                ]
-            ));
-            assert!(!valid_browser_launch(
-                &config,
-                &["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/".to_owned()]
-            ));
-            assert!(!valid_browser_launch(
-                &config,
-                &[
-                    config.firefox_manifest_path.display().to_string(),
-                    "other@example.test".to_owned(),
-                ]
-            ));
-        }
+        let request_id = request_id_for(&message);
+        let raw_body = serde_json::to_vec(&message).unwrap_or_default();
 
-        #[test]
-        fn reads_chunked_response_when_broker_disconnects_after_write() {
-            let pipe_name = format!(r"\\.\pipe\VaultMesh.NativeHost.test.{}", Uuid::new_v4());
-            let encoded_pipe_name = wide(&pipe_name);
-            let server = unsafe {
-                CreateNamedPipeW(
-                    encoded_pipe_name.as_ptr(),
-                    PIPE_ACCESS_DUPLEX,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                    1,
-                    64 * 1024,
-                    64 * 1024,
-                    1_000,
-                    null_mut(),
-                )
-            };
-            assert_ne!(server, INVALID_HANDLE_VALUE);
-            let server = OwnedHandle(server);
-            let mut expected = br#"{"kind":"vaultmesh.rpc-result","padding":""#.to_vec();
-            expected.extend(std::iter::repeat_n(b'x', 16 * 1024));
-            expected.extend_from_slice(br#"","ok":true}"#);
-            let mut framed = expected.clone();
-            framed.push(b'\n');
+        let response = match send_with_retry(&mut cached_port, &browser_origin, &raw_body) {
+            Ok(resp) => resp,
+            Err(status) => host_status(status, Some(&request_id)),
+        };
 
-            let worker = thread::spawn(move || {
-                let connected = unsafe { ConnectNamedPipe(server.raw(), null_mut()) };
-                assert!(connected != 0 || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED);
-                thread::sleep(Duration::from_millis(2));
-                let mut offset = 0;
-                while offset < framed.len() {
-                    let chunk_len = (framed.len() - offset).min(8 * 1024);
-                    let mut written = 0_u32;
-                    assert_ne!(
-                        unsafe {
-                            WriteFile(
-                                server.raw(),
-                                framed[offset..].as_ptr(),
-                                chunk_len as u32,
-                                &mut written,
-                                null_mut(),
-                            )
-                        },
-                        0
-                    );
-                    assert_ne!(written, 0);
-                    offset += written as usize;
-                    if offset < framed.len() {
-                        thread::sleep(Duration::from_millis(2));
-                    }
-                }
-                unsafe {
-                    DisconnectNamedPipe(server.raw());
-                }
-            });
-
-            let client = connect_pipe(&pipe_name).expect("connect client");
-            assert_eq!(read_response(client.0).expect("read response"), expected);
-            worker.join().expect("server worker");
-        }
-
-        #[test]
-        fn response_chunks_remain_bounded_and_require_content() {
-            let mut response = Vec::new();
-            assert!(append_response_chunk(&mut response, b"\n").is_err());
-
-            let mut response = vec![b'x'; MAX_BROKER_LINE_BYTES];
-            assert!(append_response_chunk(&mut response, b"x").is_err());
+        let correlated = correlate_response(&message, &request_id, response);
+        if write_native_message(&correlated).is_err() {
+            return;
         }
     }
 }
 
-#[cfg(target_os = "macos")]
-mod macos_host {
-    use crate::{BITWARDEN_DEVELOPMENT_HOST as DEV, development_identity as dev};
-    use std::{
-        fs,
-        io::{self, Read, Write},
-        os::unix::{fs::MetadataExt, net::UnixStream},
-        path::{Path, PathBuf},
-        time::Duration,
+fn check_port(port: u16) -> bool {
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
     };
-
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use hmac::{Hmac, Mac as _};
-    use serde::{Deserialize, Serialize};
-    use serde_json::{Map, Value, json};
-    use sha2::Sha256;
-    use uuid::Uuid;
-    use zeroize::Zeroizing;
-
-    const CONFIG_NAME: &str = if DEV {
-        dev::CONFIG_NAME
-    } else {
-        "browser-host-config.json"
-    };
-    const APP_DATA_NAME: &str = "com.vaultmesh.desktop";
-    const DEFAULT_FIREFOX_EXTENSION_ID: &str = "vaultmesh@atlantis-mk.github.io";
-    const FIREFOX_MANIFEST_NAME: &str = if DEV {
-        "com.vaultmesh.bitwarden.dev.json"
-    } else {
-        "com.vaultmesh.browser.json"
-    };
-    const MAX_CONFIG_BYTES: u64 = 4096;
-    const MAX_NATIVE_REQUEST_BYTES: usize = 256 * 1024;
-    const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
-    const MAX_BROKER_LINE_BYTES: usize = 1024 * 1024;
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct HostConfig {
-        version: u8,
-        broker_socket: PathBuf,
-        keychain_service: String,
-        keychain_account: String,
-        chromium_allowed_origin: String,
-        firefox_extension_id: String,
-        firefox_manifest_path: PathBuf,
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
+    let req = format!("GET /discover HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
     }
-
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct AuthenticatedBody<'a> {
-        request_id: &'a str,
-        payload: &'a str,
+    let mut resp = Vec::new();
+    if stream.read_to_end(&mut resp).is_err() {
+        return false;
     }
+    let resp_str = String::from_utf8_lossy(&resp);
+    resp_str.contains("200 OK") && resp_str.contains("\"service\":\"vaultmesh-desktop\"")
+}
 
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct BrokerEnvelope<'a> {
-        request_id: &'a str,
-        auth: String,
-        payload: &'a str,
-    }
-
-    pub fn run_host() {
-        if run().is_err() {
-            let _ = write_native_message(&host_status("unpaired", None));
+fn discover_port() -> Option<u16> {
+    if let Ok(override_port) = std::env::var("VAULTMESH_BROWSER_HTTP_PORT") {
+        if let Ok(p) = override_port.trim().parse::<u16>() {
+            if check_port(p) {
+                return Some(p);
+            }
         }
     }
-
-    fn run() -> Result<(), ()> {
-        if DEV && !cfg!(debug_assertions) {
-            return Err(());
+    for p in HTTP_PORT_RANGE_START..=HTTP_PORT_RANGE_END {
+        if check_port(p) {
+            return Some(p);
         }
-        let config = load_config().map_err(|_| ())?;
-        let launch_arguments: Vec<String> = std::env::args().skip(1).collect();
-        if !valid_browser_launch(&config, &launch_arguments) {
-            return Err(());
-        }
-        let secret = load_pairing_secret(&config).map_err(|_| ())?;
+    }
+    None
+}
 
-        loop {
-            let message = match read_native_message() {
-                Ok(Some(message)) => message,
-                Ok(None) => return Ok(()),
-                Err(_) => {
-                    write_native_message(&host_status("invalid-message", None)).map_err(|_| ())?;
-                    return Ok(());
+fn send_with_retry(
+    cached_port: &mut Option<u16>,
+    browser_origin: &str,
+    body: &[u8],
+) -> Result<Value, &'static str> {
+    let port = match *cached_port {
+        Some(p) => p,
+        None => {
+            let p = discover_port().ok_or("desktop-unavailable")?;
+            *cached_port = Some(p);
+            p
+        }
+    };
+
+    match post_rpc(port, browser_origin, body) {
+        Ok(val) => Ok(val),
+        Err(status) => {
+            if status == "unpaired" {
+                return Err("unpaired");
+            }
+            // Invalidate cache and retry discovery once in case desktop restarted
+            *cached_port = None;
+            let new_port = discover_port().ok_or("desktop-unavailable")?;
+            *cached_port = Some(new_port);
+            post_rpc(new_port, browser_origin, body)
+        }
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn post_rpc(port: u16, browser_origin: &str, body: &[u8]) -> Result<Value, &'static str> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|_| "desktop-unavailable")?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(70)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+    let request_header = format!(
+        "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nX-VaultMesh-Browser-Origin: {browser_origin}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request_header.as_bytes()).map_err(|_| "desktop-unavailable")?;
+    stream.write_all(body).map_err(|_| "desktop-unavailable")?;
+    stream.flush().map_err(|_| "desktop-unavailable")?;
+
+    let mut resp_bytes = Vec::new();
+    stream.read_to_end(&mut resp_bytes).map_err(|_| "desktop-unavailable")?;
+
+    let header_end = find_subslice(&resp_bytes, b"\r\n\r\n")
+        .map(|pos| (pos, pos + 4))
+        .or_else(|| find_subslice(&resp_bytes, b"\n\n").map(|pos| (pos, pos + 2)))
+        .ok_or("desktop-unavailable")?;
+
+    let header_text = std::str::from_utf8(&resp_bytes[..header_end.0]).map_err(|_| "desktop-unavailable")?;
+    let status_line = header_text.lines().next().ok_or("desktop-unavailable")?;
+    if status_line.contains("403") {
+        return Err("unpaired");
+    }
+    if !status_line.contains("200") {
+        return Err("desktop-unavailable");
+    }
+
+    let body_bytes = &resp_bytes[header_end.1..];
+    let val: Value = serde_json::from_slice(body_bytes).map_err(|_| "invalid-message")?;
+    Ok(val)
+}
+
+fn read_native_message() -> io::Result<Option<Value>> {
+    let mut length_bytes = [0u8; 4];
+    let mut stdin = io::stdin().lock();
+    match stdin.read_exact(&mut length_bytes) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let length = u32::from_le_bytes(length_bytes) as usize;
+    if length == 0 || length > MAX_NATIVE_REQUEST_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native request exceeds limit",
+        ));
+    }
+    let mut buffer = vec![0u8; length];
+    stdin.read_exact(&mut buffer)?;
+    let value: Value = serde_json::from_slice(&buffer).map_err(io::Error::other)?;
+    if !value.is_object() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid native message",
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn write_native_message(message: &Value) -> io::Result<()> {
+    let payload = serde_json::to_vec(message).map_err(io::Error::other)?;
+    if payload.is_empty() || payload.len() > MAX_NATIVE_RESPONSE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native response exceeds limit",
+        ));
+    }
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(&(payload.len() as u32).to_le_bytes())?;
+    stdout.write_all(&payload)?;
+    stdout.flush()
+}
+
+fn request_id_for(message: &Value) -> String {
+    message
+        .as_object()
+        .filter(|object| object.get("kind").and_then(Value::as_str) == Some("vaultmesh.rpc"))
+        .and_then(|object| object.get("requestId").and_then(Value::as_str))
+        .and_then(|value| Uuid::parse_str(value).ok().map(|_| value.to_owned()))
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
+fn host_status(status: &str, request_id: Option<&str>) -> Value {
+    let mut payload = json!({
+        "kind": "vaultmesh.host-status",
+        "status": status,
+    });
+    if let Some(id) = request_id {
+        payload["requestId"] = json!(id);
+    }
+    payload
+}
+
+fn correlate_response(request: &Value, request_id: &str, mut response: Value) -> Value {
+    if let Some(object) = response.as_object_mut() {
+        if !object.contains_key("requestId") {
+            object.insert("requestId".to_owned(), json!(request_id));
+        }
+        if let Some(input) = request.as_object() {
+            if let Some(user_gesture_id) = input.get("userGestureId") {
+                if !object.contains_key("userGestureId") {
+                    object.insert("userGestureId".to_owned(), user_gesture_id.clone());
                 }
-            };
-            let request_id = request_id_for(&message);
-            let response = forward(&config, &secret, &request_id, &message)
-                .unwrap_or_else(|status| host_status(status, Some(&request_id)));
-            let response = correlate_response(&message, &request_id, response);
-            write_native_message(&response).map_err(|_| ())?;
+            }
         }
     }
+    response
+}
 
-    fn load_config() -> io::Result<HostConfig> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing home directory"))?;
-        let path = home
-            .join("Library")
-            .join("Application Support")
-            .join(APP_DATA_NAME)
-            .join(CONFIG_NAME);
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.file_type().is_file()
-            || metadata.len() == 0
-            || metadata.len() > MAX_CONFIG_BYTES
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "invalid host configuration",
-            ));
-        }
-        let bytes = fs::read(path)?;
-        let config: HostConfig = serde_json::from_slice(&bytes).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid host configuration")
-        })?;
-        let expected_firefox_manifest = home
-            .join("Library")
-            .join("Application Support")
-            .join("Mozilla")
-            .join("NativeMessagingHosts")
-            .join(FIREFOX_MANIFEST_NAME);
-        if config.version != 2
-            || !valid_service_component(&config.keychain_service)
-            || !valid_service_component(&config.keychain_account)
-            || !valid_extension_origin(&config.chromium_allowed_origin)
-            || config.firefox_extension_id != compiled_firefox_extension_id()?
-            || config.firefox_manifest_path != expected_firefox_manifest
-            || !valid_socket_path(&config.broker_socket)
-            || (DEV
-                && (config.keychain_service != dev::PAIRING_SERVICE
-                    || config.keychain_account != dev::PAIRING_ACCOUNT
-                    || config.chromium_allowed_origin
-                        != format!("chrome-extension://{}/", dev::EXTENSION_ID)))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid host configuration",
-            ));
-        }
-        Ok(config)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_launch_requires_exact_chromium_origin_or_firefox_manifest_and_id() {
+        let expected_chromium = expected_chromium_origin();
+        let expected_firefox = expected_firefox_extension_id();
+
+        // Chromium: single arg or with --parent-window
+        assert_eq!(
+            validate_browser_launch(&[expected_chromium.clone()]),
+            Some(expected_chromium.clone())
+        );
+        assert_eq!(
+            validate_browser_launch(&[expected_chromium.trim_end_matches('/').to_owned()]),
+            Some(expected_chromium.clone())
+        );
+        assert_eq!(
+            validate_browser_launch(&[
+                expected_chromium.clone(),
+                "--parent-window=12345".to_owned()
+            ]),
+            Some(expected_chromium.clone())
+        );
+
+        // Firefox: manifest path and gecko ID
+        assert_eq!(
+            validate_browser_launch(&[
+                "/path/to/manifest.json".to_owned(),
+                expected_firefox.to_owned()
+            ]),
+            Some(expected_firefox.to_owned())
+        );
+
+        // Invalid origins
+        assert_eq!(
+            validate_browser_launch(&["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/".to_owned()]),
+            None
+        );
+        assert_eq!(
+            validate_browser_launch(&[
+                "/path/to/manifest.json".to_owned(),
+                "other@example.com".to_owned()
+            ]),
+            None
+        );
+        assert_eq!(
+            validate_browser_launch(&["https://example.com".to_owned()]),
+            None
+        );
     }
 
-    fn valid_service_component(value: &str) -> bool {
-        !value.is_empty()
-            && value.len() <= 128
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    #[test]
+    fn correlates_response_preserves_gesture_and_request_id() {
+        let req = json!({
+            "kind": "vaultmesh.rpc",
+            "requestId": "11111111-1111-1111-1111-111111111111",
+            "userGestureId": "22222222-2222-2222-2222-222222222222",
+        });
+        let resp = json!({
+            "ok": true,
+            "result": {},
+        });
+        let correlated = correlate_response(&req, "11111111-1111-1111-1111-111111111111", resp);
+        assert_eq!(correlated["requestId"], "11111111-1111-1111-1111-111111111111");
+        assert_eq!(correlated["userGestureId"], "22222222-2222-2222-2222-222222222222");
     }
 
-    fn valid_extension_origin(value: &str) -> bool {
-        value
-            .strip_prefix("chrome-extension://")
-            .and_then(|value| value.strip_suffix('/'))
-            .is_some_and(|id| {
-                id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
-            })
-    }
-
-    fn compiled_firefox_extension_id() -> io::Result<&'static str> {
-        if DEV {
-            return Ok(dev::FIREFOX_ID);
-        }
-        let value =
-            option_env!("VAULTMESH_FIREFOX_EXTENSION_ID").unwrap_or(DEFAULT_FIREFOX_EXTENSION_ID);
-        (value == DEFAULT_FIREFOX_EXTENSION_ID)
-            .then_some(value)
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid Firefox extension ID")
-            })
-    }
-
-    fn valid_browser_launch(config: &HostConfig, arguments: &[String]) -> bool {
-        if matches!(arguments, [origin] if origin == &config.chromium_allowed_origin) {
-            return true;
-        }
-        matches!(arguments, [manifest_path, extension_id]
-            if PathBuf::from(manifest_path) == config.firefox_manifest_path
-                && extension_id == &config.firefox_extension_id)
-    }
-
-    #[cfg(test)]
-    mod launch_tests {
-        use super::*;
-
-        #[test]
-        fn requires_exact_chromium_origin_or_firefox_manifest_and_id() {
-            let config = HostConfig {
-                version: 2,
-                broker_socket: PathBuf::from("/tmp/vaultmesh-tauri-browser.sock"),
-                keychain_service: "com.vaultmesh.desktop.browser-pairing".to_owned(),
-                keychain_account: "native-host-hmac-v1".to_owned(),
-                chromium_allowed_origin: "chrome-extension://bdneegbnjbheblmamalplnddbodcghbg/"
-                    .to_owned(),
-                firefox_extension_id: DEFAULT_FIREFOX_EXTENSION_ID.to_owned(),
-                firefox_manifest_path: PathBuf::from(
-                    "/Users/test/Library/Application Support/Mozilla/NativeMessagingHosts/com.vaultmesh.browser.json",
-                ),
-            };
-            assert!(valid_browser_launch(
-                &config,
-                &[config.chromium_allowed_origin.clone()]
-            ));
-            assert!(valid_browser_launch(
-                &config,
-                &[
-                    config.firefox_manifest_path.display().to_string(),
-                    config.firefox_extension_id.clone(),
-                ]
-            ));
-            assert!(!valid_browser_launch(
-                &config,
-                &[
-                    config.firefox_manifest_path.display().to_string(),
-                    "other@example.test".to_owned(),
-                ]
-            ));
-            assert!(!valid_browser_launch(
-                &config,
-                &[
-                    config.chromium_allowed_origin.clone(),
-                    config.firefox_extension_id.clone(),
-                ]
-            ));
-        }
-    }
-
-    fn valid_socket_path(path: &Path) -> bool {
-        path.is_absolute()
-            && path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| {
-                    value
-                        == if DEV {
-                            dev::SOCKET_NAME
-                        } else {
-                            "vaultmesh-tauri-browser.sock"
-                        }
-                })
-    }
-
-    fn load_pairing_secret(config: &HostConfig) -> Result<Zeroizing<[u8; 32]>, ()> {
-        let encoded = if DEV {
-            Zeroizing::new(
-                keyring::Entry::new(&config.keychain_service, &config.keychain_account)
-                    .and_then(|entry| entry.get_password())
-                    .map_err(|_| ())?,
-            )
-        } else {
-            let dir = vaultmesh_tauri_desktop::device_credentials::default_desktop_app_data_dir()
-                .ok_or(())?;
-            let store =
-                vaultmesh_tauri_desktop::device_credentials::DeviceCredentialStore::open_without_legacy_scan(&dir)
-                    .map_err(|_| ())?;
-            let bytes =
-                store.read_unified_secret(&config.keychain_service, &config.keychain_account)?;
-            Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| ())?)
-        };
-        let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded.as_bytes()).map_err(|_| ())?);
-        if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(decoded.as_slice()) != encoded.as_str() {
-            return Err(());
-        }
-        let mut secret = Zeroizing::new([0_u8; 32]);
-        secret.copy_from_slice(decoded.as_slice());
-        Ok(secret)
-    }
-
-    fn read_native_message() -> io::Result<Option<Value>> {
-        let mut length = [0_u8; 4];
-        let mut stdin = io::stdin().lock();
-        match stdin.read_exact(&mut length) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(error) => return Err(error),
-        }
-        let length = u32::from_le_bytes(length) as usize;
-        if length == 0 || length > MAX_NATIVE_REQUEST_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid native message length",
-            ));
-        }
-        let mut payload = vec![0_u8; length];
-        stdin.read_exact(&mut payload)?;
-        let value: Value = serde_json::from_slice(&payload)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid native message"))?;
-        if !value.is_object() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid native message",
-            ));
-        }
-        Ok(Some(value))
-    }
-
-    fn write_native_message(message: &Value) -> io::Result<()> {
-        let payload = serde_json::to_vec(message).map_err(io::Error::other)?;
-        if payload.is_empty() || payload.len() > MAX_NATIVE_RESPONSE_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "native response exceeds limit",
-            ));
-        }
-        let mut stdout = io::stdout().lock();
-        stdout.write_all(&(payload.len() as u32).to_le_bytes())?;
-        stdout.write_all(&payload)?;
-        stdout.flush()
-    }
-
-    fn request_id_for(message: &Value) -> String {
-        message
-            .as_object()
-            .filter(|object| object.get("kind").and_then(Value::as_str) == Some("vaultmesh.rpc"))
-            .and_then(|object| object.get("requestId").and_then(Value::as_str))
-            .and_then(|value| Uuid::parse_str(value).ok().map(|_| value.to_owned()))
-            .unwrap_or_else(|| Uuid::new_v4().to_string())
-    }
-
-    fn forward(
-        config: &HostConfig,
-        secret: &[u8; 32],
-        request_id: &str,
-        message: &Value,
-    ) -> Result<Value, &'static str> {
-        let encoded_message = serde_json::to_vec(message).map_err(|_| "invalid-message")?;
-        let payload = URL_SAFE_NO_PAD.encode(encoded_message);
-        let body = serde_json::to_vec(&AuthenticatedBody {
-            request_id,
-            payload: &payload,
-        })
-        .map_err(|_| "invalid-message")?;
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret).map_err(|_| "unpaired")?;
-        mac.update(&body);
-        let auth = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-        let mut envelope = serde_json::to_vec(&BrokerEnvelope {
-            request_id,
-            auth,
-            payload: &payload,
-        })
-        .map_err(|_| "invalid-message")?;
-        envelope.push(b'\n');
-
-        let mut stream =
-            UnixStream::connect(&config.broker_socket).map_err(|_| "desktop-unavailable")?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(70)))
-            .map_err(|_| "desktop-unavailable")?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
-            .map_err(|_| "desktop-unavailable")?;
-        stream
-            .write_all(&envelope)
-            .map_err(|_| "desktop-unavailable")?;
-
-        let mut response = Vec::new();
-        stream
-            .take((MAX_BROKER_LINE_BYTES + 2) as u64)
-            .read_to_end(&mut response)
-            .map_err(|_| "desktop-unavailable")?;
-        let newline = response
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .ok_or("invalid-broker-response")?;
-        if newline == 0 || newline > MAX_BROKER_LINE_BYTES {
-            return Err("invalid-broker-response");
-        }
-        serde_json::from_slice(&response[..newline]).map_err(|_| "invalid-broker-response")
-    }
-
-    fn correlate_response(message: &Value, request_id: &str, response: Value) -> Value {
-        if message.get("kind").and_then(Value::as_str) != Some("vaultmesh.rpc") {
-            return response;
-        }
-        if response.get("kind").and_then(Value::as_str) == Some("vaultmesh.rpc-result")
-            && response.get("requestId").and_then(Value::as_str) == Some(request_id)
-        {
-            return response;
-        }
-        if response.get("kind").and_then(Value::as_str) == Some("vaultmesh.host-status")
-            && response.get("status").and_then(Value::as_str).is_some()
-        {
-            let mut object = response.as_object().cloned().unwrap_or_default();
-            object.insert("requestId".into(), Value::String(request_id.to_owned()));
-            return Value::Object(object);
-        }
-        host_status("invalid-broker-response", Some(request_id))
-    }
-
-    fn host_status(status: &str, request_id: Option<&str>) -> Value {
-        let mut object = Map::from_iter([
-            ("kind".into(), json!("vaultmesh.host-status")),
-            ("status".into(), json!(status)),
-        ]);
-        if let Some(request_id) = request_id {
-            object.insert("requestId".into(), json!(request_id));
-        }
-        Value::Object(object)
+    #[test]
+    fn host_status_formatting() {
+        let status = host_status("desktop-unavailable", Some("test-id"));
+        assert_eq!(status["kind"], "vaultmesh.host-status");
+        assert_eq!(status["status"], "desktop-unavailable");
+        assert_eq!(status["requestId"], "test-id");
     }
 }

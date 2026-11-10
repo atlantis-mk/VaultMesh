@@ -80,10 +80,11 @@ mod browser_development_identity;
 mod browser_fill;
 #[cfg(any(
     target_os = "windows",
-    all(target_os = "macos", not(debug_assertions)),
+    target_os = "macos",
     test
 ))]
-mod browser_host_registration;
+pub(crate) mod browser_host_registration;
+mod browser_doctor;
 #[cfg(target_os = "windows")]
 mod browser_integration_windows;
 mod browser_pairing;
@@ -187,6 +188,7 @@ use ssh_service::{
 
 #[cfg(unix)]
 pub use browser_broker::BrowserBrokerUnixListener;
+pub use browser_broker::BrowserBrokerHttpListener;
 pub use browser_broker::{
     BrowserBrokerCore, BrowserBrokerPlatform, BrowserPlatformError, OneShotUnlockRequest,
     OneShotUnlockWaiter, OneShotUnlockedRuntime, TAURI_BROWSER_SLICE_OPERATIONS,
@@ -242,6 +244,7 @@ struct RuntimeState {
     _agent_pipe_listener: Option<Arc<AgentBrokerWindowsListener>>,
     #[cfg(unix)]
     _browser_listener: Option<Arc<BrowserBrokerUnixListener>>,
+    _browser_http_listener: Option<Arc<BrowserBrokerHttpListener>>,
     #[cfg(unix)]
     _bitwarden_development_listener: Option<Arc<BrowserBrokerUnixListener>>,
     #[cfg(target_os = "windows")]
@@ -707,13 +710,20 @@ async fn desktop_invoke(
             desktop_startup_settings(&app)
         }
         "desktop.startup.update" => update_desktop_startup(&app, &state, input),
+        "desktop.startup.open-system-settings" => {
+            require_empty_object(&input)?;
+            desktop_startup::open_system_settings().map(|_| json!({ "success": true }))
+        }
         "desktop.browser-integration.get" => {
             require_empty_object(&input)?;
-            browser_integration_status(&state, false)
+            browser_doctor::diagnose(&state, false)
         }
         "desktop.browser-integration.retry" => {
             require_empty_object(&input)?;
-            browser_integration_status(&state, true)
+            browser_doctor::diagnose(&state, true)
+        }
+        "desktop.browser-integration.open-store" => {
+            browser_doctor::handle_open_store(input)
         }
         "services.open-site" => {
             let service_id = required_string(&input, "serviceId")?;
@@ -956,33 +966,7 @@ fn prune_imports(state: &RuntimeState) {
     }
 }
 
-fn browser_integration_status(state: &RuntimeState, repair: bool) -> Result<Value, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let mut integration = state
-            .browser_integration
-            .lock()
-            .map_err(|_| "浏览器集成状态暂时不可用。".to_owned())?;
-        let status = if repair {
-            integration.repair()
-        } else {
-            integration.status()
-        };
-        serde_json::to_value(status).map_err(|_| "浏览器集成状态暂时不可用。".to_owned())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (state, repair);
-        Ok(json!({
-            "supported": false,
-            "ready": false,
-            "brokerReady": false,
-            "hostRegistered": false,
-            "extensionId": "",
-            "errorCode": null,
-        }))
-    }
-}
+
 
 #[tauri::command]
 fn desktop_activity(state: State<'_, RuntimeState>) {

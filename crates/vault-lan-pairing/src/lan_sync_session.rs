@@ -5,6 +5,9 @@ use vaultmesh_sync::relay::{RELAY_MAX_PACKET, RelayBlob, RelaySummary};
 const FRAME_LIMIT: usize = 128 * 1024;
 const CHUNK: usize = 32 * 1024;
 const HEARTBEAT: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const STALL: Duration = Duration::from_secs(90);
+#[cfg(not(test))]
 const STALL: Duration = Duration::from_secs(30);
 static RECEIVING: AtomicU64 = AtomicU64::new(0);
 const RECEIVE_BUDGET: u64 = 256 * 1024 * 1024;

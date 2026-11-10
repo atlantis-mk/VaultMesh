@@ -447,7 +447,17 @@ pub(super) fn update_settings(state: &RuntimeState, input: Value) -> Result<Valu
 pub(super) fn desktop_startup_settings(app: &AppHandle) -> Result<Value, String> {
     app.autolaunch()
         .is_enabled()
-        .map(|enabled| json!(desktop_startup::StartupSettings { enabled }))
+        .map(|enabled| {
+            json!(desktop_startup::StartupSettings {
+                enabled,
+                can_open_system_settings: true,
+                system_settings_hint: Some(if cfg!(target_os = "macos") {
+                    "若自启或后台运行未生效，请前往系统设置的「登录项与扩展」中允许 VaultMesh 在后台运行。".to_owned()
+                } else {
+                    "若自启或后台运行未生效，请前往 Windows 设置的「启动应用」中确认已允许。".to_owned()
+                }),
+            })
+        })
         .map_err(|_| "无法读取系统登录项。".to_owned())
 }
 

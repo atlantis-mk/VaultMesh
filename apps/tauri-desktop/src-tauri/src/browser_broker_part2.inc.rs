@@ -1,10 +1,7 @@
-#[cfg(unix)]
 const MAX_DEFERRED_WAITERS: usize = 8;
 
-#[cfg(unix)]
 struct DeferredWaiterGuard(Arc<std::sync::atomic::AtomicUsize>);
 
-#[cfg(unix)]
 impl Drop for DeferredWaiterGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);

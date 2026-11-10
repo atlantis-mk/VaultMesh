@@ -26,8 +26,10 @@ export function createTauriVaultMeshApi(): VaultMeshApi {
       onAuthentication: (callback) => listen<DesktopAuthenticationEvent>('desktop-authentication', ({ payload }) => callback(payload)),
       startupSettings: () => call('desktop.startup.get'),
       updateStartupSettings: (input) => call('desktop.startup.update', input),
+      openSystemSettings: () => call('desktop.startup.open-system-settings'),
       browserIntegrationStatus: () => call('desktop.browser-integration.get'),
       retryBrowserIntegration: () => call('desktop.browser-integration.retry'),
+      openBrowserStore: (browserId: string) => call('desktop.browser-integration.open-store', { browserId }),
     },
     vault: {
       create: (input) => call('vault.create', input),

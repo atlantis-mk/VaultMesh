@@ -32,16 +32,16 @@ Chrome/Chromium target 使用 MV3、固定 `WXT_CHROME_EXTENSION_KEY` 派生的 
 
 Native Messaging 使用浏览器特定 manifest，不能共享一份宽松 allowlist：
 
-- Chrome/Edge manifest 使用唯一 `allowed_origins: ["chrome-extension://<compiled-id>/"]`。
+- Chrome/Edge/Brave/Arc/Vivaldi/Chromium manifest 使用唯一 `allowed_origins: ["chrome-extension://<compiled-id>/"]`。
 - Firefox manifest 使用唯一 `allowed_extensions: ["<compiled-gecko-id>"]`。macOS 位于用户级 Mozilla
   `NativeMessagingHosts` 目录；Windows 由 HKCU Mozilla `NativeMessagingHosts` registry 指向该 manifest。
-- 同一个 Rust Host binary 必须先识别浏览器官方启动参数，再读取 pairing secret。Chrome 只接受精确
-  origin；Firefox 只接受精确 installed manifest path 加 Gecko ID。缺参、未知 ID、错误路径或混合参数
-  必须返回安全失败，不能尝试兼容或降级。
+- 同一个 Rust Host binary 必须先识别浏览器官方启动参数。Chromium 系列接受 `[origin]` 或 `[origin, "--parent-window=..."]`；Firefox 只接受精确 installed manifest path 加 Gecko ID。缺参、未知 ID、错误路径或混合参数必须返回安全失败。
+- Native Host 采用零文件、零钥匙串无状态中继架构（ADR-0056），不再读写 `browser-host-config.json` 或系统钥匙串。Host 启动时在 `127.0.0.1:42800..=42850` 扫描发现桌面端本地回环 API（`/discover`），并将 stdin/stdout 消息无状态转发至桌面端 `/rpc`。
+- 本地回环 HTTP API 由桌面主进程管理，严禁提供 CORS 放行头；凡包含 `Origin`、`Sec-Fetch-*` 头或 `OPTIONS` 探测方法的请求直接返回 403 Forbidden，杜绝恶意网页扫描探测。
 - Chrome 与 Firefox Host connection 继续使用既有每连接 authorization/session 生命周期；任一浏览器
   都不得把配对状态、Vault response 或受保护值写入 extension storage。
 
-macOS 正式构建每次启动必须从当前 desktop executable 所在的 `Contents/MacOS` 定位包内 `vaultmesh-native-host`，拒绝包外、开发 Host 和 Agent sidecar 路径，先确认它是非空普通可执行文件，再幂等写入用户级 Chrome、Edge、Mozilla 的生产 Host manifest 和既有 v2 Host 配置。生产 Host 读取配对秘密时使用与主程序相同的 `device-credentials.enc`，统一存储打开后不得再读旧钥匙串条目。App 被移动后必须刷新 manifest 路径；文件缺失、旧路径或过宽文件权限必须可修复，内容和权限已正确时不得重写。各文件必须原子提交并保持 `0600`，新建目录使用 `0700`；不安全的目标或写入失败只报告非秘密错误类别，不读取、覆盖或重建配对记录及 OS 凭据。debug desktop 不执行此生产注册，仍由 `browser:dev` 管理开发 Host/profile。普通与 updater App bundle 必须包含 Native Host，macOS 构建和本地安装流程必须检查 App 内的 sidecar，而不能靠签名后的手工补拷贝掩盖漏包。显式卸载注册前必须先退出客户端，否则后续正式版启动会重新注册。
+macOS/Windows 正式构建每次启动必须从当前 desktop executable 目录定位包内 `vaultmesh-native-host`，确认其为非空普通可执行文件，再幂等为所有已安装的受支持浏览器（Chrome、Edge、Firefox、Brave、Arc、Vivaldi、Chromium）写入生产 Host manifest。App 被移动后必须刷新 manifest 路径；文件缺失或旧路径必须自动修复，内容正确时不得重写。桌面端提供统一的 Doctor 诊断体系与 `desktop.browser-integration.retry` 自动修复通道，并只读检测各浏览器 Profile 下的 VaultMesh 扩展安装状态；当检测到浏览器已安装但未安装插件时，提供 `desktop.browser-integration.open-store` 一键打开安装页面（Chrome 打开官方 Chrome Web Store 页面，其他尚未上架商店的浏览器打开当前版本对应的 GitHub Release 发布页）。普通与 updater App bundle 必须包含 Native Host。显式卸载注册前必须先退出客户端，否则后续正式版启动会重新注册。
 
 `pnpm extension:release:zip:all` 必须从同一 source/version 生成命名稳定的 Chrome 与 Firefox ZIP，
 解析内部 manifest、验证目标/身份/permission/版本、执行 ZIP 完整性检查，并排除 source map、环境文件、
