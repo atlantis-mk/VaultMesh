@@ -1,0 +1,45 @@
+schema: "2"
+id: "CHG-2026-060"
+title: "浏览器锁定态候选账号搜索与桌面端统一临时解锁单次填充"
+type: "feature"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "在浏览器扩展未解锁状态下支持网页候选账号搜索与实时输入过滤，点击候选时复用桌面端统一受保护临时解锁窗口完成单次填充并修复30秒倒计时到期自动关闭，同时保持浏览器Popup独立解锁"
+requirements:
+  - "REQ-BROWSER-001"
+  - "REQ-BROWSER-002"
+  - "REQ-AUTOFILL-001"
+  - "REQ-AUTOFILL-002"
+  - "REQ-AGENT-001"
+tests:
+  - "AT-BROWSER-001"
+  - "CT-BROWSER-001"
+  - "CT-BROWSER-002"
+  - "AT-AUTOFILL-001"
+  - "AT-AUTOFILL-002"
+  - "CT-AUTOFILL-001"
+  - "CT-AUTOFILL-002"
+  - "AT-AGENT-UNLOCK-001"
+  - "CT-AGENT-UNLOCK-001"
+adrs:
+  - "ADR-0055"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-BROWSER-001"
+  - "docs/03-functional-requirements.md#REQ-AUTOFILL-001"
+  - "docs/03-functional-requirements.md#REQ-AGENT-001"
+  - "specs/browser-integration.md#Discovery 与 fill"
+  - "specs/agent-capability-broker.md"
+  - "adr/0044-android-autofill-preauth-preview.md"
+  - "adr/0051-browser-touchid.md"
+  - "adr/0053-unified-desktop-keychain-root.md"
+  - "adr/0055-browser-preauth-autofill-and-oneshot-fill.md"
+related_changes: []
+boundaries:
+  - "tauri-desktop-browser-broker"
+  - "tauri-desktop-unlock-window"
+  - "browser-extension-autofill"
+risks:
+  - "预览索引严禁写入任何受保护秘密字段，且必须与 vault.enc SHA-256 绑定以防陈旧候选"
+  - "单次填充解锁只能在局部临时 DesktopRuntime 执行，不得解锁 BrowserBrokerCore 或 AgentVaultAccess 会话"
+next: []

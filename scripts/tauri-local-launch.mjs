@@ -1,4 +1,5 @@
 import { access, readFile } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -18,15 +19,19 @@ export async function launchInstalledTauriApp({
   environment = process.env,
 } = {}) {
   await access(path.join(installedTauriApp, "Contents", "MacOS", "vaultmesh-tauri-desktop"));
-  await run("open", [installedTauriApp], environment);
+  await run(
+    "open",
+    [installedTauriApp, "--args", "-ApplePersistenceIgnoreState", "YES"],
+    environment,
+  );
   const appData = path.join(homedir(), "Library", "Application Support", "com.vaultmesh.desktop");
   const pairingRecord = path.join(appData, "browser-pairing.json");
   const socket = path.join(tmpdir(), "vaultmesh-tauri-browser.sock");
   await waitFor(async () => {
     try {
       const record = JSON.parse(await readFile(pairingRecord, "utf8"));
-      await access(socket);
-      return record.version === 1 && record.enabled === true;
+      if (record.version !== 1 || record.enabled !== true) return false;
+      return await canConnectUnixSocket(socket);
     } catch {
       return false;
     }
@@ -47,6 +52,23 @@ async function waitFor(check, timeoutMs, message) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(message);
+}
+
+export function canConnectUnixSocket(socketPath, timeoutMs = 1_000) {
+  return new Promise((resolve) => {
+    const client = createConnection(socketPath);
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      client.destroy();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    client.once("connect", () => finish(true));
+    client.once("error", () => finish(false));
+  });
 }
 
 function run(command, args, environment = process.env) {

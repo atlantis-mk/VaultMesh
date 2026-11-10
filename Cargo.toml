@@ -51,3 +51,13 @@ opt-level = 3
 
 [profile.dev.package.salsa20]
 opt-level = 3
+
+# macOS 27+ dyld requires 8-byte aligned __LINKEDIT string pools (LC_SYMTAB.stroff),
+# whereas rustc 1.95's implicit `-C strip=debuginfo` with MACOSX_DEPLOYMENT_TARGET=12.0
+# can leave proc-macro dylibs and release binaries 4-byte aligned when indirect symbols
+# have an odd count, causing `can't find crate for tauri_macros` during `tauri build`.
+[profile.release]
+strip = "none"
+
+[profile.release.build-override]
+strip = "none"

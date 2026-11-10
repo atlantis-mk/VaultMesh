@@ -180,6 +180,7 @@ fn requires_unlock(operation: &str) -> bool {
             | "events.poll"
             | "browser.pairing.status"
             | "browser.pairing.revoke"
+            | "browser.autofill.candidates"
             | "confirmation.request"
     )
 }
@@ -272,6 +273,72 @@ pub struct BrowserPlatformError {
     pub message: String,
 }
 
+pub struct OneShotUnlockedRuntime {
+    pub runtime: DesktopRuntime,
+    pub master_password: Option<Zeroizing<String>>,
+}
+
+pub struct OneShotUnlockRequest {
+    pub vault_path: PathBuf,
+    pub origin: String,
+    pub item_title: String,
+    pub item_kind: String,
+    pub master_password_reprompt: bool,
+}
+
+pub struct OneShotUnlockWaiter {
+    wait_fn: Box<dyn FnOnce() -> Result<OneShotUnlockedRuntime, BrowserPlatformError> + Send>,
+}
+
+impl OneShotUnlockWaiter {
+    pub fn new<F>(wait_fn: F) -> Self
+    where
+        F: FnOnce() -> Result<OneShotUnlockedRuntime, BrowserPlatformError> + Send + 'static,
+    {
+        Self {
+            wait_fn: Box::new(wait_fn),
+        }
+    }
+
+    pub fn wait(self) -> Result<OneShotUnlockedRuntime, BrowserPlatformError> {
+        (self.wait_fn)()
+    }
+}
+
+pub struct DeferredBrokerExecution {
+    pub(crate) envelope_request_id: String,
+    input: Map<String, Value>,
+    waiter: OneShotUnlockWaiter,
+}
+
+pub enum BrokerLineOutcome {
+    Immediate(Value),
+    Deferred(DeferredBrokerExecution),
+}
+
+impl DeferredBrokerExecution {
+    pub fn wait_and_finish(self, broker: &Arc<Mutex<BrowserBrokerCore>>) -> Value {
+        let unlocked = self.waiter.wait();
+        let Ok(mut guard) = broker.lock() else {
+            if let Ok(mut session) = unlocked {
+                session.runtime.lock();
+            }
+            return host_status("desktop-unavailable", Some(&self.envelope_request_id));
+        };
+        guard.finish_one_shot_autofill(
+            &self.envelope_request_id,
+            &self.input,
+            unlocked,
+            Utc::now().timestamp_millis(),
+        )
+    }
+
+    fn finish_sync_at(self, broker: &mut BrowserBrokerCore, now_millis: i64) -> Value {
+        let unlocked = self.waiter.wait();
+        broker.finish_one_shot_autofill(&self.envelope_request_id, &self.input, unlocked, now_millis)
+    }
+}
+
 pub trait BrowserBrokerPlatform: Send + Sync {
     fn dispatch(
         &self,
@@ -298,7 +365,19 @@ pub trait BrowserBrokerPlatform: Send + Sync {
         Ok(false)
     }
 
+    fn begin_one_shot_unlock_for_fill(
+        &self,
+        _request: OneShotUnlockRequest,
+    ) -> Option<OneShotUnlockWaiter> {
+        None
+    }
+
     fn cancel_authentication(&self) {}
+    fn preauth_preview_store(
+        &self,
+    ) -> Option<crate::browser_preauth_preview::BrowserPreAuthPreviewStore> {
+        None
+    }
     fn clear(&self) {}
 }
 
@@ -368,6 +447,7 @@ pub struct BrowserBrokerCore {
     sync_merge_generation: u64,
     confirmations: HashMap<Uuid, Confirmation>,
     fill: BrowserFillService,
+    preauth_preview: crate::browser_preauth_preview::BrowserPreAuthPreviewStore,
     unlock_history: Value,
     platform: Arc<dyn BrowserBrokerPlatform>,
     revoked: bool,
@@ -397,6 +477,9 @@ impl BrowserBrokerCore {
         pairing_secret: Zeroizing<[u8; 32]>,
         platform: Arc<dyn BrowserBrokerPlatform>,
     ) -> Result<Self, DesktopRuntimeError> {
+        let preauth_preview = platform
+            .preauth_preview_store()
+            .unwrap_or_else(crate::browser_preauth_preview::BrowserPreAuthPreviewStore::in_memory);
         Ok(Self {
             runtime: DesktopRuntime::new(vault_path)?,
             pairing_secret,
@@ -406,6 +489,7 @@ impl BrowserBrokerCore {
             sync_merge_generation: 0,
             confirmations: HashMap::new(),
             fill: BrowserFillService::default(),
+            preauth_preview,
             unlock_history: json!([]),
             platform,
             revoked: false,
@@ -416,25 +500,52 @@ impl BrowserBrokerCore {
         self.handle_line_at(line, Utc::now().timestamp_millis())
     }
 
+    pub fn handle_line_shared(broker: &Arc<Mutex<Self>>, line: &[u8]) -> Value {
+        let outcome = match broker.lock() {
+            Ok(mut guard) => guard.handle_line_or_defer_at(line, Utc::now().timestamp_millis()),
+            Err(_) => return host_status("desktop-unavailable", None),
+        };
+        match outcome {
+            BrokerLineOutcome::Immediate(value) => value,
+            BrokerLineOutcome::Deferred(deferred) => deferred.wait_and_finish(broker),
+        }
+    }
+
+    pub(crate) fn handle_line_or_defer(&mut self, line: &[u8]) -> BrokerLineOutcome {
+        self.handle_line_or_defer_at(line, Utc::now().timestamp_millis())
+    }
+
     fn handle_line_at(&mut self, line: &[u8], now_millis: i64) -> Value {
+        match self.handle_line_or_defer_at(line, now_millis) {
+            BrokerLineOutcome::Immediate(value) => value,
+            BrokerLineOutcome::Deferred(deferred) => deferred.finish_sync_at(self, now_millis),
+        }
+    }
+
+    fn handle_line_or_defer_at(&mut self, line: &[u8], now_millis: i64) -> BrokerLineOutcome {
         if self.revoked {
-            return host_status("unpaired", None);
+            return BrokerLineOutcome::Immediate(host_status("unpaired", None));
         }
         if line.is_empty() || line.len() > MAX_LINE_BYTES {
-            return host_status("invalid-message", None);
+            return BrokerLineOutcome::Immediate(host_status("invalid-message", None));
         }
         let envelope: Envelope = match serde_json::from_slice(line) {
             Ok(value) => value,
-            Err(_) => return host_status("invalid-message", None),
+            Err(_) => return BrokerLineOutcome::Immediate(host_status("invalid-message", None)),
         };
         if !self.authenticate(&envelope) {
-            return host_status("unpaired", None);
+            return BrokerLineOutcome::Immediate(host_status("unpaired", None));
         }
         let payload = match decode_base64url(&envelope.payload) {
             Some(value) if value.len() <= MAX_RPC_BYTES => value,
-            _ => return host_status("invalid-message", Some(&envelope.request_id)),
+            _ => {
+                return BrokerLineOutcome::Immediate(host_status(
+                    "invalid-message",
+                    Some(&envelope.request_id),
+                ));
+            }
         };
-        self.handle_rpc(&envelope.request_id, &payload, now_millis)
+        self.handle_rpc_or_defer(&envelope.request_id, &payload, now_millis)
     }
 
     fn authenticate(&self, envelope: &Envelope) -> bool {
@@ -454,11 +565,20 @@ impl BrowserBrokerCore {
         mac.verify_slice(&supplied).is_ok()
     }
 
-    fn handle_rpc(&mut self, envelope_request_id: &str, payload: &[u8], now_millis: i64) -> Value {
+    fn handle_rpc_or_defer(
+        &mut self,
+        envelope_request_id: &str,
+        payload: &[u8],
+        now_millis: i64,
+    ) -> BrokerLineOutcome {
         let raw: Value = match serde_json::from_slice(payload) {
             Ok(value) => value,
             Err(_) => {
-                return rpc_failure(envelope_request_id, "invalid-request", "插件请求格式无效。");
+                return BrokerLineOutcome::Immediate(rpc_failure(
+                    envelope_request_id,
+                    "invalid-request",
+                    "插件请求格式无效。",
+                ));
             }
         };
         if raw
@@ -466,20 +586,28 @@ impl BrowserBrokerCore {
             .and_then(Value::as_u64)
             .is_some_and(|version| version != RPC_VERSION as u64)
         {
-            return rpc_failure(
+            return BrokerLineOutcome::Immediate(rpc_failure(
                 envelope_request_id,
                 "update-required",
                 "VaultMesh 插件或桌面端版本不兼容，请更新后重试。",
-            );
+            ));
         }
         let request: RpcRequest = match serde_json::from_value(raw) {
             Ok(value) => value,
             Err(_) => {
-                return rpc_failure(envelope_request_id, "invalid-request", "插件请求格式无效。");
+                return BrokerLineOutcome::Immediate(rpc_failure(
+                    envelope_request_id,
+                    "invalid-request",
+                    "插件请求格式无效。",
+                ));
             }
         };
         let Some(request_id) = Uuid::parse_str(&request.request_id).ok() else {
-            return rpc_failure(envelope_request_id, "invalid-request", "插件请求格式无效。");
+            return BrokerLineOutcome::Immediate(rpc_failure(
+                envelope_request_id,
+                "invalid-request",
+                "插件请求格式无效。",
+            ));
         };
         if request.kind != "vaultmesh.rpc"
             || request.version != RPC_VERSION
@@ -487,84 +615,168 @@ impl BrowserBrokerCore {
             || request.operation.is_empty()
             || request.operation.len() > 128
         {
-            return rpc_failure(envelope_request_id, "invalid-request", "插件请求格式无效。");
+            return BrokerLineOutcome::Immediate(rpc_failure(
+                envelope_request_id,
+                "invalid-request",
+                "插件请求格式无效。",
+            ));
         }
 
         let Some(issued_at) = parse_rpc_time(&request.issued_at) else {
-            return rpc_failure(envelope_request_id, "invalid-request", "插件请求格式无效。");
+            return BrokerLineOutcome::Immediate(rpc_failure(
+                envelope_request_id,
+                "invalid-request",
+                "插件请求格式无效。",
+            ));
         };
         let Some(expires_at) = parse_rpc_time(&request.expires_at) else {
-            return rpc_failure(envelope_request_id, "invalid-request", "插件请求格式无效。");
+            return BrokerLineOutcome::Immediate(rpc_failure(
+                envelope_request_id,
+                "invalid-request",
+                "插件请求格式无效。",
+            ));
         };
         if expires_at <= now_millis
             || issued_at > now_millis.saturating_add(MAX_CLOCK_SKEW_MILLIS)
             || expires_at.saturating_sub(issued_at) > MAX_LIFETIME_MILLIS
         {
-            return rpc_failure(
+            return BrokerLineOutcome::Immediate(rpc_failure(
                 envelope_request_id,
                 "request-expired",
                 "插件请求已过期，请重试。",
-            );
+            ));
         }
         self.seen_request_ids
             .retain(|_, expiry| *expiry > now_millis);
         if self.seen_request_ids.contains_key(&request_id) {
-            return rpc_failure(
+            return BrokerLineOutcome::Immediate(rpc_failure(
                 envelope_request_id,
                 "request-replayed",
                 "插件请求不能重复使用。",
-            );
+            ));
         }
         self.seen_request_ids.insert(request_id, expires_at);
 
         if !TAURI_BROWSER_SLICE_OPERATIONS.contains(&request.operation.as_str()) {
-            return rpc_failure(
+            return BrokerLineOutcome::Immediate(rpc_failure(
                 envelope_request_id,
                 "unsupported-operation",
                 "该插件操作不被允许。",
-            );
+            ));
         }
         if self.runtime.is_unlocked()
             && let Err(error) = self.runtime.refresh_from_disk()
         {
-            return runtime_failure(envelope_request_id, error);
+            return BrokerLineOutcome::Immediate(runtime_failure(envelope_request_id, error));
         }
         if self.runtime.sync_relay().merged_generation() != self.sync_merge_generation {
             self.sync_merge_generation = self.runtime.sync_relay().merged_generation();
             self.fill.clear();
             self.confirmations.clear();
+            if self.runtime.is_unlocked() {
+                let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
+            }
             self.record_event("vault-changed", now_millis);
         }
         if matches!(request.operation.as_str(), "vault.unlock" | "pin.unlock" | "vault.lock") {
             self.platform.cancel_authentication();
         }
-        if requires_unlock(&request.operation) && !self.runtime.is_unlocked() {
-            return rpc_failure(
+        let locked_selection_execute = request.operation == "browser.autofill.execute"
+            && request.input.get("mode").and_then(Value::as_str) == Some("selection");
+        if requires_unlock(&request.operation)
+            && !locked_selection_execute
+            && !self.runtime.is_unlocked()
+        {
+            return BrokerLineOutcome::Immediate(rpc_failure(
                 envelope_request_id,
                 "unlock-required",
                 "请先在 VaultMesh 插件中单独解锁。",
-            );
+            ));
         }
         if (requires_gesture(&request.operation)
             || (request.operation == "browser.autofill.execute" && (request.input.contains_key("nativeItemPlan") || request.input.contains_key("nativeLoginPlan") && request.input.get("mode").and_then(Value::as_str) != Some("automatic"))))
             && !valid_gesture(&request.input) {
-            return rpc_failure(
+            return BrokerLineOutcome::Immediate(rpc_failure(
                 envelope_request_id,
                 "invalid-request",
                 "该操作需要新的用户手势。",
-            );
+            ));
         }
         self.confirmations
             .retain(|_, confirmation| confirmation.expires_at > now_millis);
         if requires_confirmation(&request.operation)
             && !self.consume_confirmation(&request.operation, &request.input, now_millis)
         {
-            return rpc_failure(
+            return BrokerLineOutcome::Immediate(rpc_failure(
                 envelope_request_id,
                 "confirmation-required",
                 "请先确认该操作。",
-            );
+            ));
         }
+
+        if request.operation == "browser.autofill.execute" {
+            match self.fill.prepare_one_shot_selection(
+                &mut self.runtime,
+                &self.preauth_preview,
+                &request.input,
+                now_millis,
+            ) {
+                Ok(Some(prepared)) => {
+                    if let Some(waiter) =
+                        self.platform.begin_one_shot_unlock_for_fill(OneShotUnlockRequest {
+                            vault_path: self.runtime.current_path(),
+                            origin: prepared.origin,
+                            item_title: prepared.item_title,
+                            item_kind: prepared.item_kind,
+                            master_password_reprompt: prepared.master_password_reprompt,
+                        })
+                    {
+                        return BrokerLineOutcome::Deferred(DeferredBrokerExecution {
+                            envelope_request_id: envelope_request_id.to_owned(),
+                            input: request.input,
+                            waiter,
+                        });
+                    }
+                    if !self.runtime.is_unlocked() {
+                        return BrokerLineOutcome::Immediate(rpc_failure(
+                            envelope_request_id,
+                            "unlock-required",
+                            "请先在 VaultMesh 插件中单独解锁。",
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    if !self.runtime.is_unlocked() {
+                        return BrokerLineOutcome::Immediate(rpc_failure(
+                            envelope_request_id,
+                            "unlock-required",
+                            "请先在 VaultMesh 插件中单独解锁。",
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return BrokerLineOutcome::Immediate(rpc_failure(
+                        envelope_request_id,
+                        error.code,
+                        &error.message,
+                    ));
+                }
+            }
+        }
+
+        BrokerLineOutcome::Immediate(self.dispatch_authenticated_rpc(
+            envelope_request_id,
+            request,
+            now_millis,
+        ))
+    }
+
+    fn dispatch_authenticated_rpc(
+        &mut self,
+        envelope_request_id: &str,
+        request: RpcRequest,
+        now_millis: i64,
+    ) -> Value {
 
         match request.operation.as_str() {
             "vault.status" => rpc_success(envelope_request_id, json!(self.runtime.status())),
@@ -594,6 +806,7 @@ impl BrowserBrokerCore {
                             self.runtime.lock();
                             return rpc_failure(envelope_request_id, error.code, &error.message);
                         }
+                        let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
                         self.refresh_unlock_history();
                         rpc_success(
                             envelope_request_id,
@@ -622,6 +835,7 @@ impl BrowserBrokerCore {
                             self.runtime.lock();
                             return rpc_failure(envelope_request_id, error.code, &error.message);
                         }
+                        let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
                         self.refresh_unlock_history();
                         rpc_success(
                             envelope_request_id,
@@ -658,7 +872,11 @@ impl BrowserBrokerCore {
                 self.create_confirmation(envelope_request_id, &request.input, now_millis)
             }
             "browser.autofill.candidates" => {
-                match self.fill.candidates(&mut self.runtime, &request.input) {
+                match self.fill.candidates_with_preview(
+                    &mut self.runtime,
+                    Some(&self.preauth_preview),
+                    &request.input,
+                ) {
                     Ok(result) => rpc_success(envelope_request_id, result),
                     Err(error) => rpc_failure(envelope_request_id, error.code, &error.message),
                 }
@@ -723,6 +941,7 @@ impl BrowserBrokerCore {
                                     &error.message,
                                 );
                             }
+                            let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
                             self.record_event("vault-changed", now_millis);
                             if operation == "vault.change-password" {
                                 self.refresh_unlock_history();
@@ -748,6 +967,7 @@ impl BrowserBrokerCore {
                             self.runtime.lock();
                             return rpc_failure(envelope_request_id, error.code, &error.message);
                         }
+                        let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
                         self.refresh_unlock_history();
                     }
                     if matches!(
@@ -758,6 +978,7 @@ impl BrowserBrokerCore {
                             | "passkeys.create"
                             | "passkeys.get"
                     ) {
+                        let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
                         self.record_event("vault-changed", now_millis);
                     }
                     if operation == "browser.pairing.revoke" {
@@ -765,6 +986,7 @@ impl BrowserBrokerCore {
                         self.revoked = true;
                         self.runtime.lock();
                         self.platform.clear();
+                        self.preauth_preview.clear();
                         self.confirmations.clear();
                         self.fill.clear();
                         self.pairing_secret.zeroize();
@@ -778,6 +1000,45 @@ impl BrowserBrokerCore {
                     "该 Tauri 平台服务尚不可用。",
                 ),
             },
+        }
+    }
+
+    fn finish_one_shot_autofill(
+        &mut self,
+        envelope_request_id: &str,
+        input: &Map<String, Value>,
+        unlocked: Result<OneShotUnlockedRuntime, BrowserPlatformError>,
+        now_millis: i64,
+    ) -> Value {
+        if self.revoked {
+            if let Ok(mut session) = unlocked {
+                session.runtime.lock();
+            }
+            return host_status("unpaired", None);
+        }
+        let mut session = match unlocked {
+            Ok(session) => session,
+            Err(error) => return rpc_failure(envelope_request_id, error.code, &error.message),
+        };
+        let mut effective_input = input.clone();
+        if !effective_input.contains_key("masterPassword")
+            && let Some(password) = session.master_password.take()
+        {
+            effective_input.insert(
+                "masterPassword".to_owned(),
+                Value::String(password.as_str().to_owned()),
+            );
+        }
+        let result = self
+            .fill
+            .execute(&mut session.runtime, &effective_input, now_millis);
+        if let Some(Value::String(mut password)) = effective_input.remove("masterPassword") {
+            password.zeroize();
+        }
+        session.runtime.lock();
+        match result {
+            Ok(approved) => rpc_success(envelope_request_id, approved),
+            Err(error) => rpc_failure(envelope_request_id, error.code, &error.message),
         }
     }
 

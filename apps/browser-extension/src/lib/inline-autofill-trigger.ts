@@ -96,9 +96,11 @@ export class InlineAutofillTrigger {
   }
 
   #updateLabel() {
-    const label = this.#locked
-      ? "VaultMesh 已锁定，点击解锁插件"
-      : this.#action === "generate-password" ? "显示随机密码建议" : "显示 VaultMesh 自动填充选项";
+    const label = this.#action === "generate-password"
+      ? "显示随机密码建议"
+      : this.#locked
+        ? "显示 VaultMesh 自动填充选项（填充时需解锁）"
+        : "显示 VaultMesh 自动填充选项";
     this.#button.setAttribute("aria-label", label);
     this.#button.title = label;
   }

@@ -233,7 +233,7 @@ export async function startAutomaticFillForTab(tabId: number, topOrigin: string,
   const tab = await browser.tabs.get(tabId);
   const pageUrl = detectedPageUrl ?? getHttpPageUrl(tab.url) ?? topOrigin;
   const response = await getAutofillCandidates(topOrigin, "login", pageUrl, pageContext);
-  if (response.status !== "ready") return response;
+  if (response.status !== "ready" || response.requiresUnlock) return response;
   const rememberedId = await rememberedLoginSelection(topOrigin);
   const accountKey = accountStageKey(tabId, topOrigin);
   const currentAccount = currentLoginAccounts.get(accountKey);
@@ -256,12 +256,20 @@ export async function getAutofillCandidates(topOrigin: string, fieldKind: "login
   try {
     const result = await backgroundDesktopRpc("browser.autofill.candidates", { topOrigin, pageUrl, fieldKind, pageContext });
     const parsed = AutofillCandidateSchema.array().max(200).safeParse((result as { candidates?: unknown })?.candidates);
-    return parsed.success
-      ? { status: "ready" as const, candidates: fieldKind === "login" ? rankLoginCandidates(parsed.data) : parsed.data }
-      : { status: "unavailable" as const, candidates: [] };
-  } catch (error) {
+    if (!parsed.success) {
+      return { status: "unavailable" as const, requiresUnlock: false, candidates: [] };
+    }
+    const requiresUnlock = (result as { requiresUnlock?: unknown })?.requiresUnlock === true;
     return {
-      status: error instanceof DesktopRpcError && error.code === "unlock-required" ? "locked" as const : "unavailable" as const,
+      status: requiresUnlock ? ("locked" as const) : ("ready" as const),
+      requiresUnlock,
+      candidates: fieldKind === "login" ? rankLoginCandidates(parsed.data) : parsed.data,
+    };
+  } catch (error) {
+    const locked = error instanceof DesktopRpcError && error.code === "unlock-required";
+    return {
+      status: locked ? ("locked" as const) : ("unavailable" as const),
+      requiresUnlock: locked,
       candidates: [],
     };
   }

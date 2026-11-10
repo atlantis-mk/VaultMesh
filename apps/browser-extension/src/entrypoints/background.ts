@@ -24,7 +24,7 @@ import { SAVE_CAPTURE_DECISION_TIMEOUT_MS } from "@/lib/save-capture-countdown";
 import { runCaptureSaveOnce } from "@/lib/capture-save-gate";
 import { SAVE_CONFIRMATION_WINDOW_HEIGHT, SAVE_CONFIRMATION_WINDOW_WIDTH, saveConfirmationWindowPosition } from "@/lib/save-confirmation-window";
 import { rememberedLoginSelection, rememberLoginSelection } from "@/lib/autofill-preferences";
-import { chooseAutomaticLogin, fieldsForLoginSelection, rankLoginCandidates, requiresFillConfirmation, shouldQueueFillConfirmation, shouldReplaceExistingFields, shouldWaitForLoginPair } from "@/lib/autofill-selection";
+import { chooseAutomaticLogin, fieldsForLoginSelection, rankLoginCandidates, shouldQueueFillConfirmation, shouldReplaceExistingFields, shouldWaitForLoginPair } from "@/lib/autofill-selection";
 import { sameOriginFrameIds } from "@/lib/frame-origin";
 import type { CapturedCard, CapturedIdentity, CapturedLogin, CapturedSaveData, CapturedSecret, CapturedSshCredential } from "@/lib/save-capture";
 import { cardCaptureStatusInput } from "@/lib/save-capture-card";
@@ -449,23 +449,22 @@ export default defineBackground(() => {
       return { status: result.status === "ready" ? "watching" as const : result.status };
     }
     if (parsed.data.kind === "vaultmesh.autofill-select") {
-      if (!requiresFillConfirmation(parsed.data.selectedItem)) {
-        const result = await startFillForTab(page.tabId, parsed.data.selectedItem, {
-          mode: "selection",
-          targetOrigin: page.fillOrigin,
-          targetPageUrl: page.framePageUrl,
-          preserveExistingAccount: parsed.data.replaceExistingAccount !== true,
-          target: parsed.data.target,
-          targetFrameId: sender.frameId ?? 0,
-        });
-        if (result.status === "filled" && parsed.data.selectedItem.kind === "login") {
-          await rememberLoginSelection(page.fillOrigin, parsed.data.selectedItem.id).catch(() => undefined);
-        }
-        // The desktop remains authoritative for the stored item's re-prompt
-        // policy. A stale candidate summary must fall back to confirmation,
-        // never turn a required re-prompt into a silent failure.
-        if (!shouldQueueFillConfirmation(parsed.data.selectedItem, result.status)) return result;
+      const result = await startFillForTab(page.tabId, parsed.data.selectedItem, {
+        mode: "selection",
+        targetOrigin: page.fillOrigin,
+        targetPageUrl: page.framePageUrl,
+        preserveExistingAccount: parsed.data.replaceExistingAccount !== true,
+        target: parsed.data.target,
+        targetFrameId: sender.frameId ?? 0,
+      });
+      if (result.status === "filled" && parsed.data.selectedItem.kind === "login") {
+        await rememberLoginSelection(page.fillOrigin, parsed.data.selectedItem.id).catch(() => undefined);
       }
+      // The desktop broker handles one-shot temporary unlock and master-password
+      // re-prompt in its protected desktop unlock window. If a fallback runtime
+      // returns `re-prompt-required`, queue the popup confirmation instead of
+      // turning a required re-prompt into a silent failure.
+      if (!shouldQueueFillConfirmation(parsed.data.selectedItem, result.status)) return result;
       pendingPluginFill = {
         token: crypto.randomUUID(),
         tabId: page.tabId,

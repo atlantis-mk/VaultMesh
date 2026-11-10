@@ -239,8 +239,7 @@ privileged runtime 必须在同一次本地确认后同步 provision 独立 Agen
 锁定状态下，`initialize`、`tools/list` 与 `vaultmesh_request_local_ui` 可以工作；账号
 目录及全部 Vault action 必须返回 typed `mcp-locked` 并唤起 Agent unlock window。MCP 不提供 session 状态查询、
 锁定或解锁工具，Broker 可以等待最多 30 秒；
-成功后只通过内部 native continuation 复用同一 request ID 和已解析请求。超时返回 `mcp-unlock-timeout`，窗口
-可以继续保留，随后成功签发的 lease 只供下一次显式重试。公共 MCP 不提供接收 factor 的 unlock operation。
+成功后只通过内部 native continuation 复用同一 request ID 和已解析请求。超时返回 `mcp-unlock-timeout`，30 秒倒计时结束或收到超时事件后窗口必须自动取消当前超时请求，并在队列无后续待处理解锁请求时自动隐藏关闭窗口。公共 MCP 不提供接收 factor 的 unlock operation。
 同一 unlock scope owner 的并发调用必须共享一个 pending unlock request；一次 factor 成功必须向该 request 的
 全部 waiter 发布结果，不能被第一个 waiter 单独消费。可见窗口不得因重复 waiter 反复 show/focus/refresh；已完成
 request 不得在 lease 再次锁定后复用。Connection scope 的不同 transport 继续使用不同 request 与 lease。

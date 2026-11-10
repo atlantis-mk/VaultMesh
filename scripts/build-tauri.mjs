@@ -80,12 +80,18 @@ export function tauriBuildEnvironment(baseEnvironment = process.env, options = {
   const environment = browserIdentityEnvironment(baseEnvironment, options);
   delete environment.VAULTMESH_UPDATER_ENABLED;
   if (options.updaterEnabled) environment.VAULTMESH_UPDATER_ENABLED = "1";
+  const isMacTarget = options.target
+    ? options.target.endsWith("-apple-darwin")
+    : process.platform === "darwin";
   if (options.target?.endsWith("-apple-darwin")) {
     const minimumSystemVersion = tauriConfiguration.bundle?.macOS?.minimumSystemVersion;
     if (!/^\d+\.\d+(?:\.\d+)?$/.test(minimumSystemVersion)) {
       throw new Error("Tauri macOS minimumSystemVersion 无效。");
     }
     environment.MACOSX_DEPLOYMENT_TARGET = minimumSystemVersion;
+  }
+  if (isMacTarget && !options.requireRelease && !environment.APPLE_SIGNING_IDENTITY?.trim()) {
+    environment.APPLE_SIGNING_IDENTITY = "-";
   }
   return environment;
 }

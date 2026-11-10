@@ -1,3 +1,31 @@
+#[cfg(unix)]
+const MAX_DEFERRED_WAITERS: usize = 8;
+
+#[cfg(unix)]
+struct DeferredWaiterGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(unix)]
+impl Drop for DeferredWaiterGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(unix)]
+fn write_broker_response(stream: &mut std::os::unix::net::UnixStream, response: &Value) {
+    if let Ok(mut encoded) = serde_json::to_vec(response) {
+        if encoded.len() > MAX_BROKER_RESPONSE_BYTES {
+            encoded = serde_json::to_vec(&host_status(
+                "response-too-large",
+                response.get("requestId").and_then(Value::as_str),
+            ))
+            .unwrap_or_default();
+        }
+        encoded.push(b'\n');
+        let _ = stream.write_all(&encoded);
+    }
+}
+
 /// Owner-only newline-delimited local transport used by the native-messaging
 /// forwarding helper on macOS. Windows named-pipe transport remains a separate
 /// platform slice.
@@ -26,6 +54,7 @@ impl BrowserBrokerUnixListener {
         wake_writer.set_nonblocking(true)?;
         let stopping = Arc::new(AtomicBool::new(false));
         let worker_stopping = Arc::clone(&stopping);
+        let active_deferred = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let owned_broker = Arc::downgrade(&broker);
         let thread = thread::spawn(move || {
             while !worker_stopping.load(Ordering::Acquire) {
@@ -51,25 +80,43 @@ impl BrowserBrokerUnixListener {
                         // and then withholds the request body.
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                        let response = read_broker_line(&mut stream)
-                            .ok()
-                            .and_then(|line| {
-                                broker
-                                    .lock()
-                                    .ok()
-                                    .map(|mut broker| broker.handle_line(&line))
-                            })
-                            .unwrap_or_else(|| host_status("invalid-message", None));
-                        if let Ok(mut encoded) = serde_json::to_vec(&response) {
-                            if encoded.len() > MAX_BROKER_RESPONSE_BYTES {
-                                encoded = serde_json::to_vec(&host_status(
-                                    "response-too-large",
-                                    response.get("requestId").and_then(Value::as_str),
-                                ))
-                                .unwrap_or_default();
+                        let outcome = read_broker_line(&mut stream).ok().and_then(|line| {
+                            broker
+                                .lock()
+                                .ok()
+                                .map(|mut broker| broker.handle_line_or_defer(&line))
+                        });
+                        match outcome {
+                            Some(BrokerLineOutcome::Immediate(response)) => {
+                                write_broker_response(&mut stream, &response);
                             }
-                            encoded.push(b'\n');
-                            let _ = stream.write_all(&encoded);
+                            Some(BrokerLineOutcome::Deferred(deferred)) => {
+                                if active_deferred
+                                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                                        (count < MAX_DEFERRED_WAITERS).then_some(count + 1)
+                                    })
+                                    .is_err()
+                                {
+                                    let busy = rpc_failure(
+                                        &deferred.envelope_request_id,
+                                        "cancelled",
+                                        "已有过多待处理的自动填充解锁请求，请稍后重试。",
+                                    );
+                                    write_broker_response(&mut stream, &busy);
+                                    continue;
+                                }
+                                let guard = DeferredWaiterGuard(Arc::clone(&active_deferred));
+                                let deferred_broker = Arc::clone(&broker);
+                                thread::spawn(move || {
+                                    let _guard = guard;
+                                    let response = deferred.wait_and_finish(&deferred_broker);
+                                    write_broker_response(&mut stream, &response);
+                                });
+                            }
+                            None => {
+                                let invalid = host_status("invalid-message", None);
+                                write_broker_response(&mut stream, &invalid);
+                            }
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,

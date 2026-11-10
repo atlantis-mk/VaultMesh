@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AutofillCandidate, FieldDescriptor } from "./protocol";
-import { chooseAutomaticLogin, fieldsForLoginSelection, inlineFillFailureMessage, inlineSelectionMode, rankLoginCandidates, requiresFillConfirmation, shouldQueueFillConfirmation, shouldReplaceExistingFields, shouldWaitForLoginPair } from "./autofill-selection";
+import { chooseAutomaticLogin, fieldsForLoginSelection, filterCandidatesByTypedUsername, inlineFillFailureMessage, inlineSelectionMode, rankLoginCandidates, requiresFillConfirmation, shouldQueueFillConfirmation, shouldReplaceExistingFields, shouldWaitForLoginPair } from "./autofill-selection";
 
 const candidate = (id: string, matchScope: "path" | "origin" | "domain", overrides: Partial<AutofillCandidate> = {}): AutofillCandidate => ({
   id,
@@ -74,7 +74,23 @@ describe("explicit fill confirmation and feedback", () => {
     expect(requiresFillConfirmation({ kind: "login", masterPasswordReprompt: false })).toBe(false);
     expect(requiresFillConfirmation({ kind: "identity" })).toBe(false);
     expect(shouldQueueFillConfirmation({ kind: "login", masterPasswordReprompt: false }, "re-prompt-required")).toBe(true);
+    expect(shouldQueueFillConfirmation({ kind: "card", masterPasswordReprompt: false }, "filled")).toBe(false);
+    expect(shouldQueueFillConfirmation({ kind: "login", masterPasswordReprompt: true }, "cancelled")).toBe(false);
     expect(shouldQueueFillConfirmation({ kind: "login", masterPasswordReprompt: false }, "document-changed")).toBe(false);
+  });
+
+  it("AT-AUTOFILL-002 filters candidates in real time by subtitle prefix, email local-part prefix, or title substring", () => {
+    const items: AutofillCandidate[] = [
+      candidate(pathId, "path", { title: "GitHub Personal", subtitle: "alice.dev@example.test" }),
+      candidate(originId, "origin", { title: "GitHub Work", subtitle: "bob@company.test" }),
+      candidate(domainId, "domain", { title: "Staging Portal", subtitle: "ops_admin" }),
+    ];
+    expect(filterCandidatesByTypedUsername(items, "   ").map((entry) => entry.id)).toEqual([pathId, originId, domainId]);
+    expect(filterCandidatesByTypedUsername(items, "ALI").map((entry) => entry.id)).toEqual([pathId]);
+    expect(filterCandidatesByTypedUsername(items, "alice.dev@ex").map((entry) => entry.id)).toEqual([pathId]);
+    expect(filterCandidatesByTypedUsername(items, "work").map((entry) => entry.id)).toEqual([originId]);
+    expect(filterCandidatesByTypedUsername(items, "ops").map((entry) => entry.id)).toEqual([domainId]);
+    expect(filterCandidatesByTypedUsername(items, "nonexistent")).toEqual([]);
   });
 
   it("keeps success and confirmation quiet but maps typed failures to bounded page feedback", () => {

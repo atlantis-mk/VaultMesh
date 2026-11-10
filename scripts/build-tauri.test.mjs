@@ -78,6 +78,14 @@ test("Tauri package build derives the same extension identity for main binary an
     }).MACOSX_DEPLOYMENT_TARGET,
     "15.2",
   );
+  assert.equal(
+    tauriBuildEnvironment({}, { target: "aarch64-apple-darwin" }).APPLE_SIGNING_IDENTITY,
+    "-",
+  );
+  assert.equal(
+    tauriBuildEnvironment({}, { target: "aarch64-apple-darwin", requireRelease: true }).APPLE_SIGNING_IDENTITY,
+    undefined,
+  );
 });
 
 test("Updater release config requires HTTPS, public verification material and signing key", () => {

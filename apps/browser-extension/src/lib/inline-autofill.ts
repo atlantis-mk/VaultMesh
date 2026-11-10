@@ -88,8 +88,26 @@ export class InlineAutofillMenu {
   get visible() { return this.#host.style.display !== "none"; }
   get generatedMode() { return this.#generatedMode; }
   get statusMessage() { return this.#statusMessage; }
+  get candidates(): readonly InlineAutofillCandidate[] { return this.#candidates; }
 
   owns(target: EventTarget | null) { return target === this.#host; }
+
+  showFilteredCandidates(target: HTMLElement, candidates: InlineAutofillCandidate[]) {
+    const alreadyShowingForTarget = this.visible && this.#target === target;
+    this.#target = target;
+    this.#anchor = target;
+    this.#candidates = candidates;
+    this.#generatedMode = "none";
+    this.#statusMessage = null;
+    this.#generatedEmailRequired = false;
+    this.#render();
+    if (!alreadyShowingForTarget) {
+      this.#resizeObserver?.disconnect();
+      this.#resizeObserver?.observe(target);
+      this.#host.style.display = "block";
+      this.#positionToAnchor();
+    }
+  }
 
   show(
     target: HTMLElement,
@@ -159,6 +177,11 @@ export class InlineAutofillMenu {
 
   readonly #position = () => {
     if (!this.#target || !this.visible || !classifyControl(this.#target)) return this.hide();
+    this.#positionToAnchor();
+  };
+
+  #positionToAnchor() {
+    if (!this.#target || !this.#target.isConnected) return this.hide();
     const rect = this.#anchor?.isConnected ? this.#anchor.getBoundingClientRect() : this.#target.getBoundingClientRect();
     const view = this.#document.defaultView;
     const visual = view?.visualViewport;
@@ -172,7 +195,7 @@ export class InlineAutofillMenu {
     this.#host.style.setProperty("--vaultmesh-menu-max-height", `${layout.maxHeight}px`);
     this.#host.style.top = layout.top === undefined ? "auto" : `${layout.top}px`;
     this.#host.style.bottom = layout.bottom === undefined ? "auto" : `${(view?.innerHeight ?? 640) - layout.bottom}px`;
-  };
+  }
 
   readonly #onKeyDown = (event: KeyboardEvent) => {
     if (!this.visible || event.isComposing) return;

@@ -6,14 +6,19 @@ where
     F: FnOnce(&mut DesktopRuntime) -> Result<T, DesktopRuntimeError> + Send + 'static,
 {
     let runtime = Arc::clone(&state.runtime);
+    let preview = state.browser_preauth_preview.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut runtime = runtime
             .lock()
             .map_err(|_| "保险库运行时暂时不可用。".to_owned())?;
-        runtime
+        let result = runtime
             .refresh_from_disk()
             .and_then(|()| operation(&mut runtime))
-            .map_err(|error| error.public_message().to_owned())
+            .map_err(|error| error.public_message().to_owned())?;
+        if runtime.is_unlocked() {
+            let _ = preview.sync_from_runtime(&mut runtime);
+        }
+        Ok(result)
     })
     .await
     .map_err(|_| "保险库操作未能完成。".to_owned())?

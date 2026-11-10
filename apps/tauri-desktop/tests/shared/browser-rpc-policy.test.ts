@@ -64,16 +64,19 @@ describe('browser RPC command authorization', () => {
     expect(authorizeBrowserRpc(request('pin.enable', { pin: '123456', failureLimit: 5, userGestureId: crypto.randomUUID() }), false)).toMatchObject({ authorized: false, code: 'unlock-required' });
   });
 
-  it('allows automatic autofill without a synthetic gesture only while unlocked', () => {
+  it('allows automatic autofill without a synthetic gesture only while unlocked, while allowing locked candidate preview and explicit selection fill', () => {
     expect(authorizeBrowserRpc(request('browser.autofill.candidates'), true).authorized).toBe(true);
+    expect(authorizeBrowserRpc(request('browser.autofill.candidates'), false).authorized).toBe(true);
     expect(authorizeBrowserRpc(request('browser.autofill.profile'), true).authorized).toBe(true);
     expect(authorizeBrowserRpc(request('browser.autofill.profile'), false)).toMatchObject({ authorized: false, code: 'unlock-required' });
     expect(authorizeBrowserRpc(request('browser.autofill.execute'), true).authorized).toBe(true);
+    expect(authorizeBrowserRpc(request('browser.autofill.execute', { mode: 'selection' }), false).authorized).toBe(true);
     expect(authorizeBrowserRpc(request('browser.card.capture-status'), true).authorized).toBe(true);
     expect(authorizeBrowserRpc(request('browser.login.password-changed'), true).authorized).toBe(true);
     expect(authorizeBrowserRpc(request('browser.fill.record'), true).authorized).toBe(true);
     expect(authorizeBrowserRpc(request('browser.fill.history'), true).authorized).toBe(true);
     expect(authorizeBrowserRpc(request('browser.autofill.execute'), false)).toMatchObject({ authorized: false, code: 'unlock-required' });
+    expect(authorizeBrowserRpc(request('browser.autofill.execute', { mode: 'automatic' }), false)).toMatchObject({ authorized: false, code: 'unlock-required' });
     expect(authorizeBrowserRpc(request('browser.card.capture-status'), false)).toMatchObject({ authorized: false, code: 'unlock-required' });
     expect(authorizeBrowserRpc(request('browser.login.password-changed'), false)).toMatchObject({ authorized: false, code: 'unlock-required' });
     expect(authorizeBrowserRpc(request('browser.fill.record'), false)).toMatchObject({ authorized: false, code: 'unlock-required' });

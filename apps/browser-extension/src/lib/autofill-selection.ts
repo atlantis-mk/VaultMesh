@@ -1,4 +1,4 @@
-import type { AutofillCandidate, FieldDescriptor } from "@/lib/protocol";
+import type { AutofillCandidate, FieldDescriptor, InlineAutofillCandidate } from "@/lib/protocol";
 
 type FillConfirmationItem = Pick<AutofillCandidate, "kind"> & {
   masterPasswordReprompt?: boolean;
@@ -17,8 +17,27 @@ export function requiresFillConfirmation(item: FillConfirmationItem): boolean {
   return item.kind === "card" || item.masterPasswordReprompt === true;
 }
 
-export function shouldQueueFillConfirmation(item: FillConfirmationItem, resultStatus?: string): boolean {
-  return requiresFillConfirmation(item) || resultStatus === "re-prompt-required";
+export function shouldQueueFillConfirmation(_item: FillConfirmationItem, resultStatus?: string): boolean {
+  return resultStatus === "re-prompt-required";
+}
+
+export function filterCandidatesByTypedUsername<
+  T extends Pick<InlineAutofillCandidate, "kind" | "title" | "subtitle">,
+>(candidates: readonly T[], typedQuery: string): T[] {
+  const query = typedQuery.trim().toLocaleLowerCase();
+  if (!query) return [...candidates];
+  return candidates.filter((candidate) => {
+    if (candidate.kind !== "login") return false;
+    const subtitle = candidate.subtitle.trim().toLocaleLowerCase();
+    const atIndex = subtitle.indexOf("@");
+    const localPart = atIndex > 0 ? subtitle.slice(0, atIndex) : "";
+    const title = candidate.title.trim().toLocaleLowerCase();
+    return (
+      subtitle.startsWith(query)
+      || (localPart.length > 0 && localPart.startsWith(query))
+      || title.includes(query)
+    );
+  });
 }
 
 export function fillResultStatus(response: unknown): string | null {
