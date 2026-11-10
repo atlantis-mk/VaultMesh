@@ -1,0 +1,49 @@
+schema: "2"
+id: "CHG-2026-081-browser-doctor-and-api-service"
+title: "浏览器本地回环 API 连接重构与 Doctor 诊断体系"
+type: "feature"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "消除浏览器连接对本地文件与钥匙串直读依赖，提供本地回环动态端口 API 服务与跨平台 Doctor 诊断/修复体系，支持主窗口关闭后台常驻与 macOS 后台权限引导"
+requirements:
+  - "REQ-BROWSER-001"
+  - "REQ-BROWSER-004"
+  - "REQ-DESKTOP-001"
+tests:
+  - "CT-BROWSER-001"
+  - "CT-NATIVE-BROWSER-001"
+  - "CT-BROWSER-PACKAGE-001"
+  - "CT-DESKTOP-STARTUP-001"
+  - "AT-BROWSER-001"
+  - "AT-TAURI-MACOS-001"
+adrs:
+  - "ADR-0056"
+context_refs:
+  - "adr/0056-browser-loopback-api-and-doctor.md"
+  - "specs/browser-integration.md"
+  - "specs/tauri-desktop-migration.md"
+  - "docs/03-functional-requirements.md"
+related_changes:
+  - "CHG-2026-077-browser-touchid"
+  - "CHG-2026-079-unified-desktop-keychain-root"
+boundaries:
+  - "desktop-runtime"
+  - "browser-broker"
+  - "native-host"
+  - "browser-doctor"
+  - "platform-startup"
+risks:
+  - "动态端口分配范围 (42800..=42850) 在被恶意占用或穷尽时需优雅报错或引导"
+  - "本地 HTTP API 必须严格阻断任何携带 Origin/Sec-Fetch 头与 OPTIONS 的网页探测请求，杜绝跨站探测"
+  - "主窗口关闭保持常驻需确保 macOS 与 Windows 显式退出（托盘/菜单退出）依然能可靠终止进程与清理资源"
+  - "macOS 浏览器扩展目录探测涉及用户目录只读权限与各 Profile 路径差异，必须 fail-safe 处理"
+next:
+  - "Task 1: 建立 Work、ADR 与更新浏览器连接/桌面后台主规格"
+  - "Task 2: 修复桌面端主窗口关闭后后台常驻生命周期并支持 macOS 后台权限跳转"
+  - "Task 3: 实现桌面端本地回环动态端口 API 服务 (browser_broker_http)"
+  - "Task 4: 重构 vaultmesh-native-host 为零文件、零钥匙串的无状态端口发现中继"
+  - "Task 5: 扩展多浏览器 Manifest/插件安装探测并实现跨平台 Doctor 诊断、修复与商店跳转后端"
+  - "Task 6: 升级桌面端设置页 Doctor 诊断面板（含插件市场安装跳转）与系统后台权限引导卡片"
+  - "Task 7: 浏览器扩展 Popup 断开提示条增加“重试连接”按钮与简洁排查指引"
+  - "Task 8: 同步开发探测脚本、契约测试与文档追踪校验"

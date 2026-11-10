@@ -22,11 +22,10 @@ Tauri 是 macOS/Windows 的唯一产品 shell。Electron 与 Native Preview 源�
 路径直接拥有。源码移除不代表 Windows、真实 Chromium、签名、upgrade/rollback AT 已完成。
 
 Tauri browser broker 的共享 schema/policy 与 Rust dispatcher 必须保持 111/111 route parity，并对
-未知 route、非法 payload、锁定、过期、重放和越权操作 fail closed。macOS listener 必须使用
-owner-only 短 Unix socket path，拒绝非 socket stale target；Windows 必须使用独立 named pipe
-adapter。pairing secret 必须保存在 OS credential service，磁盘只保存 owner-only enabled/tombstone
-state；credential 缺失或 record 损坏必须 fail closed，不得静默轮换。App Exit 必须停止 listener
-并清除 socket pathname。
+未知 route、非法 payload、锁定、过期、重放和越权操作 fail closed。broker 在 `127.0.0.1:42800..=42850`
+启动无状态回环 HTTP 监听器（ADR-0056），提供 `/discover` 与 `/rpc`，严格拒绝包含 `Origin`、`Sec-Fetch-*` 头
+或 `OPTIONS` 的请求以防网页探测。桌面主窗口关闭时保持后台常驻，仅销毁主窗口 WebView，保持托盘与
+后台 Broker 监听；仅在显式退出时清理状态并关闭监听器。配对秘密与保险库状态完全由桌面主进程托管。
 
 ## Renderer 与 command 边界
 
@@ -61,9 +60,9 @@ state；credential 缺失或 record 损坏必须 fail closed，不得静默轮�
 - 主窗口嵌入认证遵循 REQ-SEC-002 与 ADR-0050：typed command 只绑定 main，Rust coordinator 拥有 generation、当前 Vault/凭据绑定和取消；平台 adapter 独占原生视图/context。凭据读取及 core 解锁必须离开主线程，只有有效会话且窗口仍激活时才能发布授权；MCP 与浏览器认证保持独立。
 - Rust desktop runtime 独占 macOS/Windows 登录项注册与查询；登录项只能传入固定
   `--autostart` 参数。首次默认注册使用 app-data 内的非秘密初始化标记区分用户后续显式关闭，
-  renderer 不获得 autostart 插件 capability，也不能提供可执行文件路径或启动参数。
+  renderer 不获得 autostart 插件 capability，也不能提供可执行文件路径或启动参数。支持检测系统后台项与登录项权限状态，并在设置中提供一键唤起系统后台权限面板（macOS 下唤起 `x-apple.systempreferences:com.apple.LoginItems-Settings.extension`）。
 - 主产品窗口从配置起保持隐藏；runtime 仅在确认不是 `--autostart` 启动后显示并聚焦窗口。
-  登录项启动必须保留锁定状态和托盘入口，注册查询或写入失败不得阻止应用启动。
+  登录项启动必须保留锁定状态和托盘入口，注册查询或写入失败不得阻止应用启动。主窗口关闭时销毁 WebView 并保持后台常驻，仅在托盘或应用菜单显式退出时彻底终止。
 
 ## Tauri-only source Gate
 

@@ -589,7 +589,7 @@ pub fn run() {
             );
             let browser_autofill_unlocks = Arc::new(Mutex::new(BrowserAutofillUnlockQueue::default()));
             #[cfg(unix)]
-            let browser_listener =
+            let (browser_listener, browser_http_listener) =
                 BrowserPairingService::new(app_data.join("browser-pairing.json"), &credentials_store)
                     .load_or_create()
                     .ok()
@@ -608,14 +608,22 @@ pub fn run() {
                         ));
                         BrowserBrokerCore::new_with_platform(vault_path.clone(), secret, platform).ok()
                     })
-                    .and_then(|broker| {
-                        BrowserBrokerUnixListener::start(
+                    .map(|broker| {
+                        let broker_arc = Arc::new(Mutex::new(broker));
+                        let unix = BrowserBrokerUnixListener::start(
                             std::env::temp_dir().join("vaultmesh-tauri-browser.sock"),
-                            Arc::new(Mutex::new(broker)),
+                            Arc::clone(&broker_arc),
                         )
                         .ok()
+                        .map(Arc::new);
+                        let http = BrowserBrokerHttpListener::start(Arc::clone(&broker_arc))
+                            .ok()
+                            .map(Arc::new);
+                        (unix, http)
                     })
-                    .map(Arc::new);
+                    .unwrap_or((None, None));
+            #[cfg(not(unix))]
+            let browser_http_listener = None;
             #[cfg(target_os = "windows")]
             let browser_integration = {
                 let browser_app_handle = app.handle().clone();
@@ -719,6 +727,7 @@ pub fn run() {
                 _agent_pipe_listener: agent_pipe_listener,
                 #[cfg(unix)]
                 _browser_listener: browser_listener,
+                _browser_http_listener: browser_http_listener,
                 _bitwarden_development_listener: bitwarden_development_listener,
                 #[cfg(target_os = "windows")]
                 browser_integration,
@@ -801,17 +810,28 @@ pub fn run() {
         if matches!(event, RunEvent::Reopen { .. }) {
             show_main_window(handle);
         }
-        if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-            cleanup_app_state(handle);
-        }
-        if matches!(event, RunEvent::Resumed)
-            && let Some(state) = handle.try_state::<RuntimeState>()
-        {
-            // The OS suspends application threads during sleep. Tear down any
-            // sockets and ephemeral material before accepting post-resume work.
-            desktop_authentication::suspend(handle, &state);
-            stop_lan_pairing(&state);
-            lock_system_authorizations(handle, &state);
+        match event {
+            RunEvent::ExitRequested { code, ref api, .. } => {
+                if code.is_none() {
+                    // All windows closed; keep tray and background services running.
+                    api.prevent_exit();
+                } else {
+                    cleanup_app_state(handle);
+                }
+            }
+            RunEvent::Exit => {
+                cleanup_app_state(handle);
+            }
+            RunEvent::Resumed => {
+                if let Some(state) = handle.try_state::<RuntimeState>() {
+                    // The OS suspends application threads during sleep. Tear down any
+                    // sockets and ephemeral material before accepting post-resume work.
+                    desktop_authentication::suspend(handle, &state);
+                    stop_lan_pairing(&state);
+                    lock_system_authorizations(handle, &state);
+                }
+            }
+            _ => {}
         }
     });
 }
@@ -843,6 +863,9 @@ fn lock_system_authorizations(app: &AppHandle, state: &RuntimeState) {
     finish_agent_boundary_lock(state);
     #[cfg(unix)]
     if let Some(listener) = &state._browser_listener {
+        listener.lock_vault();
+    }
+    if let Some(listener) = &state._browser_http_listener {
         listener.lock_vault();
     }
     #[cfg(target_os = "windows")]
@@ -1067,6 +1090,9 @@ pub(super) fn cleanup_app_state(handle: &AppHandle) {
     finish_policy_lock(handle, &state);
     #[cfg(unix)]
     if let Some(listener) = &state._browser_listener {
+        listener.stop();
+    }
+    if let Some(listener) = &state._browser_http_listener {
         listener.stop();
     }
     #[cfg(target_os = "windows")]

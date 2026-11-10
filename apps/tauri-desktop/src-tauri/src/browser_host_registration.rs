@@ -11,14 +11,16 @@ use std::io::Write;
 
 #[cfg(target_os = "macos")]
 #[path = "browser_host_registration_macos.rs"]
-mod macos;
-#[cfg(all(target_os = "macos", not(debug_assertions)))]
+pub mod macos;
+#[cfg(target_os = "macos")]
 pub use macos::install_macos_browser_host;
 
 pub const BROWSER_HOST_NAME: &str = "com.vaultmesh.browser";
 #[cfg(any(target_os = "windows", test))]
 pub const BROWSER_PIPE_NAME: &str = r"\\.\pipe\VaultMesh.BrowserBroker.v2";
+#[cfg(any(target_os = "windows", test))]
 pub const BROWSER_PAIRING_SERVICE: &str = "com.vaultmesh.desktop.browser-pairing";
+#[cfg(any(target_os = "windows", test))]
 pub const BROWSER_PAIRING_ACCOUNT: &str = "native-host-hmac-v1";
 pub const DEFAULT_DEVELOPMENT_EXTENSION_ID: &str = "bdneegbnjbheblmamalplnddbodcghbg";
 pub const FIREFOX_EXTENSION_ID: &str = "vaultmesh@atlantis-mk.github.io";
@@ -39,7 +41,7 @@ pub struct WindowsBrowserHostPlan {
     pub firefox_manifest: Vec<u8>,
 }
 
-#[cfg(any(target_os = "windows", all(target_os = "macos", not(debug_assertions))))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 pub fn configured_extension_id() -> io::Result<&'static str> {
     let extension_id =
         option_env!("VAULTMESH_BROWSER_EXTENSION_ID").unwrap_or(DEFAULT_DEVELOPMENT_EXTENSION_ID);

@@ -7,10 +7,41 @@ use super::write_private_file;
 pub const AUTOSTART_ARGUMENT: &str = "--autostart";
 const INITIALIZED_MARKER: &str = "desktop-autostart-initialized";
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StartupSettings {
     pub enabled: bool,
+    #[serde(default = "default_can_open_system_settings")]
+    pub can_open_system_settings: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_settings_hint: Option<String>,
+}
+
+fn default_can_open_system_settings() -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows"))
+}
+
+pub fn open_system_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
+            .spawn()
+            .map_err(|e| format!("无法打开 macOS 登录项设置: {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "ms-settings:startupapps"])
+            .spawn()
+            .map_err(|e| format!("无法打开 Windows 启动应用设置: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Err("当前平台不支持打开系统设置。".to_owned())
+    }
 }
 
 pub fn marker_path(app_data: &Path) -> PathBuf {
@@ -75,7 +106,11 @@ where
     if enabled != requested {
         return Err("系统没有应用登录时启动设置。".to_owned());
     }
-    Ok(StartupSettings { enabled })
+    Ok(StartupSettings {
+        enabled,
+        can_open_system_settings: default_can_open_system_settings(),
+        system_settings_hint: None,
+    })
 }
 
 fn mark_initialized(marker: &Path) -> Result<(), String> {

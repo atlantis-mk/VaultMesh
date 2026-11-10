@@ -515,6 +515,41 @@ impl BrowserBrokerCore {
         self.handle_line_or_defer_at(line, Utc::now().timestamp_millis())
     }
 
+    pub(crate) fn handle_http_payload_or_defer(&mut self, payload: &[u8]) -> BrokerLineOutcome {
+        self.handle_http_payload_or_defer_at(payload, Utc::now().timestamp_millis())
+    }
+
+    fn handle_http_payload_or_defer_at(
+        &mut self,
+        payload: &[u8],
+        now_millis: i64,
+    ) -> BrokerLineOutcome {
+        if self.revoked {
+            return BrokerLineOutcome::Immediate(host_status("unpaired", None));
+        }
+        if payload.is_empty() || payload.len() > MAX_LINE_BYTES {
+            return BrokerLineOutcome::Immediate(host_status("invalid-message", None));
+        }
+        if let Ok(envelope) = serde_json::from_slice::<Envelope>(payload) {
+            if self.authenticate(&envelope) {
+                if let Some(inner) = decode_base64url(&envelope.payload) {
+                    if inner.len() <= MAX_RPC_BYTES {
+                        return self.handle_rpc_or_defer(&envelope.request_id, &inner, now_millis);
+                    }
+                }
+            }
+        }
+        let raw: Value = match serde_json::from_slice(payload) {
+            Ok(value) => value,
+            Err(_) => return BrokerLineOutcome::Immediate(host_status("invalid-message", None)),
+        };
+        let request_id = raw
+            .get("requestId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        self.handle_rpc_or_defer(request_id, payload, now_millis)
+    }
+
     fn handle_line_at(&mut self, line: &[u8], now_millis: i64) -> Value {
         match self.handle_line_or_defer_at(line, now_millis) {
             BrokerLineOutcome::Immediate(value) => value,

@@ -109,8 +109,10 @@ export interface VaultMeshApi {
     onAuthentication(callback: (event: DesktopAuthenticationEvent) => void): Promise<() => void>;
     startupSettings(): Promise<DesktopStartupSettings>;
     updateStartupSettings(input: DesktopStartupSettings): Promise<DesktopStartupSettings>;
+    openSystemSettings(): Promise<{ success: boolean }>;
     browserIntegrationStatus(): Promise<DesktopBrowserIntegrationStatus>;
     retryBrowserIntegration(): Promise<DesktopBrowserIntegrationStatus>;
+    openBrowserStore(browserId: string): Promise<{ opened: boolean }>;
   };
   vault: {
     create(input: MasterPasswordInput): Promise<VaultOperationResult>;

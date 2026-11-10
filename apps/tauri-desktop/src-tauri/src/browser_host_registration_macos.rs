@@ -11,19 +11,18 @@ use atomic_write_file::{
 };
 use serde_json::json;
 
-#[cfg(not(debug_assertions))]
 use super::configured_extension_id;
 use super::{
-    BROWSER_HOST_NAME, BROWSER_PAIRING_ACCOUNT, BROWSER_PAIRING_SERVICE, FIREFOX_EXTENSION_ID,
+    BROWSER_HOST_NAME, FIREFOX_EXTENSION_ID,
     allowed_origin,
 };
 
-struct MacOSBrowserHostPlan {
-    native_host_path: PathBuf,
-    files: Vec<(PathBuf, Vec<u8>)>,
+pub struct MacOSBrowserHostPlan {
+    pub native_host_path: PathBuf,
+    pub files: Vec<(PathBuf, Vec<u8>)>,
 }
 
-fn macos_browser_host_plan(
+pub fn macos_browser_host_plan(
     home: &Path,
     temporary_directory: &Path,
     desktop_executable: &Path,
@@ -60,15 +59,6 @@ fn macos_browser_host_plan(
     let firefox_manifest_path = support
         .join("Mozilla/NativeMessagingHosts")
         .join(&manifest_name);
-    let config = json!({
-        "version": 2,
-        "brokerSocket": broker_socket,
-        "keychainService": BROWSER_PAIRING_SERVICE,
-        "keychainAccount": BROWSER_PAIRING_ACCOUNT,
-        "chromiumAllowedOrigin": origin,
-        "firefoxExtensionId": FIREFOX_EXTENSION_ID,
-        "firefoxManifestPath": firefox_manifest_path,
-    });
     let chromium_manifest = json!({
         "name": BROWSER_HOST_NAME,
         "description": "VaultMesh Tauri protocol v2 native messaging host",
@@ -88,10 +78,6 @@ fn macos_browser_host_plan(
         native_host_path,
         files: vec![
             (
-                support.join("com.vaultmesh.desktop/browser-host-config.json"),
-                encode(&config)?,
-            ),
-            (
                 support
                     .join("Google/Chrome/NativeMessagingHosts")
                     .join(&manifest_name),
@@ -100,6 +86,30 @@ fn macos_browser_host_plan(
             (
                 support
                     .join("Microsoft Edge/NativeMessagingHosts")
+                    .join(&manifest_name),
+                encode(&chromium_manifest)?,
+            ),
+            (
+                support
+                    .join("BraveSoftware/Brave-Browser/NativeMessagingHosts")
+                    .join(&manifest_name),
+                encode(&chromium_manifest)?,
+            ),
+            (
+                support
+                    .join("Arc/User Data/NativeMessagingHosts")
+                    .join(&manifest_name),
+                encode(&chromium_manifest)?,
+            ),
+            (
+                support
+                    .join("Vivaldi/NativeMessagingHosts")
+                    .join(&manifest_name),
+                encode(&chromium_manifest)?,
+            ),
+            (
+                support
+                    .join("Chromium/NativeMessagingHosts")
                     .join(&manifest_name),
                 encode(&chromium_manifest)?,
             ),
@@ -136,7 +146,7 @@ fn validate_target(path: &Path) -> io::Result<()> {
     }
 }
 
-fn install_plan(plan: &MacOSBrowserHostPlan) -> io::Result<()> {
+pub fn install_plan(plan: &MacOSBrowserHostPlan) -> io::Result<()> {
     let host = fs::symlink_metadata(&plan.native_host_path)?;
     if !host.is_file() || host.len() == 0 || host.permissions().mode() & 0o111 == 0 {
         return Err(io::Error::new(
@@ -174,18 +184,29 @@ fn install_plan(plan: &MacOSBrowserHostPlan) -> io::Result<()> {
     Ok(())
 }
 
-// This entry point is intentionally absent in debug desktop builds.
-#[cfg(not(debug_assertions))]
 pub fn install_macos_browser_host() -> io::Result<()> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory unavailable"))?;
-    let plan = macos_browser_host_plan(
+    let desktop_executable = std::env::current_exe()?;
+    let extension_id = configured_extension_id()?;
+    let plan = match macos_browser_host_plan(
         &home,
         &std::env::temp_dir(),
-        &std::env::current_exe()?,
-        configured_extension_id()?,
-    )?;
+        &desktop_executable,
+        extension_id,
+    ) {
+        Ok(plan) => plan,
+        Err(err) => {
+            #[cfg(debug_assertions)]
+            {
+                eprintln!("debug desktop: skipping macOS host manifest installation: {err}");
+                return Ok(());
+            }
+            #[cfg(not(debug_assertions))]
+            return Err(err);
+        }
+    };
     install_plan(&plan)
 }
 
@@ -252,39 +273,43 @@ mod tests {
             .iter()
             .map(|(_, bytes)| serde_json::from_slice(bytes).unwrap())
             .collect();
-        assert_eq!(
-            values[0],
-            json!({
-                "version": 2,
-                "brokerSocket": "/tmp/vaultmesh-tauri-browser.sock",
-                "keychainService": BROWSER_PAIRING_SERVICE,
-                "keychainAccount": BROWSER_PAIRING_ACCOUNT,
-                "chromiumAllowedOrigin": format!("chrome-extension://{DEFAULT_DEVELOPMENT_EXTENSION_ID}/"),
-                "firefoxExtensionId": FIREFOX_EXTENSION_ID,
-                "firefoxManifestPath": plan.files[3].0,
-            })
-        );
+        assert_eq!(plan.files.len(), 7);
         assert!(
             plan.files[0]
-                .0
-                .ends_with("com.vaultmesh.desktop/browser-host-config.json")
-        );
-        assert!(
-            plan.files[1]
                 .0
                 .ends_with("Google/Chrome/NativeMessagingHosts/com.vaultmesh.browser.json")
         );
         assert!(
-            plan.files[2]
+            plan.files[1]
                 .0
                 .ends_with("Microsoft Edge/NativeMessagingHosts/com.vaultmesh.browser.json")
         );
         assert!(
+            plan.files[2]
+                .0
+                .ends_with("BraveSoftware/Brave-Browser/NativeMessagingHosts/com.vaultmesh.browser.json")
+        );
+        assert!(
             plan.files[3]
+                .0
+                .ends_with("Arc/User Data/NativeMessagingHosts/com.vaultmesh.browser.json")
+        );
+        assert!(
+            plan.files[4]
+                .0
+                .ends_with("Vivaldi/NativeMessagingHosts/com.vaultmesh.browser.json")
+        );
+        assert!(
+            plan.files[5]
+                .0
+                .ends_with("Chromium/NativeMessagingHosts/com.vaultmesh.browser.json")
+        );
+        assert!(
+            plan.files[6]
                 .0
                 .ends_with("Mozilla/NativeMessagingHosts/com.vaultmesh.browser.json")
         );
-        for value in &values[1..] {
+        for value in &values {
             assert_eq!(value["path"], plan.native_host_path.to_str().unwrap());
             assert_eq!(value["name"], BROWSER_HOST_NAME);
             assert_eq!(value["type"], "stdio");
@@ -305,19 +330,20 @@ mod tests {
                 .to_string_lossy()
                 .contains("agent-mcp")
         );
-        assert_eq!(values[1], values[2]);
+        for value in &values[0..6] {
+            assert_eq!(
+                value["allowed_origins"],
+                json!([format!(
+                    "chrome-extension://{DEFAULT_DEVELOPMENT_EXTENSION_ID}/"
+                )])
+            );
+            assert!(value.get("allowed_extensions").is_none());
+        }
         assert_eq!(
-            values[1]["allowed_origins"],
-            json!([format!(
-                "chrome-extension://{DEFAULT_DEVELOPMENT_EXTENSION_ID}/"
-            )])
-        );
-        assert!(values[1].get("allowed_extensions").is_none());
-        assert_eq!(
-            values[3]["allowed_extensions"],
+            values[6]["allowed_extensions"],
             json!([FIREFOX_EXTENSION_ID])
         );
-        assert!(values[3].get("allowed_origins").is_none());
+        assert!(values[6].get("allowed_origins").is_none());
     }
 
     #[test]
@@ -385,11 +411,11 @@ mod tests {
                 "unchanged registration must not be rewritten"
             );
         }
-        let chrome = &plan.files[1].0;
+        let chrome = &plan.files[0].0;
         assert!(chrome.starts_with(&fixture.0));
         fs::remove_file(chrome).unwrap();
-        fs::write(&plan.files[2].0, b"stale manifest").unwrap();
-        fs::set_permissions(&plan.files[0].0, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&plan.files[1].0, b"stale manifest").unwrap();
+        fs::set_permissions(&plan.files[1].0, fs::Permissions::from_mode(0o644)).unwrap();
         let relocated = fixture.plan("Relocated VaultMesh.app");
         install_plan(&relocated).unwrap();
         for (path, bytes) in &relocated.files {
@@ -425,7 +451,7 @@ mod tests {
         install_plan(&plan).unwrap();
         let canary = fixture.0.join("canary");
         fs::write(&canary, b"unrelated file").unwrap();
-        let chrome = &plan.files[1].0;
+        let chrome = &plan.files[0].0;
         assert!(chrome.starts_with(&fixture.0));
         fs::remove_file(chrome).unwrap();
         symlink(&canary, chrome).unwrap();
@@ -435,7 +461,7 @@ mod tests {
             io::ErrorKind::PermissionDenied
         );
         assert_eq!(fs::read(&canary).unwrap(), b"unrelated file");
-        assert_eq!(fs::read(&plan.files[0].0).unwrap(), plan.files[0].1);
+        assert_eq!(fs::read(&plan.files[1].0).unwrap(), plan.files[1].1);
     }
 
     #[test]

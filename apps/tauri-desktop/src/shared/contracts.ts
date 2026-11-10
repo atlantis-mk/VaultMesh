@@ -565,11 +565,34 @@ export const VaultOperationResultSchema = z.object({
 
 export const DialogOperationResultSchema = z.object({ cancelled: z.boolean() });
 
-export const DesktopStartupSettingsSchema = z.object({ enabled: z.boolean() }).strict();
+export const DesktopStartupSettingsSchema = z
+  .object({
+    enabled: z.boolean(),
+    canOpenSystemSettings: z.boolean().optional(),
+    systemSettingsHint: z.string().optional(),
+  })
+  .strict();
 
 export const DEFAULT_DESKTOP_STARTUP_SETTINGS: z.infer<typeof DesktopStartupSettingsSchema> = {
   enabled: true,
 };
+
+export const DoctorCheckItemSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  status: z.enum(['ok', 'warn', 'error']),
+  message: z.string(),
+});
+
+export const BrowserDoctorItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  installed: z.boolean(),
+  manifestRegistered: z.boolean(),
+  manifestPath: z.string().nullable(),
+  extensionInstalled: z.boolean(),
+  storeUrl: z.string(),
+});
 
 export const DesktopBrowserIntegrationStatusSchema = z.object({
   supported: z.boolean(),
@@ -586,7 +609,13 @@ export const DesktopBrowserIntegrationStatusSchema = z.object({
     'registration-unavailable',
     'identity-invalid',
   ]).nullable(),
-}).strict();
+  apiPort: z.number().int().nullable().optional(),
+  checkItems: z.array(DoctorCheckItemSchema).optional(),
+  browsers: z.array(BrowserDoctorItemSchema).optional(),
+});
+
+export type DoctorCheckItem = z.infer<typeof DoctorCheckItemSchema>;
+export type BrowserDoctorItem = z.infer<typeof BrowserDoctorItemSchema>;
 
 export const TrashItemSummarySchema = z.object({
   trashId: z.uuid(), itemId: z.uuid(), title: z.string(), username: z.string(),

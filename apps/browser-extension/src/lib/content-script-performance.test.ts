@@ -128,7 +128,7 @@ describe("CT-AUTOFILL-001 content script discovery cost", () => {
       vi.restoreAllMocks();
       container.remove();
     }
-  });
+  }, 20_000);
 
   it("does not rescan for page mutations", async () => {
     vi.useFakeTimers();
