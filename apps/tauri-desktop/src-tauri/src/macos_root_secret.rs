@@ -36,8 +36,8 @@ use security_framework_sys::code_signing::{
     SecCodeCopySelf, SecCodeRef, SecStaticCodeCreateWithPath, SecStaticCodeRef,
 };
 use security_framework_sys::item::{
-    kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecMatchLimit,
-    kSecMatchLimitAll, kSecReturnAttributes, kSecReturnRef, kSecValueData,
+    kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecReturnRef,
+    kSecValueData,
 };
 use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching};
 use sha2::Digest;
@@ -149,47 +149,6 @@ pub fn get_or_create_root_secret() -> Result<Zeroizing<[u8; 32]>, String> {
         }
     }
     legacy_root_secret()
-}
-
-pub fn list_legacy_generic_passwords(service: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let query = dictionary(&[
-        (
-            static_key(unsafe { kSecClass }),
-            static_type(unsafe { kSecClassGenericPassword }),
-        ),
-        (
-            static_key(unsafe { kSecAttrService }),
-            CFString::from(service).into_CFType(),
-        ),
-        (
-            static_key(unsafe { kSecMatchLimit }),
-            static_type(unsafe { kSecMatchLimitAll }),
-        ),
-        (
-            static_key(unsafe { kSecReturnAttributes }),
-            CFBoolean::from(true).into_CFType(),
-        ),
-    ]);
-    let mut result: CFTypeRef = ptr::null();
-    let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
-    if status == errSecItemNotFound {
-        return Ok(Vec::new());
-    }
-    if status != 0 {
-        return Err(format!("无法枚举旧钥匙串条目 ({status})"));
-    }
-    let owned = unsafe { CFType::wrap_under_create_rule(result) };
-    let mut secrets = Vec::new();
-    for account in parse_legacy_accounts(&owned)? {
-        match generic_password(PasswordOptions::new_generic_password(service, &account)) {
-            Ok(secret) => secrets.push((account, secret)),
-            Err(error) if error.code() == errSecItemNotFound => {}
-            Err(error) => {
-                return Err(format!("无法读取旧钥匙串条目 ({})", error.code()));
-            }
-        }
-    }
-    Ok(secrets)
 }
 
 /// A release `.app` whose binaries cannot produce a complete share plan
@@ -1057,32 +1016,6 @@ fn cf_array_strings(value: CFTypeRef) -> Vec<String> {
         groups.push(unsafe { CFString::wrap_under_get_rule(item as _) }.to_string());
     }
     groups
-}
-
-fn parse_legacy_accounts(value: &CFType) -> Result<Vec<String>, String> {
-    let mut dicts = Vec::new();
-    if unsafe { CFGetTypeID(value.as_CFTypeRef()) } == unsafe { CFArrayGetTypeID() } {
-        let count = unsafe { CFArrayGetCount(value.as_CFTypeRef() as _) };
-        if count > 64 {
-            return Err("旧钥匙串条目过多".to_owned());
-        }
-        for index in 0..count {
-            let item = unsafe { CFArrayGetValueAtIndex(value.as_CFTypeRef() as _, index) };
-            if !item.is_null() {
-                dicts.push(item);
-            }
-        }
-    } else {
-        dicts.push(value.as_CFTypeRef());
-    }
-    let mut accounts = Vec::new();
-    for dict in dicts {
-        let Some(account) = dictionary_string(dict, unsafe { kSecAttrAccount }) else {
-            continue;
-        };
-        accounts.push(account);
-    }
-    Ok(accounts)
 }
 
 fn dictionary(pairs: &[(CFString, CFType)]) -> CFDictionary<CFString, CFType> {

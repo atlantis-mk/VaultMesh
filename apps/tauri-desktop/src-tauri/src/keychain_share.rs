@@ -17,31 +17,12 @@ pub const KEYCHAIN_ACCESS_GROUP_SUFFIX: &str = "com.vaultmesh.desktop";
 /// The parsed dictionary is `kSecCodeInfoEntitlementsDict`.
 pub const SEC_CS_SIGNING_INFORMATION: u32 = 1 << 1;
 
-pub const LEGACY_CREDENTIAL_SERVICES: &[&str] = &[
-    "com.vaultmesh.desktop.desktop-biometric",
-    "com.vaultmesh.desktop.agent-biometric",
-    "com.vaultmesh.desktop.browser-biometric",
-    "com.vaultmesh.desktop.agent-pairing",
-    "com.vaultmesh.desktop.agent-authorization",
-    "com.vaultmesh.desktop.browser-pairing",
-    "com.vaultmesh.desktop.lan-pairing",
-    "com.vaultmesh.desktop.pin",
-    "com.vaultmesh.desktop.browser-pin",
-    "com.vaultmesh.desktop.agent-pin",
-];
-
-const MIGRATION_MARKER_SERVICE: &str = "com.vaultmesh.desktop.migration";
-const MIGRATION_MARKER_ACCOUNT: &str = "legacy-services-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InBundleExecutables {
     pub macos_dir: PathBuf,
     pub main_executable: PathBuf,
     pub native_host: PathBuf,
-}
-
-pub fn migration_marker_key() -> String {
-    format!("{MIGRATION_MARKER_SERVICE}::{MIGRATION_MARKER_ACCOUNT}")
 }
 
 pub fn is_allowed_bundle_executable(name: &str) -> bool {
@@ -520,16 +501,5 @@ mod tests {
         );
         assert!(select_keychain_access_groups(None, Some(b"bplist00not-xml")).is_empty());
         assert!(access_groups_from_entitlements_xml(b"bplist00").is_none());
-    }
-
-    #[test]
-    fn legacy_service_list_does_not_add_root_or_development_services() {
-        assert!(!LEGACY_CREDENTIAL_SERVICES.contains(&"com.vaultmesh.desktop"));
-        assert!(
-            !LEGACY_CREDENTIAL_SERVICES
-                .iter()
-                .any(|service| service.contains("bitwarden") || service.contains("dev"))
-        );
-        assert!(LEGACY_CREDENTIAL_SERVICES.contains(&"com.vaultmesh.desktop.browser-pairing"));
     }
 }

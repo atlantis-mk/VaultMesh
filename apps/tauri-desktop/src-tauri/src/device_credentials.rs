@@ -30,11 +30,6 @@ pub trait RootSecretStore: Send + Sync {
     fn get_or_create_root_secret(&self) -> Result<Zeroizing<[u8; 32]>, String>;
 }
 
-pub trait LegacyKeyringProvider: Send + Sync {
-    fn list_legacy_secrets(&self, service: &str) -> Result<Vec<(String, Vec<u8>)>, String>;
-    fn delete_legacy_secret(&self, service: &str, account: &str);
-}
-
 pub struct PlatformRootSecretStore;
 
 #[cfg(target_os = "macos")]
@@ -75,47 +70,6 @@ impl RootSecretStore for PlatformRootSecretStore {
     }
 }
 
-pub struct PlatformLegacyKeyring;
-
-struct NoLegacyKeyring;
-
-impl LegacyKeyringProvider for NoLegacyKeyring {
-    fn list_legacy_secrets(&self, _service: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-        Ok(Vec::new())
-    }
-
-    fn delete_legacy_secret(&self, _service: &str, _account: &str) {}
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-impl LegacyKeyringProvider for PlatformLegacyKeyring {
-    fn list_legacy_secrets(&self, service: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-        #[cfg(target_os = "macos")]
-        {
-            crate::macos_root_secret::list_legacy_generic_passwords(service)
-        }
-        #[cfg(target_os = "windows")]
-        {
-            list_windows_legacy_secrets(service)
-        }
-    }
-
-    fn delete_legacy_secret(&self, service: &str, account: &str) {
-        if let Ok(entry) = keyring::Entry::new(service, account) {
-            let _ = entry.delete_credential();
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-impl LegacyKeyringProvider for PlatformLegacyKeyring {
-    fn list_legacy_secrets(&self, _service: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-        Ok(Vec::new())
-    }
-
-    fn delete_legacy_secret(&self, _service: &str, _account: &str) {}
-}
-
 #[derive(Default, Serialize, Deserialize)]
 struct StoredPayload {
     version: u32,
@@ -125,7 +79,6 @@ struct StoredPayload {
 struct DeviceCredentialStoreInner {
     file_path: PathBuf,
     root_secret: Zeroizing<[u8; 32]>,
-    legacy_provider: Arc<dyn LegacyKeyringProvider>,
     entries: HashMap<String, String>,
     /// Set when the OS root secret could not be opened. Every read and write
     /// then fails closed with this non-secret reason instead of aborting startup.
@@ -187,74 +140,6 @@ pub fn default_desktop_app_data_dir() -> Option<PathBuf> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         None
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn list_windows_legacy_secrets(service: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-    use windows_sys::Win32::Security::Credentials::{
-        CRED_ENUMERATE_ALL_CREDENTIALS, CREDENTIALW, CredEnumerateW, CredFree,
-    };
-
-    let mut count = 0_u32;
-    let mut credentials: *mut *mut CREDENTIALW = std::ptr::null_mut();
-    let ok = unsafe {
-        CredEnumerateW(
-            std::ptr::null::<u16>(),
-            CRED_ENUMERATE_ALL_CREDENTIALS,
-            &mut count,
-            &mut credentials,
-        )
-    };
-    if ok == 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(1168) {
-            return Ok(Vec::new());
-        }
-        return Err("无法枚举旧凭据".to_owned());
-    }
-    let suffix = format!(".{service}");
-    let mut secrets = Vec::new();
-    unsafe {
-        for index in 0..count {
-            let credential = *credentials.add(index as usize);
-            if credential.is_null() {
-                continue;
-            }
-            let target = wide_ptr_to_string((*credential).TargetName);
-            let Some(account) = target.strip_suffix(&suffix) else {
-                continue;
-            };
-            if account.is_empty() || secrets.len() >= 64 {
-                continue;
-            }
-            let length = (*credential).CredentialBlobSize as usize;
-            let blob = if length == 0 || (*credential).CredentialBlob.is_null() {
-                Vec::new()
-            } else {
-                std::slice::from_raw_parts((*credential).CredentialBlob, length).to_vec()
-            };
-            secrets.push((account.to_owned(), blob));
-        }
-        CredFree(credentials.cast());
-    }
-    if secrets.len() >= 64 {
-        return Err("旧凭据条目过多".to_owned());
-    }
-    Ok(secrets)
-}
-
-#[cfg(target_os = "windows")]
-fn wide_ptr_to_string(pointer: *const u16) -> String {
-    if pointer.is_null() {
-        return String::new();
-    }
-    let mut length = 0_usize;
-    unsafe {
-        while *pointer.add(length) != 0 && length < 4096 {
-            length += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length))
     }
 }
 
@@ -399,44 +284,16 @@ struct LoadedCredentials {
 
 impl DeviceCredentialStore {
     pub fn platform(app_data_dir: &Path) -> Result<Self, String> {
-        Self::open(app_data_dir, true)
-    }
-
-    /// Native Host must not enumerate legacy Keychain services. Doing so on a
-    /// host-first launch prompts once per old Service. The main app performs
-    /// the one-shot migration and writes the marker.
-    pub fn open_without_legacy_scan(app_data_dir: &Path) -> Result<Self, String> {
-        Self::open(app_data_dir, false)
-    }
-
-    fn open(app_data_dir: &Path, scan_legacy: bool) -> Result<Self, String> {
         let file_path = app_data_dir.join(CREDENTIALS_FILE_NAME);
-        let root_store = Arc::new(PlatformRootSecretStore);
-        let legacy_provider = Arc::new(PlatformLegacyKeyring);
-        Self::open_with(file_path, root_store, legacy_provider, scan_legacy)
+        Self::with_stores(file_path, Arc::new(PlatformRootSecretStore))
     }
 
+    /// Opens only the encrypted file. Pre-v0.1.4 per-service Keychain entries
+    /// are never read, enumerated or deleted: every one of them would cost the
+    /// user a separate login-password prompt (ADR-0053).
     pub fn with_stores(
         file_path: PathBuf,
         root_store: Arc<dyn RootSecretStore>,
-        legacy_provider: Arc<dyn LegacyKeyringProvider>,
-    ) -> Result<Self, String> {
-        Self::open_with(file_path, root_store, legacy_provider, true)
-    }
-
-    pub fn with_stores_without_legacy_scan(
-        file_path: PathBuf,
-        root_store: Arc<dyn RootSecretStore>,
-        legacy_provider: Arc<dyn LegacyKeyringProvider>,
-    ) -> Result<Self, String> {
-        Self::open_with(file_path, root_store, legacy_provider, false)
-    }
-
-    fn open_with(
-        file_path: PathBuf,
-        root_store: Arc<dyn RootSecretStore>,
-        legacy_provider: Arc<dyn LegacyKeyringProvider>,
-        scan_legacy: bool,
     ) -> Result<Self, String> {
         let root_secret = root_store.get_or_create_root_secret()?;
         let loaded = DeviceCredentialStoreInner::load(&file_path, &root_secret)?;
@@ -444,14 +301,11 @@ impl DeviceCredentialStore {
             inner: Arc::new(Mutex::new(DeviceCredentialStoreInner {
                 file_path,
                 root_secret,
-                legacy_provider,
                 entries: loaded.entries,
                 unavailable: None,
             })),
         };
-        if scan_legacy {
-            store.migrate_known_legacy_services(loaded.reseal)?;
-        } else if loaded.reseal {
+        if loaded.reseal {
             let inner = store
                 .inner
                 .lock()
@@ -469,7 +323,6 @@ impl DeviceCredentialStore {
             inner: Arc::new(Mutex::new(DeviceCredentialStoreInner {
                 file_path: PathBuf::new(),
                 root_secret: Zeroizing::new([0u8; 32]),
-                legacy_provider: Arc::new(NoLegacyKeyring),
                 entries: HashMap::new(),
                 unavailable: Some(reason.into()),
             })),
@@ -477,68 +330,10 @@ impl DeviceCredentialStore {
     }
 
     pub fn unavailable_reason(&self) -> Option<String> {
-        self.inner.lock().ok().and_then(|inner| inner.unavailable.clone())
-    }
-
-    fn migrate_known_legacy_services(&self, force_reseal: bool) -> Result<(), String> {
-        let marker = crate::keychain_share::migration_marker_key();
-        let already_migrated = {
-            let inner = self
-                .inner
-                .lock()
-                .map_err(|_| "凭据互斥锁中毒".to_string())?;
-            inner.entries.contains_key(&marker)
-        };
-        if already_migrated {
-            if force_reseal {
-                let inner = self
-                    .inner
-                    .lock()
-                    .map_err(|_| "凭据互斥锁中毒".to_string())?;
-                inner.save()?;
-            }
-            return Ok(());
-        }
-
-        let legacy_provider = {
-            let inner = self
-                .inner
-                .lock()
-                .map_err(|_| "凭据互斥锁中毒".to_string())?;
-            inner.legacy_provider.clone()
-        };
-        let mut discovered = Vec::new();
-        for service in crate::keychain_share::LEGACY_CREDENTIAL_SERVICES {
-            let secrets = legacy_provider.list_legacy_secrets(service)?;
-            for (account, secret) in secrets {
-                discovered.push((*service, account, secret));
-            }
-        }
-
-        let mut inner = self
-            .inner
+        self.inner
             .lock()
-            .map_err(|_| "凭据互斥锁中毒".to_string())?;
-        for (service, account, secret) in &discovered {
-            inner
-                .entries
-                .entry(entry_key(service, account))
-                .or_insert_with(|| STANDARD.encode(secret));
-        }
-        inner.save()?;
-        drop(inner);
-
-        for (service, account, _) in &discovered {
-            legacy_provider.delete_legacy_secret(service, account);
-        }
-
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| "凭据互斥锁中毒".to_string())?;
-        inner.entries.insert(marker, STANDARD.encode(b"1"));
-        inner.save()?;
-        Ok(())
+            .ok()
+            .and_then(|inner| inner.unavailable.clone())
     }
 
     pub fn get(&self, service: &str, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
@@ -580,12 +375,7 @@ impl DeviceCredentialStore {
         }
         let key = entry_key(service, account);
         inner.entries.insert(key, STANDARD.encode(secret));
-        inner.save()?;
-
-        let legacy_provider = inner.legacy_provider.clone();
-        drop(inner);
-        legacy_provider.delete_legacy_secret(service, account);
-        Ok(())
+        inner.save()
     }
 
     pub fn delete(&self, service: &str, account: &str) -> Result<(), String> {
@@ -601,10 +391,6 @@ impl DeviceCredentialStore {
         if removed {
             inner.save()?;
         }
-
-        let legacy_provider = inner.legacy_provider.clone();
-        drop(inner);
-        legacy_provider.delete_legacy_secret(service, account);
         Ok(())
     }
 
@@ -662,33 +448,6 @@ pub mod test_helpers {
         }
     }
 
-    #[derive(Default)]
-    pub struct MemoryLegacyKeyring {
-        pub items: Mutex<HashMap<String, Vec<u8>>>,
-        pub list_calls: std::sync::atomic::AtomicUsize,
-    }
-
-    impl LegacyKeyringProvider for MemoryLegacyKeyring {
-        fn list_legacy_secrets(&self, service: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-            self.list_calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let prefix = format!("{service}::");
-            let items = self.items.lock().unwrap();
-            Ok(items
-                .iter()
-                .filter_map(|(key, secret)| {
-                    key.strip_prefix(&prefix)
-                        .map(|account| (account.to_owned(), secret.clone()))
-                })
-                .collect())
-        }
-
-        fn delete_legacy_secret(&self, service: &str, account: &str) {
-            let key = entry_key(service, account);
-            self.items.lock().unwrap().remove(&key);
-        }
-    }
-
     pub struct TestDir(pub PathBuf);
     impl Drop for TestDir {
         fn drop(&mut self) {
@@ -696,16 +455,14 @@ pub mod test_helpers {
         }
     }
 
-    pub fn temp_store() -> (DeviceCredentialStore, TestDir, Arc<MemoryLegacyKeyring>) {
+    pub fn temp_store() -> (DeviceCredentialStore, TestDir) {
         let temp_dir = std::env::temp_dir().join(format!("vaultmesh-cred-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&temp_dir).expect("create test dir");
         let file_path = temp_dir.join("device-credentials.enc");
         let root_store = Arc::new(MemoryRootSecretStore([42u8; 32]));
-        let legacy_provider = Arc::new(MemoryLegacyKeyring::default());
         let store =
-            DeviceCredentialStore::with_stores(file_path, root_store, legacy_provider.clone())
-                .expect("create store");
-        (store, TestDir(temp_dir), legacy_provider)
+            DeviceCredentialStore::with_stores(file_path, root_store).expect("create store");
+        (store, TestDir(temp_dir))
     }
 }
 
@@ -730,7 +487,7 @@ mod tests {
 
     #[test]
     fn test_device_credential_store_crud_and_persistence() {
-        let (store, temp_dir, _) = temp_store();
+        let (store, temp_dir) = temp_store();
         let file_path = temp_dir.0.join("device-credentials.enc");
 
         assert_eq!(store.get("svc1", "acc1").unwrap(), None);
@@ -744,10 +501,7 @@ mod tests {
 
         // Reload store from disk
         let root_store = Arc::new(MemoryRootSecretStore([42u8; 32]));
-        let legacy_provider = Arc::new(MemoryLegacyKeyring::default());
-        let reloaded =
-            DeviceCredentialStore::with_stores(file_path.clone(), root_store, legacy_provider)
-                .unwrap();
+        let reloaded = DeviceCredentialStore::with_stores(file_path.clone(), root_store).unwrap();
         assert_eq!(
             reloaded.get("svc1", "acc1").unwrap().unwrap().as_slice(),
             b"secret_value_1"
@@ -759,218 +513,67 @@ mod tests {
 
         // Reload again, should be gone
         let root_store2 = Arc::new(MemoryRootSecretStore([42u8; 32]));
-        let legacy_provider2 = Arc::new(MemoryLegacyKeyring::default());
-        let reloaded2 =
-            DeviceCredentialStore::with_stores(file_path, root_store2, legacy_provider2).unwrap();
+        let reloaded2 = DeviceCredentialStore::with_stores(file_path, root_store2).unwrap();
         assert_eq!(reloaded2.get("svc1", "acc1").unwrap(), None);
     }
 
     #[test]
-    fn test_startup_migration_deletes_known_services_and_get_does_not_fall_back() {
-        let temp_dir = std::env::temp_dir().join(format!("vaultmesh-cred-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&temp_dir).unwrap();
-        let file_path = temp_dir.join("device-credentials.enc");
-        let legacy_provider = Arc::new(MemoryLegacyKeyring::default());
-        legacy_provider.items.lock().unwrap().insert(
-            entry_key("com.vaultmesh.desktop.agent-pairing", "cursor"),
-            b"cursor_proof".to_vec(),
-        );
-        legacy_provider.items.lock().unwrap().insert(
-            entry_key(
-                "com.vaultmesh.desktop.browser-pairing",
-                "native-host-hmac-v1",
-            ),
-            b"browser-secret".to_vec(),
-        );
-        legacy_provider.items.lock().unwrap().insert(
-            entry_key("com.vaultmesh.desktop.pin", "desktop-pin-1"),
-            b"pin-secret".to_vec(),
-        );
-        legacy_provider.items.lock().unwrap().insert(
-            entry_key("com.example.unrelated", "keep"),
-            b"leave-me".to_vec(),
-        );
-        let root_store = Arc::new(MemoryRootSecretStore([42u8; 32]));
-        let store = DeviceCredentialStore::with_stores(
-            file_path.clone(),
-            root_store,
-            legacy_provider.clone(),
+    fn leftover_legacy_migration_marker_does_not_affect_reads_or_writes() {
+        let (store, temp_dir) = temp_store();
+        let file_path = temp_dir.0.join("device-credentials.enc");
+        store
+            .set(
+                "com.vaultmesh.desktop.migration",
+                "legacy-services-v1",
+                b"1",
+            )
+            .unwrap();
+        store
+            .set("com.vaultmesh.desktop.pin", "desktop-pin-1", b"pin")
+            .unwrap();
+
+        let reloaded = DeviceCredentialStore::with_stores(
+            file_path,
+            Arc::new(MemoryRootSecretStore([42u8; 32])),
         )
         .unwrap();
-        let lists_after_startup = legacy_provider
-            .list_calls
-            .load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
-            lists_after_startup,
-            crate::keychain_share::LEGACY_CREDENTIAL_SERVICES.len()
-        );
-        assert_eq!(
-            store
-                .get(
-                    "com.vaultmesh.desktop.browser-pairing",
-                    "native-host-hmac-v1"
-                )
+            reloaded
+                .get("com.vaultmesh.desktop.pin", "desktop-pin-1")
                 .unwrap()
                 .unwrap()
                 .as_slice(),
-            b"browser-secret"
-        );
-        assert_eq!(
-            legacy_provider
-                .list_calls
-                .load(std::sync::atomic::Ordering::SeqCst),
-            lists_after_startup,
-            "unified reads must not touch legacy services"
-        );
-        let items = legacy_provider.items.lock().unwrap();
-        assert!(
-            items
-                .get(&entry_key("com.vaultmesh.desktop.agent-pairing", "cursor"))
-                .is_none()
+            b"pin"
         );
         assert!(
-            items
-                .get(&entry_key(
-                    "com.vaultmesh.desktop.browser-pairing",
-                    "native-host-hmac-v1"
-                ))
-                .is_none()
-        );
-        assert!(
-            items
-                .get(&entry_key("com.vaultmesh.desktop.pin", "desktop-pin-1"))
-                .is_none()
-        );
-        assert_eq!(
-            items
-                .get(&entry_key("com.example.unrelated", "keep"))
-                .map(Vec::as_slice),
-            Some(b"leave-me".as_slice())
-        );
-        drop(items);
-
-        legacy_provider.items.lock().unwrap().insert(
-            entry_key(
-                "com.vaultmesh.desktop.browser-pairing",
-                "native-host-hmac-v1",
-            ),
-            b"should-not-be-read".to_vec(),
-        );
-        let root_store = Arc::new(MemoryRootSecretStore([42u8; 32]));
-        let reloaded =
-            DeviceCredentialStore::with_stores(file_path, root_store, legacy_provider.clone())
-                .unwrap();
-        assert!(
-            reloaded
-                .read_unified_secret("com.vaultmesh.desktop.browser-pairing", "missing")
-                .is_err()
-        );
-        assert_eq!(
             reloaded
                 .read_unified_secret(
                     "com.vaultmesh.desktop.browser-pairing",
                     "native-host-hmac-v1"
                 )
-                .unwrap()
-                .as_slice(),
-            b"browser-secret"
+                .is_err()
         );
-        assert_eq!(
-            legacy_provider
-                .items
-                .lock()
-                .unwrap()
-                .get(&entry_key(
-                    "com.vaultmesh.desktop.browser-pairing",
-                    "native-host-hmac-v1"
-                ))
-                .map(Vec::as_slice),
-            Some(b"should-not-be-read".as_slice()),
-            "a later legacy entry must stay untouched once migration has completed"
-        );
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn host_open_without_marker_does_not_enumerate_legacy_services() {
-        let temp_dir = std::env::temp_dir().join(format!("vaultmesh-cred-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&temp_dir).unwrap();
-        let file_path = temp_dir.join("device-credentials.enc");
-        let legacy_provider = Arc::new(MemoryLegacyKeyring::default());
-        legacy_provider.items.lock().unwrap().insert(
-            entry_key(
+        reloaded
+            .set(
                 "com.vaultmesh.desktop.browser-pairing",
                 "native-host-hmac-v1",
-            ),
-            b"browser-secret".to_vec(),
-        );
-        legacy_provider.items.lock().unwrap().insert(
-            entry_key("com.vaultmesh.desktop.pin", "desktop-pin-1"),
-            b"pin-secret".to_vec(),
-        );
-        let host_store = DeviceCredentialStore::with_stores_without_legacy_scan(
-            file_path.clone(),
-            Arc::new(MemoryRootSecretStore([42u8; 32])),
-            legacy_provider.clone(),
-        )
-        .unwrap();
-        assert_eq!(
-            legacy_provider
-                .list_calls
-                .load(std::sync::atomic::Ordering::SeqCst),
-            0
-        );
+                b"new",
+            )
+            .unwrap();
+        reloaded
+            .delete("com.vaultmesh.desktop.pin", "desktop-pin-1")
+            .unwrap();
         assert!(
-            host_store
-                .get(
-                    "com.vaultmesh.desktop.browser-pairing",
-                    "native-host-hmac-v1"
-                )
+            reloaded
+                .get("com.vaultmesh.desktop.pin", "desktop-pin-1")
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            legacy_provider
-                .items
-                .lock()
-                .unwrap()
-                .contains_key(&entry_key(
-                    "com.vaultmesh.desktop.browser-pairing",
-                    "native-host-hmac-v1"
-                ))
-        );
-
-        let migrated = DeviceCredentialStore::with_stores(
-            file_path,
-            Arc::new(MemoryRootSecretStore([42u8; 32])),
-            legacy_provider.clone(),
-        )
-        .unwrap();
-        assert_eq!(
-            migrated
-                .get(
-                    "com.vaultmesh.desktop.browser-pairing",
-                    "native-host-hmac-v1"
-                )
-                .unwrap()
-                .unwrap()
-                .as_slice(),
-            b"browser-secret"
-        );
-        assert!(
-            legacy_provider
-                .items
-                .lock()
-                .unwrap()
-                .get(&entry_key("com.vaultmesh.desktop.pin", "desktop-pin-1"))
-                .is_none()
-        );
-        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
     fn empty_aad_file_is_resealed_with_bound_aad() {
-        let (store, temp_dir, _) = temp_store();
+        let (store, temp_dir) = temp_store();
         store.set("svc", "acc", b"sealed").unwrap();
         let file_path = temp_dir.0.join("device-credentials.enc");
         let bytes = fs::read(&file_path).unwrap();
@@ -1004,7 +607,6 @@ mod tests {
         let reloaded = DeviceCredentialStore::with_stores(
             file_path.clone(),
             Arc::new(MemoryRootSecretStore(root)),
-            Arc::new(MemoryLegacyKeyring::default()),
         )
         .unwrap();
         assert_eq!(
@@ -1026,7 +628,7 @@ mod tests {
 
     #[test]
     fn test_scoped_credential_store() {
-        let (store, _, _) = temp_store();
+        let (store, _) = temp_store();
         let scoped = store.scoped("com.vaultmesh.desktop.biometric");
 
         scoped
@@ -1047,47 +649,6 @@ mod tests {
 
         scoped.delete("user_credential").unwrap();
         assert_eq!(scoped.get("user_credential").unwrap(), None);
-    }
-
-    #[test]
-    fn startup_migration_imports_legacy_lan_pairing_before_scoped_reads() {
-        let temp_dir = std::env::temp_dir().join(format!("vaultmesh-cred-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&temp_dir).unwrap();
-        let legacy_provider = Arc::new(MemoryLegacyKeyring::default());
-        legacy_provider.items.lock().unwrap().insert(
-            entry_key(
-                "com.vaultmesh.desktop.lan-pairing",
-                "device-assist-registration-scopes-v2",
-            ),
-            b"scopes_json".to_vec(),
-        );
-        let store = DeviceCredentialStore::with_stores(
-            temp_dir.join("device-credentials.enc"),
-            Arc::new(MemoryRootSecretStore([42u8; 32])),
-            legacy_provider.clone(),
-        )
-        .unwrap();
-        let scoped = store.scoped("com.vaultmesh.desktop.lan-pairing");
-        assert_eq!(
-            scoped
-                .get("device-assist-registration-scopes-v2")
-                .unwrap()
-                .unwrap()
-                .as_slice(),
-            b"scopes_json"
-        );
-        assert!(
-            legacy_provider
-                .items
-                .lock()
-                .unwrap()
-                .get(&entry_key(
-                    "com.vaultmesh.desktop.lan-pairing",
-                    "device-assist-registration-scopes-v2"
-                ))
-                .is_none()
-        );
-        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]

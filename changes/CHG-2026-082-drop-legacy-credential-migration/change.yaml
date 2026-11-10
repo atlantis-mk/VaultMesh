@@ -1,0 +1,29 @@
+schema: "2"
+id: "CHG-2026-082-drop-legacy-credential-migration"
+title: "移除旧设备凭据钥匙串迁移"
+type: "migration"
+status: "Done"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "v0.1.4 起的安装已完成旧设备凭据迁移；移除逐条读取旧钥匙串条目的迁移代码，使升级时只剩根钥匙串那一次授权弹窗；直接从 v0.1.1–v0.1.3 升级的安装需重新设置 PIN/Touch ID 并重新配对"
+requirements:
+  - "REQ-SEC-002"
+tests:
+  - "CT-SEC-002"
+adrs:
+  - "ADR-0053"
+context_refs:
+  - "adr/0053-unified-desktop-keychain-root.md"
+  - "docs/07-test-release-plan.md#CT-SEC-002"
+related_changes:
+  - "BUG-2026-023-macos-keychain-acl-reprompt"
+  - "CHG-2026-079-unified-desktop-keychain-root"
+boundaries:
+  - "compatibility-migration"
+  - "macos-keychain-acl"
+  - "desktop-runtime"
+risks:
+  - "直接从 v0.1.1–v0.1.3 升级的安装会丢失旧 PIN、Touch ID、浏览器/局域网/Agent 配对，需要重新设置；旧钥匙串条目留作孤儿，不再读取或删除"
+  - "移除迁移不得改变根钥匙串条目、device-credentials.enc 格式、空 AAD 旧文件重封或已有统一存储内容"
+next:
+  - "发布记录在兼容/迁移小节注明 v0.1.1–v0.1.3 不再自动迁移设备凭据"

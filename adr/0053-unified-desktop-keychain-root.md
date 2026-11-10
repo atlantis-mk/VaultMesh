@@ -4,7 +4,8 @@
 - 日期：2026-10-28
 - 修订：2026-11-03（包内双二进制共享根条目，取消命中后的旧钥匙串回退）
 - 修订：2026-11-06（精确化 ad-hoc ACL 身份、全量校验与一次性修复，杜绝重复授权弹窗；根钥匙串不可用时降级启动，未签名或签名不完整的发布包拒绝访问根条目）
-- 关联 Work：`CHG-2026-079-unified-desktop-keychain-root`
+- 修订：2026-11-10（v0.1.4 起的安装已完成旧凭据迁移，移除旧凭据钥匙串迁移，升级只剩根条目一次授权）
+- 关联 Work：`CHG-2026-079-unified-desktop-keychain-root`、`CHG-2026-082-drop-legacy-credential-migration`
 - 关闭 OPEN：无
 
 ## 背景
@@ -39,11 +40,11 @@
    * 文件权限必须为 `0600`，父目录必须为 `0700`，写入操作必须采用原子替换（写临时文件后原子重命名）。
    * 生产环境的 PIN 与生物识别必须经过 `DeviceCredentialStore`。Release 构建不得再直接调用 `keyring::Entry` 保存或读取这些凭据。
 
-4. **一次性迁移，命中后禁止回退**：
-   * 主程序首次打开统一存储时扫描已知旧 Service，把读到的账户迁入 `device-credentials.enc`，成功落盘后 `delete_credential` 删除这些旧条目，并在文件内记录迁移标记。Native Host 在标记还不存在时不得枚举这些旧 Service，以免 Host 先启动时按条目重复弹窗。
-   * 标记存在后，后续 `get` 只读加密文件。统一存储已经打开时，即使目标凭据缺失，也不得再调用旧 `keyring::Entry`。生产 Native Host 读取配对秘密时同样不得回退。
+4. **不再访问旧凭据钥匙串**：
+   * v0.1.4–v0.1.7 曾在主程序首次打开统一存储时把旧 Service 迁入 `device-credentials.enc` 并删除旧条目。每条旧条目由旧构建创建，新构建读取时 macOS 会逐条要求登录密码，任一条取消还会导致每次启动重弹，因此 2026-11-10 起移除该迁移。
+   * 统一存储只读写加密文件，不得读取、枚举或删除旧 Service；即使目标凭据缺失，也不得调用旧 `keyring::Entry`。生产 Native Host 读取配对秘密时同样不得回退。文件中遗留的迁移标记条目保持无害。
    * 开发专用 Host 不得打开生产根条目。
-   * 既有已配对客户端、已配对局域网设备与 Touch ID 配置在升级后保持可用，无需用户重新配对或重新录入。
+   * 直接从 v0.1.1–v0.1.3 升级的安装必须重新设置 PIN/Touch ID 并重新配对浏览器、局域网设备与 Agent；其旧钥匙串条目留作孤儿，不再自动清理。
 
 ## 原因
 
@@ -55,12 +56,12 @@
 ## 后果
 
 - 新增 `DeviceCredentialStore` 统一凭据抽象层，各子模块（Agent broker、Browser pairing、Biometric service、PIN service、LAN sync）的持久化钥匙串调用需重构接入该统一接口。
-- 需要覆盖一次性迁移、迁移后不再读取旧 Service，以及 Native Messaging 路径保持在 `.app` 内。Ad-hoc 包没有 Team ID，Access Group 不会生效；文件钥匙串路径必须在创建和更新时写入两个包内可执行文件。签名身份从 ad-hoc 改为 Developer ID 后，发布流程必须只给主程序和包内 Host 重签 Keychain entitlement，不得签给 Agent sidecar。
+- 需要覆盖统一存储不读取、枚举或删除旧 Service，以及 Native Messaging 路径保持在 `.app` 内。Ad-hoc 包没有 Team ID，Access Group 不会生效；文件钥匙串路径必须在创建和更新时写入两个包内可执行文件。签名身份从 ad-hoc 改为 Developer ID 后，发布流程必须只给主程序和包内 Host 重签 Keychain entitlement，不得签给 Agent sidecar。
 
 ## 被拒方案
 
 - **保留 10 个独立条目仅做界面静默提示**：无法绕过 macOS 操作系统 SecurityAgent 的原生物理弹窗机制。
-- **直接清空旧条目要求用户全部重新配对**：会破坏老用户的既有设备配对、Touch ID 与 Agent 集成体验，不可接受。
+- **长期保留逐条读取的旧凭据迁移**：每条旧条目各弹一次登录密码框，取消后每次启动重弹；v0.1.4–v0.1.7 已覆盖迁移窗口，2026-11-10 起改为移除迁移，仅 v0.1.1–v0.1.3 直接升级需要重新设置。
 - **把开发 Host 或任意当前进程加入 Trusted Applications**：会让未签名或开发二进制读取设备根密钥。
 - **统一存储未命中时继续读取旧钥匙串**：Host 每次自动填充都会再次触发独立 ACL 弹窗。
 - **将所有子凭据明文写入本地 json 文件**：严重降低安全性，绕过了 OS Keychain 提供的硬件级/系统级访问保护。
@@ -68,7 +69,7 @@
 ## 验证
 
 - 覆盖 `DeviceCredentialStore` 的初始化、单钥匙串读写、AES-256-GCM 加解密、并发原子写入测试。
-- 覆盖已知旧 Service 的一次性迁移与清理，并证明迁移完成后统一读取不再访问旧条目。
+- 证明统一存储的打开、读取缺失账户、写入和删除都不访问旧 Service。
 - 覆盖包内路径约束：Native Messaging 只注册 `.app/Contents/MacOS/vaultmesh-native-host`。
 - `AT-SEC-001` / `AT-BROWSER-001` 在带同一 Team ID 的签名 macOS 包上验证：一次授权后，冷启动和浏览器自动填充不再弹出钥匙串密码。
 - `AT-SEC-002` 在隔离的 ad-hoc macOS 包上验证：污染 ACL 首次修复最多授权一次，之后主程序冷启动与重复浏览器自动填充不再出现根钥匙串读取或访问许可弹窗。
