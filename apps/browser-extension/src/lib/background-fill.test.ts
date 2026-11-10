@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyApprovedFill, startFillForTab } from "./background-fill";
+import { applyApprovedFill, getAutofillCandidates, startAutomaticFillForTab, startFillForTab } from "./background-fill";
 import { backgroundDesktopRpc } from "./desktop-rpc";
 
 vi.mock("./desktop-rpc", () => ({ backgroundDesktopRpc: vi.fn(), DesktopRpcError: class extends Error {} }));
@@ -39,5 +39,41 @@ describe("CT-AUTOFILL-001 non-empty preservation", () => {
     expect(await applyApprovedFill(approval as never, 7, "https://example.test")).toEqual({ status: "preserved-existing", filledCount: 0 });
     vi.spyOn(browser.tabs, "sendMessage").mockImplementation(async () => ({ status: "stale-document", results: [] }));
     expect(await applyApprovedFill(approval as never, 7, "https://example.test")).toEqual({ status: "document-changed", filledCount: 0 });
+  });
+});
+
+describe("AT-AUTOFILL-001 locked pre-auth candidate search & automatic fill suppression", () => {
+  it("preserves matching candidates with status=locked when requiresUnlock is true and never triggers automatic fill on page load", async () => {
+    const loginId = crypto.randomUUID();
+    vi.mocked(backgroundDesktopRpc).mockImplementation(async (operation) => {
+      if (operation === "browser.autofill.candidates") {
+        return {
+          requiresUnlock: true,
+          candidates: [{
+            id: loginId,
+            kind: "login",
+            title: "Example Login",
+            subtitle: "ada@example.test",
+            matchScope: "origin",
+            autofillOnPageLoad: true,
+            masterPasswordReprompt: false,
+          }],
+        };
+      }
+      throw new Error(`unexpected operation: ${operation}`);
+    });
+    const candidatesResult = await getAutofillCandidates("https://example.test", "login", "https://example.test/login", "login");
+    expect(candidatesResult).toEqual({
+      status: "locked",
+      requiresUnlock: true,
+      candidates: [expect.objectContaining({ id: loginId, subtitle: "ada@example.test" })],
+    });
+
+    const autoFillResult = await startAutomaticFillForTab(7, "https://example.test", "login", "https://example.test/login");
+    expect(autoFillResult).toMatchObject({
+      status: "locked",
+      requiresUnlock: true,
+    });
+    expect(backgroundDesktopRpc).not.toHaveBeenCalledWith("browser.autofill.execute", expect.anything());
   });
 });

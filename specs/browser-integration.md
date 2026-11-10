@@ -118,9 +118,11 @@ Content 与 Rust 字段排除词必须共享 `apps/tauri-desktop/src/shared/auto
 
 自定义元素延迟 attachShadow 必须使用有数量和期限上限的追踪：最多 256 个待处理宿主、每批 64 个轮转，未注册阶段最多 60 秒，注册后等待 root 最多 30 秒；轮询间隔必须限制在 250–2000 毫秒。超时宿主不得因普通重复扫描无限重启计时，页面上下文更新可以重新开始。Shadow root 内的 submit/formdata/keydown/focus/input/click 监听必须在卸载时清理，composed 事件必须去重。Assignment 开始前必须消费对应 handle 集；旧填充结束不得清除后续 discovery。History、hash、BFCache 和最终写入前的 URL 检查必须使旧文档身份失效。
 
-写入必须使用 native value setter 并 dispatch `input`/`change`。Page-load fill 仅限 login/OTP context、stored preference、one-shot 和 empty field；signup、password change/reset、card、identity、secret、SSH、re-prompt 和 overwrite 均禁止自动 disclosure。排序：exact path > exact origin > same-protocol host，remembered login 优先。
+写入必须使用 native value setter 并 dispatch `input`/`change`。Page-load fill 仅限浏览器会话已解锁（`requiresUnlock === false`）、login/OTP context、stored preference、one-shot 和 empty field；锁定状态、signup、password change/reset、card、identity、secret、SSH、re-prompt 和 overwrite 均禁止自动 disclosure。排序：exact path > exact origin > same-protocol host，remembered login 优先。
 
-Popup 显式选择调用 `browser.autofill.execute`；Tauri Rust broker 在返回 short-lived one-use assignment 前 revalidate item/document。Card 必须验证 current master password。Legacy `browser.fill.request` 可以打开 desktop approval dialog，但不是当前 popup selection 主路径。所有 fill 都禁止 submit。
+桌面端在 `device-credentials.enc`（作用域 `com.vaultmesh.desktop.browser-autofill-preview`，ADR-0055）中维护与当前 `vault.enc` SHA-256 绑定的无秘密自动填充候选预览索引（仅保存 `id`、`kind`、`title`、`subtitle`、归一化匹配站点、`autofillOnPageLoad`、`masterPasswordReprompt` 与布尔标志 `hasTotpSecret`）。当 `BrowserBrokerCore` 锁定时，`browser.autofill.candidates` 先校验磁盘 `vault.enc` 的实时 SHA-256 与索引一致，再返回当前页面匹配的候选并标记 `requiresUnlock: true`。用户在网页聚焦输入框或点击内联图标时直接展示候选浮层；在登录账号/邮箱输入框键入字符时，按 `subtitle` 前缀、邮箱 `@` 前本地部分前缀或 `title` 子串实时过滤候选，无匹配时自动收起浮层。
+
+Popup 或页内显式选择调用 `browser.autofill.execute`；当 `BrowserBrokerCore` 处于锁定状态（或条目要求 `masterPasswordReprompt` 且未提供 `masterPassword`）时，Broker 唤起桌面端统一受保护临时解锁窗口（`agent-unlock`）执行单次授权（Touch ID 自动触发或同窗口 PIN / 主密码回退；`masterPasswordReprompt` 条目直接要求主密码），在局部临时 `DesktopRuntime` 中完成重验并生成单次 `ApprovedFill` 后立即销毁临时 Runtime，不解锁 `BrowserBrokerCore` 会话且不写入 `popupWorkspaceCache`。Card 填充在已解锁会话中仍验证 current master password（或通过上述桌面临时解锁窗口验证主密码）。Legacy `browser.fill.request` 可以打开 desktop approval dialog，但不是当前主路径。所有 fill 都禁止 submit。
 
 至少一个 assignment 成功后只记录 encrypted bounded audit：time、origin、item kind/ID/title、field count。禁止 field name/value。
 

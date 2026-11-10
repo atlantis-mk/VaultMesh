@@ -51,6 +51,8 @@ pub struct TauriBrowserPlatform {
     pin: Mutex<PinQuickUnlockService>,
     biometric: Mutex<BiometricQuickUnlockService>,
     desktop_biometric: Option<Arc<Mutex<BiometricQuickUnlockService>>>,
+    preauth_preview: crate::browser_preauth_preview::BrowserPreAuthPreviewStore,
+    one_shot_unlocks: Option<Arc<Mutex<crate::agent_unlock_window::BrowserAutofillUnlockQueue>>>,
     authentication: Arc<crate::browser_authentication::Authentication>,
     pairing: BrowserPairingService,
     ssh_directory: PathBuf,
@@ -80,6 +82,10 @@ impl TauriBrowserPlatform {
             directory.join("pairing.json"),
             &credentials,
         );
+        self.preauth_preview = crate::browser_preauth_preview::BrowserPreAuthPreviewStore::new(
+            credentials.scoped("com.vaultmesh.desktop.bitwarden-dev-autofill-preview"),
+        );
+        self.one_shot_unlocks = None;
         self
     }
 
@@ -92,6 +98,8 @@ impl TauriBrowserPlatform {
         native_dialog_focus: Arc<NativeDialogFocusState>,
         email_otp: Arc<Mutex<EmailOtpService>>,
         desktop_biometric: Arc<Mutex<BiometricQuickUnlockService>>,
+        preauth_preview: crate::browser_preauth_preview::BrowserPreAuthPreviewStore,
+        one_shot_unlocks: Arc<Mutex<crate::agent_unlock_window::BrowserAutofillUnlockQueue>>,
     ) -> Self {
         let ssh_directory = app
             .path()
@@ -118,6 +126,8 @@ impl TauriBrowserPlatform {
                 "browser-biometric",
             )),
             desktop_biometric: Some(desktop_biometric),
+            preauth_preview,
+            one_shot_unlocks: Some(one_shot_unlocks),
             authentication: Arc::default(),
             pairing: BrowserPairingService::new(app_data.join("browser-pairing.json"), &credentials),
             ssh_directory,
@@ -1051,12 +1061,68 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
             .blocking_show())
     }
 
+    fn begin_one_shot_unlock_for_fill(
+        &self,
+        request: crate::browser_broker::OneShotUnlockRequest,
+    ) -> Option<crate::browser_broker::OneShotUnlockWaiter> {
+        let queue = Arc::clone(self.one_shot_unlocks.as_ref()?);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let unlock_ref = Uuid::new_v4().to_string();
+        let now = crate::unix_millis();
+        let expires_at =
+            now.saturating_add(crate::agent_unlock_window::TEMPORARY_UNLOCK_WAIT_MILLIS);
+        {
+            let mut guard = queue.lock().ok()?;
+            guard.enqueue(crate::agent_unlock_window::PendingBrowserAutofillUnlock {
+                unlock_ref: unlock_ref.clone(),
+                vault_path: request.vault_path,
+                origin: request.origin,
+                item_title: request.item_title,
+                item_kind: request.item_kind,
+                master_password_reprompt: request.master_password_reprompt,
+                created_at: now,
+                expires_at,
+                responder: sender,
+            });
+        }
+        crate::agent_unlock_window::show_agent_unlock_window(&self.app);
+        let app = self.app.clone();
+        Some(crate::browser_broker::OneShotUnlockWaiter::new(move || {
+            match receiver.recv_timeout(Duration::from_millis(
+                crate::agent_unlock_window::TEMPORARY_UNLOCK_WAIT_MILLIS,
+            )) {
+                Ok(result) => result,
+                Err(_) => {
+                    if let Ok(mut guard) = queue.lock() {
+                        let _ = guard.take(&unlock_ref);
+                    }
+                    crate::agent_unlock_window::expire_agent_unlock_window(&app, &unlock_ref);
+                    Err(BrowserPlatformError {
+                        code: "cancelled",
+                        message: "自动填充临时解锁已超时。".to_owned(),
+                    })
+                }
+            }
+        }))
+    }
+
     fn cancel_authentication(&self) {
         self.authentication.cancel(&self.app, None);
     }
 
+    fn preauth_preview_store(
+        &self,
+    ) -> Option<crate::browser_preauth_preview::BrowserPreAuthPreviewStore> {
+        Some(self.preauth_preview.clone())
+    }
+
     fn clear(&self) {
         self.cancel_authentication();
+        if let Some(queue) = &self.one_shot_unlocks
+            && let Ok(mut guard) = queue.lock()
+        {
+            guard.clear_all();
+        }
         if let Ok(mut assist) = self.device_assist.lock() { assist.clear(); }
         if let Ok(mut files) = self.recovery_files.lock() {
             files.clear();

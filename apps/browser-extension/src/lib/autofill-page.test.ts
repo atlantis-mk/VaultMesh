@@ -429,13 +429,24 @@ describe("startAutofillPage", () => {
     controller.dispose();
   });
 
-  it("shows a locked icon and opens the plugin unlock popup when clicked", async () => {
+  it("AT-AUTOFILL-001 shows locked candidates inline without opening the toolbar popup and stays quiet when none match", async () => {
     document.body.innerHTML = `<input id="password" type="password">`;
     const password = document.querySelector<HTMLInputElement>("input")!;
     makeVisible(password);
+    const candidateId = crypto.randomUUID();
+    let returnEmpty = false;
     const sendMessage = vi.fn(async (message: unknown) => {
-      if ((message as { kind?: string }).kind === "vaultmesh.autofill-state") return { status: "locked" };
-      if ((message as { kind?: string }).kind === "vaultmesh.open-unlock") return { status: "opened" };
+      const kind = (message as { kind?: string }).kind;
+      if (kind === "vaultmesh.autofill-state") return { status: "locked" };
+      if (kind === "vaultmesh.autofill-candidates") {
+        return {
+          status: "locked",
+          requiresUnlock: true,
+          candidates: returnEmpty
+            ? []
+            : [{ id: candidateId, kind: "login", title: "Example Locked", subtitle: "ada@example.test", matchScope: "origin", autofillOnPageLoad: true, masterPasswordReprompt: false }],
+        };
+      }
       return {};
     });
     const controller = startAutofillPage(document, "a53370ec-4dc7-4c77-a6e0-f2a4f6e37f03", sendMessage);
@@ -450,9 +461,89 @@ describe("startAutofillPage", () => {
 
     triggerHost.click();
     await Promise.resolve();
-    expect(sendMessage).toHaveBeenCalledWith({ kind: "vaultmesh.open-unlock" });
-    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "vaultmesh.autofill-candidates" }));
+    await Promise.resolve();
+    expect(sendMessage).toHaveBeenCalledWith({ kind: "vaultmesh.autofill-candidates", fieldKind: "login", pageContext: "login" });
+    expect(sendMessage).not.toHaveBeenCalledWith({ kind: "vaultmesh.open-unlock" });
+    expect(controller.menu.visible).toBe(true);
+    expect(controller.menu.candidates).toEqual([
+      expect.objectContaining({ id: candidateId, title: "Example Locked", subtitle: "ada@example.test" }),
+    ]);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await Promise.resolve();
+    expect(sendMessage).toHaveBeenCalledWith({
+      kind: "vaultmesh.autofill-select",
+      selectedItem: { kind: "login", id: candidateId, title: "Example Locked" },
+    });
+
+    returnEmpty = true;
+    triggerHost.click();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(controller.menu.visible).toBe(false);
+    expect(sendMessage).not.toHaveBeenCalledWith({ kind: "vaultmesh.open-unlock" });
+    controller.dispose();
+  });
+
+  it("AT-AUTOFILL-002 shows candidates on empty login account focus while locked and filters in real time on input", async () => {
+    document.body.innerHTML = `<form><input id="username" autocomplete="username"><input id="password" type="password"></form>`;
+    const username = document.querySelector<HTMLInputElement>("#username")!;
+    const password = document.querySelector<HTMLInputElement>("#password")!;
+    [username, password].forEach(makeVisible);
+    const aliceId = crypto.randomUUID();
+    const bobId = crypto.randomUUID();
+    const inputListeners: EventListener[] = [];
+    const addEventListener = document.addEventListener.bind(document);
+    const registration = vi.spyOn(document, "addEventListener").mockImplementation((type, listener, options) => {
+      if (type === "input") inputListeners.push(listener as EventListener);
+      addEventListener(type, listener, options as AddEventListenerOptions);
+    });
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const kind = (message as { kind?: string }).kind;
+      if (kind === "vaultmesh.autofill-state") return { status: "locked" };
+      if (kind === "vaultmesh.autofill-candidates") {
+        return {
+          status: "locked",
+          requiresUnlock: true,
+          candidates: [
+            { id: aliceId, kind: "login", title: "GitHub Personal", subtitle: "alice@example.test", matchScope: "origin" },
+            { id: bobId, kind: "login", title: "Work Ops", subtitle: "bob@company.test", matchScope: "origin" },
+          ],
+        };
+      }
+      return {};
+    });
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    registration.mockRestore();
+    const dispatchTrustedInput = (target: Element) => {
+      for (const listener of inputListeners) {
+        listener({ isTrusted: true, composedPath: () => [target] } as unknown as Event);
+      }
+    };
+
+    username.focus();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(controller.menu.visible).toBe(true);
+    expect(controller.menu.candidates.map((item) => item.id)).toEqual([aliceId, bobId]);
+
+    username.value = "ali";
+    dispatchTrustedInput(username);
+    expect(controller.menu.visible).toBe(true);
+    expect(controller.menu.candidates.map((item) => item.id)).toEqual([aliceId]);
+
+    username.value = "no-such-user";
+    dispatchTrustedInput(username);
+    expect(controller.menu.visible).toBe(false);
+
+    username.value = "ops";
+    dispatchTrustedInput(username);
+    expect(controller.menu.visible).toBe(true);
+    expect(controller.menu.candidates.map((item) => item.id)).toEqual([bobId]);
+
+    // Candidates were fetched once on focus and filtered purely in memory on keystrokes.
+    expect(sendMessage.mock.calls.filter(([msg]) => (msg as { kind?: string }).kind === "vaultmesh.autofill-candidates")).toHaveLength(1);
     controller.dispose();
   });
 

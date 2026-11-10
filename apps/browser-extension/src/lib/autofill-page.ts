@@ -3,7 +3,7 @@ import { deviceAssistKindForControl } from "@/lib/form-discovery";
 import { VAULTMESH_UI_SELECTOR, accessibleShadowRoot, analyzeControlSemantics, credentialFieldRole, discoverFields, classifyControl, formControls, semanticCluster, hasLoginFields, isEmailAccountControl, isNewPasswordControl, loginFormSignature, passwordFieldGroup, selectAutofillPageContext, shouldPreserveExistingLoginAccount, withFieldDiscoveryCache } from "@/lib/form-discovery";
 import { InlineAutofillMenu } from "@/lib/inline-autofill";
 import { InlineAutofillTrigger } from "@/lib/inline-autofill-trigger";
-import { fillResultStatus, inlineFillFailureMessage } from "@/lib/autofill-selection";
+import { fillResultStatus, filterCandidatesByTypedUsername, inlineFillFailureMessage } from "@/lib/autofill-selection";
 import { fillGeneratedLogin, fillGeneratedPassword } from "@/lib/generated-login-fill";
 import { generatePassword } from "@/lib/generated-credentials";
 import { AutofillAvailabilityResponseSchema, AutofillCandidatesResponseSchema, SaveCaptureDecisionResponseSchema, SaveCapturePendingResponseSchema, SaveCaptureQueuedResponseSchema, type AutofillCandidate, type InlineAutofillCandidate } from "@/lib/protocol";
@@ -78,13 +78,20 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
   const pendingDiscovery = new Set<Element | ShadowRoot>();
   const knownDiscoveryScopes = new Set<Element | ShadowRoot>();
   let readySignatures = new WeakMap<ParentNode, string>();
-  let unlockPollTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingCaptureResumeTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingCaptureResumeAttempts = 0;
-  let unlockPollRemaining = 0;
   let focusRequest = 0;
   let availabilityRequest = 0;
   let availability: "unknown" | "ready" | "locked" | "unavailable" = "unknown";
+  type LoginAccountSession = {
+    target: HTMLInputElement;
+    pageContext: "login" | "unknown";
+    loaded: boolean;
+    typed: boolean;
+    pendingPromise: Promise<unknown> | null;
+    allCandidates: InlineAutofillCandidate[];
+  };
+  let activeLoginAccountSession: LoginAccountSession | null = null;
   let generatedCapture: { root: ParentNode; pageContext: "signup" | "password-change" | "password-reset"; loginId?: string } | null = null;
   let lastCapture: { signature: string; sentAt: number } | null = null;
   let activeCaptureId: string | null = null;
@@ -219,20 +226,6 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     return availability;
   }
 
-  function openUnlock() {
-    menu.hide();
-    void sendMessage({ kind: "vaultmesh.open-unlock" });
-    unlockPollRemaining = 120;
-    if (unlockPollTimer) clearTimeout(unlockPollTimer);
-    const poll = async () => {
-      unlockPollTimer = null;
-      const state = await refreshAvailability();
-      unlockPollRemaining -= 1;
-      if (!disposed && state !== "ready" && unlockPollRemaining > 0) unlockPollTimer = setTimeout(poll, 1_000);
-    };
-    unlockPollTimer = setTimeout(poll, 750);
-  }
-
   // A lifecycle edge may scan the document. Mutation work is always restricted
   // to a local subtree, including semantic clustering and target capture.
   const reportPageDiscovery = (scope: Document | Element | ShadowRoot = document) => {
@@ -336,6 +329,7 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     if (!target) return;
     if (target.isConnected && withFieldDiscoveryCache(() => Boolean(classifyControl(target)), localDiscoveryScope(target))) return;
     focusRequest += 1;
+    activeLoginAccountSession = null;
     menu.hide();
     trigger.hide();
   };
@@ -431,10 +425,64 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     return [{ kind: "device-assist", id: "device-assist", assistKind, title: assistKind === "phone" ? "从手机填入号码" : "从手机获取验证码", subtitle: "已配对设备 · 在电脑点选填充" }];
   }
 
+  function fetchLoginAccountCandidates(session: LoginAccountSession): Promise<unknown> {
+    if (!session.pendingPromise) {
+      const pending = sendMessage({
+        kind: "vaultmesh.autofill-candidates",
+        fieldKind: "login",
+        pageContext: session.pageContext,
+      }).then(
+        (value) => {
+          if (session.pendingPromise === pending) session.pendingPromise = null;
+          return value;
+        },
+        () => {
+          if (session.pendingPromise === pending) session.pendingPromise = null;
+          return null;
+        },
+      );
+      session.pendingPromise = pending;
+    }
+    return session.pendingPromise;
+  }
+
+  async function preloadLoginAccountCandidates(session: LoginAccountSession, request: number) {
+    const raw = await fetchLoginAccountCandidates(session);
+    if (
+      disposed
+      || request !== focusRequest
+      || activeLoginAccountSession !== session
+      || trigger.target !== session.target
+      || !session.target.isConnected
+      || classifyControl(session.target) !== "login"
+    ) {
+      return;
+    }
+    const response = AutofillCandidatesResponseSchema.safeParse(raw);
+    if (!response.success || (response.data.status !== "ready" && response.data.status !== "locked")) return;
+    const isLocked = response.data.status === "locked" || response.data.requiresUnlock === true;
+    availability = isLocked ? "locked" : "ready";
+    trigger.setLocked(isLocked);
+    session.loaded = true;
+    session.allCandidates = response.data.candidates.filter((candidate) => candidate.kind === "login");
+    if (session.allCandidates.length === 0) {
+      if (session.typed) menu.hide();
+      return;
+    }
+    if (session.typed) {
+      const filtered = filterCandidatesByTypedUsername(session.allCandidates, session.target.value);
+      if (filtered.length > 0) menu.showFilteredCandidates(session.target, filtered);
+      else menu.hide();
+      return;
+    }
+    if (session.target.value === "") {
+      menu.showFilteredCandidates(session.target, session.allCandidates);
+    }
+  }
+
   async function openCandidates(target: HTMLElement) {
     const fieldKind = classifyControl(target);
     if (!fieldKind) { menu.hide(); trigger.hide(); return; }
-    if (availability === "locked") return openUnlock();
     if (target instanceof HTMLInputElement && isNewPasswordControl(target)) {
       const request = ++focusRequest;
       const options = await loadPasswordGeneratorOptions();
@@ -462,18 +510,17 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
       return;
     }
     const request = ++focusRequest;
-    const response = AutofillCandidatesResponseSchema.safeParse(await sendMessage({ kind: "vaultmesh.autofill-candidates", fieldKind, pageContext }).catch(() => null));
+    const rawResponse = activeLoginAccountSession?.target === target && activeLoginAccountSession.pageContext === pageContext && activeLoginAccountSession.pendingPromise
+      ? await activeLoginAccountSession.pendingPromise
+      : await sendMessage({ kind: "vaultmesh.autofill-candidates", fieldKind, pageContext }).catch(() => null);
+    const response = AutofillCandidatesResponseSchema.safeParse(rawResponse);
     if (disposed || request !== focusRequest || trigger.target !== target || classifyControl(target) !== fieldKind) return;
-    if (response.success && response.data.status === "locked") {
-      availability = "locked";
-      trigger.setLocked(true);
-      return openUnlock();
-    }
-    if (!response.success || response.data.status !== "ready") return menu.hide();
-    const candidates: InlineAutofillCandidate[] = response.success && response.data.status === "ready"
-      ? response.data.candidates.filter((candidate) => candidate.kind === fieldKind)
-      : [];
-    if (pageContext === "otp") {
+    if (!response.success || (response.data.status !== "ready" && response.data.status !== "locked")) return menu.hide();
+    const isLocked = response.data.status === "locked" || response.data.requiresUnlock === true;
+    availability = isLocked ? "locked" : "ready";
+    trigger.setLocked(isLocked);
+    const candidates: InlineAutofillCandidate[] = response.data.candidates.filter((candidate) => candidate.kind === fieldKind);
+    if (!isLocked && pageContext === "otp") {
       candidates.unshift(...(response.data.emailOtpCandidates ?? []).map((candidate) => ({
         ...candidate,
         kind: "email-otp" as const,
@@ -481,10 +528,24 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
         subtitle: `来自 ${candidate.sourceDomain}`,
       })));
     }
+    if (activeLoginAccountSession?.target === target) {
+      activeLoginAccountSession.loaded = true;
+      activeLoginAccountSession.allCandidates = [...candidates];
+    }
+    if (isLocked && candidates.length === 0) {
+      const deviceEntries = await deviceAssistEntries(target);
+      if (disposed || request !== focusRequest || trigger.target !== target || !target.isConnected) return;
+      if (deviceEntries.length) {
+        menu.show(target, deviceEntries, "none", { anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target });
+      } else {
+        menu.hide();
+      }
+      return;
+    }
     // OTP controls reuse Login items as their data source, but an empty TOTP
     // candidate list is not a signup opportunity. Never fall back to the
-    // random account/password generator for a verification-code field.
-    const generatedMode = fieldKind === "login" && pageContext !== "otp" ? "login" : "none";
+    // random account/password generator for a verification-code field or while locked.
+    const generatedMode = !isLocked && fieldKind === "login" && pageContext !== "otp" ? "login" : "none";
     menu.show(target, candidates, generatedMode, { anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target });
     const deviceEntries = await deviceAssistEntries(target);
     if (deviceEntries.length && !disposed && request === focusRequest && trigger.target === target && target.isConnected) menu.show(target, [...candidates, ...deviceEntries], generatedMode, {anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target});
@@ -501,18 +562,42 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     const target = event.composedPath()[0];
     if (menu.owns(event.target) || trigger.owns(event.target)) return;
     if (!(target instanceof Element)) {
+      activeLoginAccountSession = null;
       menu.hide();
       return trigger.hide();
     }
     // One focus costs several semantic questions about the same field; answer
     // each of them once instead of re-walking the page per question.
-    const fieldKind = withFieldDiscoveryCache(() => classifyControl(target));
+    const { fieldKind, newPassword, loginAccountContext } = withFieldDiscoveryCache(() => {
+      const kind = classifyControl(target);
+      if (!kind) return { fieldKind: null, newPassword: false, loginAccountContext: null };
+      const isNewPwd = isNewPasswordControl(target);
+      const acctContext = kind === "login" && target instanceof HTMLInputElement && target.type !== "password" && !isNewPwd
+        ? analyzeControlSemantics(target).context
+        : null;
+      return { fieldKind: kind, newPassword: isNewPwd, loginAccountContext: acctContext };
+    });
     if (fieldKind) handledEvents.add(event);
-    focusRequest += 1;
+    const request = ++focusRequest;
     menu.hide();
-    if (!fieldKind) return trigger.hide();
-    const newPassword = withFieldDiscoveryCache(() => isNewPasswordControl(target));
+    if (!fieldKind) {
+      activeLoginAccountSession = null;
+      return trigger.hide();
+    }
     trigger.show(target as HTMLElement, newPassword ? "generate-password" : "autofill", availability === "locked");
+    if (loginAccountContext === "login" || loginAccountContext === "unknown") {
+      activeLoginAccountSession = {
+        target: target as HTMLInputElement,
+        pageContext: loginAccountContext,
+        loaded: false,
+        typed: false,
+        pendingPromise: null,
+        allCandidates: [],
+      };
+      void preloadLoginAccountCandidates(activeLoginAccountSession, request);
+    } else {
+      activeLoginAccountSession = null;
+    }
     void refreshAvailability();
   };
 
@@ -684,9 +769,23 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
   const onInput = (event: Event) => {
     const target = event.composedPath()[0];
     if (!event.isTrusted || !(target instanceof Element) || handledEvents.has(event)) return;
-    // Editing is recorded only for forms this controller filled. Running field
-    // classification per keystroke re-entered discovery on every character.
-    if (markFilledEdit(target, null)) handledEvents.add(event);
+    // Editing is recorded only for forms this controller filled, and typing in
+    // the active login account input filters already-cached candidates in memory.
+    // Running field classification per keystroke re-entered discovery on every character.
+    let handled = markFilledEdit(target, null);
+    if (activeLoginAccountSession && target === activeLoginAccountSession.target) {
+      handled = true;
+      const session = activeLoginAccountSession;
+      session.typed = true;
+      if (session.loaded) {
+        const filtered = filterCandidatesByTypedUsername(session.allCandidates, session.target.value);
+        if (filtered.length > 0) menu.showFilteredCandidates(session.target, filtered);
+        else menu.hide();
+      } else {
+        void preloadLoginAccountCandidates(session, focusRequest);
+      }
+    }
+    if (handled) handledEvents.add(event);
   };
   const markFilledEdit = (target: Element, kind: string | null): boolean => {
     const direct = filledControls.get(target);
@@ -755,7 +854,6 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     knownDiscoveryScopes.clear();
     readySignatures = new WeakMap();
     shadowHosts.reset();
-    if (unlockPollTimer) clearTimeout(unlockPollTimer);
     if (pendingCaptureResumeTimer) clearTimeout(pendingCaptureResumeTimer);
     for (const observer of observers) observer.disconnect();
     for (const root of shadowEventRoots) {
@@ -784,12 +882,12 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
   function clearPageScopedState() {
     generatedCapture = null;
     lastCapture = null;
+    activeLoginAccountSession = null;
     // Invalidate pending UI and availability work before a BFCache freeze.
     // A capture confirmation is desktop-owned and may survive navigation, so
     // its opaque id is intentionally not cancelled here.
     focusRequest += 1;
     availabilityRequest += 1;
-    unlockPollRemaining = 0;
     pendingCaptureResumeAttempts = 0;
     if (revalidateTimer) clearTimeout(revalidateTimer);
     if (discoveryTimer) clearTimeout(discoveryTimer);
@@ -798,10 +896,8 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     knownDiscoveryScopes.clear();
     readySignatures = new WeakMap();
     shadowHosts.reset();
-    if (unlockPollTimer) clearTimeout(unlockPollTimer);
     if (pendingCaptureResumeTimer) clearTimeout(pendingCaptureResumeTimer);
     revalidateTimer = null;
-    unlockPollTimer = null;
     pendingCaptureResumeTimer = null;
     menu.hide();
     trigger.hide();

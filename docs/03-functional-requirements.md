@@ -546,6 +546,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：Touch ID 由 privileged desktop runtime 调用，仅授予独立 Browser 授权。认证会话绑定当前已鉴权 Browser 通道、随机 session ID、Vault 和桌面 credential ID，最长 30 秒并以 3 秒轮询租约限制存活；关闭/隐藏 popup、切换 PIN/主密码、断连、锁定、撤销、凭据变化或期限结束必须取消并拒绝迟到结果；原生等待不得持有 broker 或凭据锁。
 
 - 必须：扩展通过固定 ID/native host 配对；桌面 unlock 不授权扩展，撤销立即清除浏览器访问。生产 Host 与桌面使用同一 `device-credentials.enc`；统一存储打开后不得回退到旧配对钥匙串条目。同一 Team ID 的签名包完成一次根钥匙串授权后，冷启动和自动填充不得再次弹出钥匙串密码。
+- 必须：桌面端在 `device-credentials.enc` 中维护绑定当前 `vault.enc` SHA-256 摘要的无秘密预授权自动填充候选预览索引（仅保存 `id`、`kind`、`title`、`subtitle`、归一化站点域名匹配列表、`autofillOnPageLoad`、`masterPasswordReprompt` 与布尔标志 `hasTotpSecret`，严禁包含密码、TOTP 种子、卡号/CVV/PIN、敏感信息正文、SSH 私钥/口令或恢复码）。当浏览器会话处于锁定状态时，`browser.autofill.candidates` 必须先校验磁盘 `vault.enc` SHA-256 与索引一致，再返回当前页面匹配的只读候选摘要并标记 `requiresUnlock: true`；摘要不匹配或无索引时返回空候选列表。
+- 必须：当浏览器会话锁定（或所选条目要求 `masterPasswordReprompt`）且用户在网页内联候选列表中显式点击某一条目填充时，`browser.autofill.execute` 必须唤起桌面端统一受保护临时解锁窗口（`agent-unlock`），展示目标 `origin`、条目名称与 30 秒倒计时（隐藏仅适用于 Agent 的范围开关），并在桌面 Touch ID 已启用且不要求 `masterPasswordReprompt` 时自动触发一次 Touch ID，支持在同一窗口内回退 PIN 或主密码；验证通过后仅在局部临时 `DesktopRuntime` 中生成单次 `ApprovedFill` 并立即销毁临时 Runtime，不得将 `BrowserBrokerCore` 会话置为已解锁或写入 `popupWorkspaceCache`，点击浏览器工具栏打开 Popup 仍须独立解锁。
 - 必须：当前 WXT 原插件的 popup 使用 Broker `browser.autofill.candidates` 作为 Login、Secret 与 SSH 当前页建议的权威来源，不得以本地 hostname 猜测替代；无来源字段上下文时不得把全部 card/identity 误标为当前页建议。摘要列表、搜索和类型筛选覆盖完整授权集合，每页最多 25 条；单条与批量删除必须明确区分可恢复条目和永久删除的 Secret/Passkey。
 - 必须：当前 WXT popup 打开期间持续读取桌面授权与事件序列；锁定、配对撤销、Host 停止或断连立即清除摘要、候选、编辑页、恢复列表、确认、生成结果与历史，并使迟到响应失效。Login、card、identity、SSH 与 Secret 编辑草稿隐藏时清除且最长保留 5 分钟；恢复码原生文件框只允许既有 45 秒有界例外，不能延长编辑期限。
 - 必须：插件必须接受 Broker 发出的 `vault-changed` 事件并在仍获授权时重新读取安全摘要；该事件不得被误判为桌面断连。空闲锁定产生的既有 `vault-locked` 事件在 PIN、主密码或生物识别重新解锁后，不得使已恢复的会话错误地进入断连状态。
@@ -604,6 +606,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：mutation 不得触发整页 discovery；相关 mutation 只可以在固定 100 毫秒窗口内合并为局部无值发现与当前字段重验，不因连续 mutation 无限延期；collector 忙时只延后发现，不重试已发出的页面写入。已尝试的表单簇必须在整页目标采集前排除；首次 focus 可以等待正在进行的只读 capture 采集，但不得复用过期 DOM 绑定。图标失效必须立即撤下，重建可以短暂合并；同一目标的在途候选读取必须去重。
 - 必须：mutation 相关性以字段、表单或含字段容器为准：只有它们的增删与属性/语义文本变化可以触发对当前字段的有界重验，无关节点的 `class`/`style` churn、无关列表标记增删和插件自身注入 UI 不得触发任何工作；新插入子树的 shadow root 观察代价必须与被插入内容成正比；新增、显现或语义改变的登录/OTP 表单必须通过局部无值发现恢复自动填充就绪，局部 pass 的簇与目标采集不得隐式回退整页遍历，且必须保留原簇归属重验；跨 ShadowRoot.host 的祖先资格变化及关联标签语义变化也必须使原字段 UI 失效，禁止整页 `querySelectorAll("*")` 遍历。同文档导航、BFCache 恢复和显式 rescan 各重新执行一次发现；单次 discovery 的一次性 DOM 遍历必须与文档规模成正比，禁止按字段数 × 祖先深度重复全文档遍历；输入事件不得触发 discovery，编辑跟踪以本次填充记录的控件为准。
 - 必须：页内填充图标出现后必须为当前短期目标预取只读候选，同一 `targetRef` 的图标点击必须复用在途或已完成读取；点击必须立即展示候选浮层或加载态，不得等待 Broker 往返后才提供视觉反馈。预取结果不得跨字段、导航、失焦或目标期限复用，迟到的 OTP 候选必须清除。
+- 必须：用户在网页输入框聚焦或点击内联填充图标时，若浏览器会话锁定且存在匹配候选，必须直接展示内联候选浮层，并在用户于登录账号/邮箱输入框键入字符时按 `subtitle` 前缀、邮箱 `@` 前本地部分前缀或 `title` 子串实时过滤候选（无匹配时自动收起浮层，回删重新匹配时恢复展示），不得在聚焦时直接打开工具栏 Popup 强制全局解锁；锁定状态下页面加载自动填充（`autofillOnPageLoad`）不得自动拉起解锁窗口。
 - 必须：自动 Login 填充不读取未使用的 custom-field profile；显式选择的无值 DOM 采集与只读 profile 可以并行，但两者完成后及最终 assignment 前后仍须重验页面和授权。压缩网站注入脚本仍须保持既有字段识别、写入语义与逐动作安全检查。
 - 必须：页内图标和菜单按具体字段的可填充类型与角色判定；页面或表单场景不得使无关字段获得图标。搜索、筛选、评论、优惠码、图形验证码、禁用和只读字段不得展示填充图标；字段动态失去资格时必须撤下图标并丢弃迟到候选。支付表单内的个人资料字段必须按其自身类型处理，分段 OTP 不得使同簇无关字段被判为验证码。
 - 必须：content script 先在同一真实或最小可见伪表单内识别账号、当前密码、新密码、确认密码和 OTP 字段角色，再按显式字段语义、同表单结构、form action/page path/submit 语义与排除导航链接后的弱上下文依次推导场景；表单外或导航注册链接不得把登录表单识别为注册，密码生成只允许可靠的新密码角色。
@@ -653,7 +656,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
   或借用该 lease；共享身份只能由 Rust broker 推导。用户可以在安全中心或当前独立 Agent unlock window 显式切换
   scope；unlock window 只能修改该非秘密 enum。用户只能在独立、置顶、content-protected 且仅具有 Agent unlock
   typed API 的系统窗口中以主密码或 Agent 专用 PIN/biometric 解锁。解锁成功可以在 30 秒内继续同一调用；
-  超时后窗口可以保留，但后续必须由显式重试使用新 lease。MCP/IPC 不得存在接收 factor 的 unlock operation。
+  30 秒倒计时归零或收到后端超时事件时，临时解锁窗口必须自动取消当前超时请求并在无后续待处理解锁请求时自动隐藏关闭窗口。MCP/IPC 不得存在接收 factor 的 unlock operation。
 - 必须：同一 unlock scope 内的并发 Vault 调用必须合并为一个 pending unlock request，单次成功 factor 必须唤醒
   该 request 的全部等待调用；同一窗口已经可见时，重复等待不得反复显示、刷新或抢焦点。已完成 request 不得在
   lease 再次锁定后复用；不同 connection scope owner 仍必须保持独立 request 和 lease。

@@ -47,3 +47,34 @@ test("local package cleans up a failed first-time installation", () => {
   assert.match(script, /if \(installAttempted \|\| movedExistingApp\)/);
   assert.match(script, /await rm\(installedTauriApp, \{ recursive: true, force: true \}\)/);
 });
+
+test("local package clears stale browser socket and verifies live socket listener without crash-restoration modal", async () => {
+  const launchScript = await readFile(new URL("./tauri-local-launch.mjs", import.meta.url), "utf8");
+  const cargoToml = await readFile(new URL("../Cargo.toml", import.meta.url), "utf8");
+  assert.match(script, /await rm\(path\.join\(tmpdir\(\), "vaultmesh-tauri-browser\.sock"\), \{ force: true \}\);/);
+  assert.match(launchScript, /"-ApplePersistenceIgnoreState", "YES"/);
+  assert.match(launchScript, /return await canConnectUnixSocket\(socket\);/);
+  assert.doesNotMatch(launchScript, /await access\(socket\);/);
+  assert.match(cargoToml, /\[profile\.release\]\s+strip = "none"/);
+  assert.match(cargoToml, /\[profile\.release\.build-override\]\s+strip = "none"/);
+
+  if (process.platform !== "win32") {
+    const { createServer } = await import("node:net");
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { canConnectUnixSocket } = await import("./tauri-local-launch.mjs");
+
+    const dir = await mkdtemp(path.join(tmpdir(), "vm-sock-test-"));
+    const sockPath = path.join(dir, "broker.sock");
+    try {
+      assert.equal(await canConnectUnixSocket(sockPath, 200), false);
+      const server = createServer((conn) => conn.end());
+      await new Promise((resolve) => server.listen(sockPath, resolve));
+      assert.equal(await canConnectUnixSocket(sockPath, 500), true);
+      await new Promise((resolve) => server.close(resolve));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});

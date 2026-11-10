@@ -88,6 +88,7 @@ mod browser_host_registration;
 mod browser_integration_windows;
 mod browser_pairing;
 mod browser_platform;
+pub mod browser_preauth_preview;
 mod desktop_api_request;
 mod desktop_email;
 mod desktop_import;
@@ -155,14 +156,15 @@ use agent_ssh_runtime::{
 use agent_ssh_sessions::AgentSshSessionStore;
 use agent_tool_executor::{AgentToolContext, execute_agent_tool};
 use agent_unlock_window::{
-    DisplayedAgentUnlock, agent_unlock_biometric, agent_unlock_cancel, agent_unlock_password,
-    agent_unlock_pin, agent_unlock_set_scope, agent_unlock_status,
+    BrowserAutofillUnlockQueue, DisplayedAgentUnlock, agent_unlock_biometric, agent_unlock_cancel,
+    agent_unlock_password, agent_unlock_pin, agent_unlock_set_scope, agent_unlock_status,
 };
 use agent_vault_access::{AgentAccessSettings, AgentUnlockScope, AgentVaultAccess};
 pub use app_setup::run;
 use biometric_service::{BiometricQuickUnlockService, BiometricStatus};
 use browser_pairing::BrowserPairingService;
 use browser_platform::TauriBrowserPlatform;
+use browser_preauth_preview::BrowserPreAuthPreviewStore;
 use desktop_api_request::*;
 use desktop_email::*;
 use desktop_import::*;
@@ -186,7 +188,8 @@ use ssh_service::{
 #[cfg(unix)]
 pub use browser_broker::BrowserBrokerUnixListener;
 pub use browser_broker::{
-    BrowserBrokerCore, BrowserBrokerPlatform, BrowserPlatformError, TAURI_BROWSER_SLICE_OPERATIONS,
+    BrowserBrokerCore, BrowserBrokerPlatform, BrowserPlatformError, OneShotUnlockRequest,
+    OneShotUnlockWaiter, OneShotUnlockedRuntime, TAURI_BROWSER_SLICE_OPERATIONS,
 };
 #[cfg(target_os = "windows")]
 use browser_integration_windows::{BrowserIntegrationError, WindowsBrowserIntegration};
@@ -226,6 +229,7 @@ struct RuntimeState {
     agent_broker: Arc<Mutex<AgentBrokerCore>>,
     agent_pairing_window_request: Arc<Mutex<Option<String>>>,
     agent_unlock_window_request: Arc<Mutex<Option<DisplayedAgentUnlock>>>,
+    browser_autofill_unlocks: Arc<Mutex<BrowserAutofillUnlockQueue>>,
     agent_authorization_window_request: Arc<Mutex<Option<DisplayedAgentAuthorization>>>,
     agent_authorization_window_deadline: Arc<AtomicU64>,
     agent_resources: Arc<Mutex<AgentResourceStore>>,
@@ -260,6 +264,7 @@ struct RuntimeState {
     biometric: Arc<Mutex<BiometricQuickUnlockService>>,
     desktop_authentication: Arc<Mutex<desktop_authentication::Coordinator>>,
     pin: Arc<Mutex<PinQuickUnlockService>>,
+    browser_preauth_preview: BrowserPreAuthPreviewStore,
     lan_pairing: Arc<Mutex<LanPairingService>>,
     lan_sync: Arc<Mutex<LanSyncService<DesktopRuntime>>>,
     vault_path_record: PathBuf,

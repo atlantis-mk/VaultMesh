@@ -229,6 +229,7 @@ async function resetLocalBrowserPairing() {
   await rm(path.join(
     homedir(), "Library", "Application Support", "com.vaultmesh.desktop", "browser-pairing.json",
   ), { force: true });
+  await rm(path.join(tmpdir(), "vaultmesh-tauri-browser.sock"), { force: true });
 }
 
 async function assertNoStaleBackup() {

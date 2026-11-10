@@ -32,6 +32,14 @@ pub struct FillPrompt {
     pub origin: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct PreparedOneShotSelection {
+    pub item_title: String,
+    pub item_kind: String,
+    pub origin: String,
+    pub master_password_reprompt: bool,
+}
+
 impl BrowserFillService {
     pub fn clear(&mut self) {
         self.seen_discoveries.clear();
@@ -52,9 +60,10 @@ impl BrowserFillService {
         Ok(json!({ "id": request.id, "customFields": custom_fields }))
     }
 
-    pub fn candidates(
+    pub fn candidates_with_preview(
         &self,
         runtime: &mut DesktopRuntime,
+        preview: Option<&crate::browser_preauth_preview::BrowserPreAuthPreviewStore>,
         input: &Map<String, Value>,
     ) -> Result<Value, BrowserPlatformError> {
         let input: CandidateInput = serde_json::from_value(Value::Object(input.clone()))
@@ -73,15 +82,24 @@ impl BrowserFillService {
             return Err(invalid("自动填充候选查询无效。"));
         }
 
-        let summaries = match input.field_kind.as_str() {
-            "login" => runtime.browser_login_metadata(),
-            "card" => runtime.execute("cards.list", json!({})),
-            "identity" => runtime.execute("identities.list", json!({})),
-            "secret" => runtime.execute("secrets.list", json!({})),
-            "ssh" => runtime.execute("ssh.list", json!({})),
-            _ => unreachable!(),
-        }
-        .map_err(runtime_error)?;
+        let requires_unlock = !runtime.is_unlocked();
+        let summaries = if !requires_unlock {
+            match input.field_kind.as_str() {
+                "login" => runtime.browser_login_metadata(),
+                "card" => runtime.execute("cards.list", json!({})),
+                "identity" => runtime.execute("identities.list", json!({})),
+                "secret" => runtime.execute("secrets.list", json!({})),
+                "ssh" => runtime.execute("ssh.list", json!({})),
+                _ => unreachable!(),
+            }
+            .map_err(runtime_error)?
+        } else if let Some(summaries) =
+            preview.and_then(|store| store.summaries_for_kind(&runtime.current_path(), &input.field_kind))
+        {
+            summaries
+        } else {
+            return Ok(json!({ "candidates": [], "requiresUnlock": true }));
+        };
         let mut candidates = Vec::new();
         for summary in summaries
             .as_array()
@@ -175,7 +193,7 @@ impl BrowserFillService {
             };
             candidates.push(candidate);
         }
-        Ok(json!({ "candidates": candidates }))
+        Ok(json!({ "candidates": candidates, "requiresUnlock": requires_unlock }))
     }
 
     pub fn prompt(
@@ -193,6 +211,83 @@ impl BrowserFillService {
             item_kind: selected.kind,
             origin: request.discovery.target_origin,
         })
+    }
+
+    pub fn prepare_one_shot_selection(
+        &self,
+        runtime: &mut DesktopRuntime,
+        preview: &crate::browser_preauth_preview::BrowserPreAuthPreviewStore,
+        input: &Map<String, Value>,
+        now_millis: i64,
+    ) -> Result<Option<PreparedOneShotSelection>, BrowserPlatformError> {
+        let request = parse_execute(input, now_millis)?;
+        if request.mode != "selection" {
+            return Ok(None);
+        }
+        if self
+            .seen_discoveries
+            .get(&request.discovery.request_id)
+            .is_some_and(|expiry| *expiry > now_millis)
+        {
+            return Err(invalid("自动填充页面字段描述不能重复使用。"));
+        }
+        let selected = request
+            .discovery
+            .selected_item
+            .as_ref()
+            .ok_or_else(|| invalid("自动填充请求没有所选项目。"))?;
+
+        if !runtime.is_unlocked() {
+            let reprompt_from_request = selected._master_password_reprompt.unwrap_or(false);
+            let reprompt_from_preview = preview
+                .item_requires_master_password_reprompt(
+                    &runtime.current_path(),
+                    &selected.kind,
+                    &selected.id,
+                )
+                .unwrap_or(true);
+            return Ok(Some(PreparedOneShotSelection {
+                item_title: selected.title.clone(),
+                item_kind: selected.kind.clone(),
+                origin: request.discovery.top_origin.clone(),
+                master_password_reprompt: selected.kind == "card"
+                    || reprompt_from_request
+                    || reprompt_from_preview,
+            }));
+        }
+
+        if request.master_password.is_none() {
+            let detail_operation = match selected.kind.as_str() {
+                "login" => "items.detail",
+                "card" => "cards.detail",
+                "identity" => "identities.detail",
+                "secret" => "secrets.detail",
+                "ssh" => "ssh.detail",
+                _ => return Err(invalid("所选项目类型无效。")),
+            };
+            if let Ok(detail) = runtime.execute(detail_operation, json!({ "id": selected.id })) {
+                let item_reprompt = selected.kind == "card"
+                    || detail
+                        .get("masterPasswordReprompt")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                if item_reprompt {
+                    let actual_title = detail
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or(selected.title.as_str())
+                        .to_owned();
+                    return Ok(Some(PreparedOneShotSelection {
+                        item_title: actual_title,
+                        item_kind: selected.kind.clone(),
+                        origin: request.discovery.top_origin.clone(),
+                        master_password_reprompt: true,
+                    }));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     pub fn execute(

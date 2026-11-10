@@ -237,11 +237,7 @@ fn serve_connection(
     stopping: &AtomicBool,
 ) -> io::Result<()> {
     let request = read_line(pipe.0, stopping)?;
-    let response = broker
-        .lock()
-        .ok()
-        .map(|mut broker| broker.handle_line(&request))
-        .unwrap_or_else(|| host_status("desktop-unavailable", None));
+    let response = BrowserBrokerCore::handle_line_shared(&broker, &request);
     write_response(pipe.0, response)?;
     unsafe {
         DisconnectNamedPipe(pipe.0);

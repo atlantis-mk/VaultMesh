@@ -3,7 +3,10 @@ use super::*;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "macos")]
-    disable_app_nap();
+    {
+        disable_macos_window_restoration();
+        disable_app_nap();
+    }
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init());
@@ -581,6 +584,10 @@ pub fn run() {
                 // Never log paths, configuration contents or pairing credentials.
                 eprintln!("Browser Native Host registration unavailable ({:?}).", error.kind());
             }
+            let browser_preauth_preview = BrowserPreAuthPreviewStore::new(
+                credentials_store.scoped(browser_preauth_preview::PREAUTH_PREVIEW_SERVICE),
+            );
+            let browser_autofill_unlocks = Arc::new(Mutex::new(BrowserAutofillUnlockQueue::default()));
             #[cfg(unix)]
             let browser_listener =
                 BrowserPairingService::new(app_data.join("browser-pairing.json"), &credentials_store)
@@ -596,6 +603,8 @@ pub fn run() {
                             Arc::clone(&native_dialog_focus),
                             Arc::clone(&email_otp),
                             Arc::clone(&desktop_biometric),
+                            browser_preauth_preview.clone(),
+                            Arc::clone(&browser_autofill_unlocks),
                         ));
                         BrowserBrokerCore::new_with_platform(vault_path.clone(), secret, platform).ok()
                     })
@@ -618,6 +627,8 @@ pub fn run() {
                 let browser_native_dialog_focus = Arc::clone(&native_dialog_focus);
                 let browser_email_otp = Arc::clone(&email_otp);
                 let browser_biometric = Arc::clone(&desktop_biometric);
+                let browser_preview = browser_preauth_preview.clone();
+                let browser_unlocks = Arc::clone(&browser_autofill_unlocks);
                 let browser_credentials_store = Arc::clone(&credentials_store);
                 let broker_factory = Arc::new(move || {
                     let secret =
@@ -636,6 +647,8 @@ pub fn run() {
                         Arc::clone(&browser_native_dialog_focus),
                         Arc::clone(&browser_email_otp),
                         Arc::clone(&browser_biometric),
+                        browser_preview.clone(),
+                        Arc::clone(&browser_unlocks),
                     ));
                     BrowserBrokerCore::new_with_platform(
                         browser_vault_path.clone(),
@@ -662,7 +675,8 @@ pub fn run() {
                         app.handle().clone(), app_data.clone(), Arc::clone(&settings),
                         settings_path.clone(), Arc::clone(&clipboard_value),
                         Arc::clone(&native_dialog_focus), Arc::clone(&email_otp),
-                        Arc::clone(&desktop_biometric),
+                        Arc::clone(&desktop_biometric), browser_preauth_preview.clone(),
+                        Arc::clone(&browser_autofill_unlocks),
                     ).into_bitwarden_development(&app_data);
                     BrowserBrokerCore::new_with_platform(vault_path.clone(), secret, Arc::new(platform)).ok()
                 }).and_then(|broker| {
@@ -692,6 +706,7 @@ pub fn run() {
                 agent_broker,
                 agent_pairing_window_request: Arc::new(Mutex::new(None)),
                 agent_unlock_window_request: Arc::new(Mutex::new(None)),
+                browser_autofill_unlocks,
                 agent_authorization_window_request: Arc::new(Mutex::new(None)),
                 agent_authorization_window_deadline: Arc::new(AtomicU64::new(0)),
                 agent_resources,
@@ -727,6 +742,7 @@ pub fn run() {
                     pin_path,
                     &credentials_store,
                 ))),
+                browser_preauth_preview,
                 lan_pairing: Arc::new(Mutex::new(LanPairingService::new_with_credentials(
                     lan_peer_trust_path,
                     lan_credentials,
@@ -921,6 +937,30 @@ fn confirmed_session_lock(observation: Option<bool>) -> bool {
 /// such apps, delaying request handling, idle auto-lock and clipboard clearing
 /// by seconds to minutes. Hold one activity for the process lifetime; idle
 /// system sleep remains allowed.
+#[cfg(target_os = "macos")]
+fn disable_macos_window_restoration() {
+    use core_foundation::{base::TCFType, boolean::CFBoolean, string::CFString};
+    use core_foundation_sys::preferences::{
+        CFPreferencesAppSynchronize, CFPreferencesSetAppValue, kCFPreferencesCurrentApplication,
+    };
+
+    let ignore_state = CFString::new("ApplePersistenceIgnoreState");
+    let keep_windows = CFString::new("NSQuitAlwaysKeepsWindows");
+    unsafe {
+        CFPreferencesSetAppValue(
+            ignore_state.as_concrete_TypeRef(),
+            CFBoolean::true_value().as_CFTypeRef(),
+            kCFPreferencesCurrentApplication,
+        );
+        CFPreferencesSetAppValue(
+            keep_windows.as_concrete_TypeRef(),
+            CFBoolean::false_value().as_CFTypeRef(),
+            kCFPreferencesCurrentApplication,
+        );
+        let _ = CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn disable_app_nap() {
     use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
@@ -1130,4 +1170,40 @@ fn get_or_create_device_id(app_data: &std::path::Path) -> String {
     let new_id = uuid::Uuid::new_v4().simple().to_string();
     let _ = std::fs::write(&id_file, &new_id);
     new_id
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_startup_tests {
+    use super::disable_macos_window_restoration;
+    use core_foundation::{base::TCFType, string::CFString};
+    use core_foundation_sys::preferences::{
+        CFPreferencesGetAppBooleanValue, kCFPreferencesCurrentApplication,
+    };
+
+    #[test]
+    fn macos_window_restoration_is_disabled_for_current_application() {
+        disable_macos_window_restoration();
+        let ignore_state = CFString::new("ApplePersistenceIgnoreState");
+        let keep_windows = CFString::new("NSQuitAlwaysKeepsWindows");
+        let mut ignore_exists = 0;
+        let mut keep_exists = 0;
+        let ignore_val = unsafe {
+            CFPreferencesGetAppBooleanValue(
+                ignore_state.as_concrete_TypeRef(),
+                kCFPreferencesCurrentApplication,
+                &mut ignore_exists,
+            )
+        };
+        let keep_val = unsafe {
+            CFPreferencesGetAppBooleanValue(
+                keep_windows.as_concrete_TypeRef(),
+                kCFPreferencesCurrentApplication,
+                &mut keep_exists,
+            )
+        };
+        assert_eq!(ignore_exists, 1);
+        assert_eq!(ignore_val, 1);
+        assert_eq!(keep_exists, 1);
+        assert_eq!(keep_val, 0);
+    }
 }

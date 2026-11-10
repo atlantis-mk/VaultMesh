@@ -43,9 +43,9 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   'events.poll': metadata(false),
   'browser.pairing.status': metadata(false),
   'browser.pairing.revoke': systemDialog(false, true),
-  'browser.autofill.candidates': metadata(),
+  'browser.autofill.candidates': metadata(false),
   'browser.autofill.profile': metadata(),
-  'browser.autofill.execute': automaticPageDisclosure,
+  'browser.autofill.execute': { capability: 'page-disclosure', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false },
   'browser.card.capture-status': automaticPageDisclosure,
   'browser.login.password-changed': automaticPageDisclosure,
   'browser.fill.record': automaticAudit,
@@ -158,7 +158,7 @@ export type BrowserRpcAuthorization =
 
 export function authorizeBrowserRpc(request: BrowserRpcRequest, unlocked: boolean): BrowserRpcAuthorization {
   const policy = BROWSER_RPC_POLICIES[request.operation];
-  if (policy.requiresUnlock && !unlocked) {
+  if ((policy.requiresUnlock || (request.operation === 'browser.autofill.execute' && request.input.mode !== 'selection')) && !unlocked) {
     return { authorized: false, code: 'unlock-required', message: '请先在 VaultMesh 插件中单独解锁。' };
   }
   if (policy.requiresGesture || (request.operation === 'browser.autofill.execute' && (request.input.nativeItemPlan !== undefined || request.input.nativeLoginPlan !== undefined && request.input.mode !== 'automatic'))) {

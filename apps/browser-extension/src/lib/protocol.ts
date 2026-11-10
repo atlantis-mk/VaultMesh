@@ -357,6 +357,7 @@ export const AutofillAvailabilityResponseSchema = z.object({
 
 export const AutofillCandidatesResponseSchema = z.object({
   status: z.enum(["ready", "locked", "unavailable", "unsupported-page"]),
+  requiresUnlock: z.boolean().optional(),
   candidates: z.array(AutofillCandidateSchema).max(200),
   emailOtpCandidates: z.array(EmailOtpCandidateSchema).max(20).optional(),
 });

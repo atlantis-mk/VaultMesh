@@ -782,3 +782,570 @@ fn ct_lan_sync_listener_stop_drops_browser_unlock_owner() {
     assert!(weak.upgrade().is_none(), "stopped listener must not retain an unlocked core");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn ct_browser_002_locked_candidates_use_verified_preauth_preview_without_unlocking_session() {
+    let (root, _path, mut broker, secret) = setup("locked-preauth-candidates");
+
+    // Before first unlock sync, locked candidates returns empty array + requiresUnlock: true (no error).
+    let cold = call(
+        &mut broker,
+        &secret,
+        "browser.autofill.candidates",
+        json!({
+            "topOrigin": "https://example.com",
+            "pageUrl": "https://example.com/login",
+            "fieldKind": "login",
+            "pageContext": "login"
+        }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(cold["ok"], true);
+    assert_eq!(cold["result"]["candidates"], json!([]));
+    assert_eq!(cold["result"]["requiresUnlock"], json!(true));
+
+    // Unlock syncs the encrypted pre-auth preview index; while unlocked requiresUnlock is false.
+    let unlocked = call(
+        &mut broker,
+        &secret,
+        "vault.unlock",
+        json!({ "masterPassword": PASSWORD, "userGestureId": Uuid::new_v4() }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(unlocked["ok"], true);
+
+    let live = call(
+        &mut broker,
+        &secret,
+        "browser.autofill.candidates",
+        json!({
+            "topOrigin": "https://example.com",
+            "pageUrl": "https://example.com/login",
+            "fieldKind": "login",
+            "pageContext": "login"
+        }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(live["ok"], true);
+    assert_eq!(live["result"]["requiresUnlock"], json!(false));
+    assert_eq!(live["result"]["candidates"].as_array().map(Vec::len), Some(1));
+
+    // Lock the browser session; locked candidate search still returns metadata with requiresUnlock: true,
+    // while Popup workspace / item list and automatic page-load fill remain locked.
+    let locked = call(
+        &mut broker,
+        &secret,
+        "vault.lock",
+        json!({ "userGestureId": Uuid::new_v4() }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(locked["result"]["unlocked"], json!(false));
+
+    let locked_candidates = call(
+        &mut broker,
+        &secret,
+        "browser.autofill.candidates",
+        json!({
+            "topOrigin": "https://example.com",
+            "pageUrl": "https://example.com/login",
+            "fieldKind": "login",
+            "pageContext": "login"
+        }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(locked_candidates["ok"], true);
+    assert_eq!(locked_candidates["result"]["requiresUnlock"], json!(true));
+    assert_eq!(
+        locked_candidates["result"]["candidates"][0]["title"],
+        json!("Example")
+    );
+    assert_eq!(
+        locked_candidates["result"]["candidates"][0]["subtitle"],
+        json!("alice")
+    );
+    assert!(!locked_candidates.to_string().contains("secret"));
+
+    // Unrelated origin returns zero candidates even while preview index is populated.
+    let unrelated = call(
+        &mut broker,
+        &secret,
+        "browser.autofill.candidates",
+        json!({
+            "topOrigin": "https://other.example.org",
+            "pageUrl": "https://other.example.org/login",
+            "fieldKind": "login",
+            "pageContext": "login"
+        }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(unrelated["ok"], true);
+    assert_eq!(unrelated["result"]["candidates"], json!([]));
+    assert_eq!(unrelated["result"]["requiresUnlock"], json!(true));
+
+    // Popup workspace and automatic page-load fill must still fail closed with unlock-required.
+    assert_eq!(
+        call(&mut broker, &secret, "vault.workspace", json!({}), Uuid::new_v4())["error"]["code"],
+        "unlock-required"
+    );
+    let auto_fill = call(
+        &mut broker,
+        &secret,
+        "browser.autofill.execute",
+        json!({
+            "mode": "automatic",
+            "discovery": {
+                "version": 1,
+                "requestId": Uuid::new_v4(),
+                "issuedAt": "2027-01-15T08:00:00.000Z",
+                "expiresAt": "2027-01-15T08:00:30.000Z",
+                "tabId": 1,
+                "topOrigin": "https://example.com",
+                "targetOrigin": "https://example.com",
+                "targetPageUrl": "https://example.com/login",
+                "frames": []
+            }
+        }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(auto_fill["error"]["code"], "unlock-required");
+
+    drop(broker);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+struct MockOneShotPlatform {
+    preview: crate::browser_preauth_preview::BrowserPreAuthPreviewStore,
+    seen_requests: Mutex<Vec<(String, String, String, bool)>>,
+    handler: Mutex<
+        Option<
+            Box<
+                dyn FnMut(&OneShotUnlockRequest) -> Result<OneShotUnlockedRuntime, BrowserPlatformError>
+                    + Send,
+            >,
+        >,
+    >,
+}
+
+impl BrowserBrokerPlatform for MockOneShotPlatform {
+    fn dispatch(
+        &self,
+        _runtime: &mut DesktopRuntime,
+        _operation: &str,
+        _input: &Map<String, Value>,
+        _now_millis: i64,
+    ) -> Option<Result<Value, BrowserPlatformError>> {
+        None
+    }
+
+    fn preauth_preview_store(
+        &self,
+    ) -> Option<crate::browser_preauth_preview::BrowserPreAuthPreviewStore> {
+        Some(self.preview.clone())
+    }
+
+    fn begin_one_shot_unlock_for_fill(
+        &self,
+        request: OneShotUnlockRequest,
+    ) -> Option<OneShotUnlockWaiter> {
+        self.seen_requests.lock().expect("seen lock").push((
+            request.origin.clone(),
+            request.item_title.clone(),
+            request.item_kind.clone(),
+            request.master_password_reprompt,
+        ));
+        let result = self
+            .handler
+            .lock()
+            .expect("handler lock")
+            .as_mut()
+            .expect("configured handler")(&request);
+        Some(OneShotUnlockWaiter::new(move || result))
+    }
+}
+
+#[test]
+fn ct_browser_002_one_shot_fill_unlock_executes_without_unlocking_popup_session() {
+    let root = std::env::temp_dir().join(format!(
+        "vaultmesh-tauri-browser-oneshot-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root).expect("test root");
+    let vault_path = root.join("browser.vault");
+    let preview = crate::browser_preauth_preview::BrowserPreAuthPreviewStore::in_memory();
+
+    let (item_id, quick_key) = {
+        let mut creator = DesktopRuntime::new(vault_path.clone()).expect("creator");
+        creator.create(PASSWORD.into()).expect("create vault");
+        let added = creator
+            .execute(
+                "items.add",
+                json!({
+                    "title": "Example",
+                    "username": "alice@example.com",
+                    "password": "one-shot-secret-password",
+                    "url": "https://example.com/login",
+                    "notes": null,
+                    "folder": null,
+                    "favorite": true,
+                    "additionalUrls": [],
+                    "autofillOnPageLoad": false,
+                    "masterPasswordReprompt": false,
+                    "customFields": []
+                }),
+            )
+            .expect("seed login");
+        preview
+            .sync_from_runtime(&mut creator)
+            .expect("sync preview");
+        let (_, key) = creator.quick_unlock_material().expect("quick unlock key");
+        creator.lock();
+        (added["id"].as_str().expect("id").to_owned(), key)
+    };
+
+    let key_for_handler = quick_key.clone();
+    let platform = Arc::new(MockOneShotPlatform {
+        preview,
+        seen_requests: Mutex::new(Vec::new()),
+        handler: Mutex::new(Some(Box::new(move |req| {
+            let mut temp = DesktopRuntime::new(req.vault_path.clone()).expect("temp runtime");
+            temp.unlock_for_agent_with_quick_key(req.vault_path.clone(), key_for_handler.as_slice())
+                .expect("quick key unlock");
+            Ok(OneShotUnlockedRuntime {
+                runtime: temp,
+                master_password: None,
+            })
+        }))),
+    });
+
+    let secret = [0x42_u8; 32];
+    let mut broker = BrowserBrokerCore::new_with_platform(
+        vault_path.clone(),
+        Zeroizing::new(secret),
+        platform.clone(),
+    )
+    .expect("broker");
+    assert!(!broker.runtime.is_unlocked());
+
+    let user_handle = Uuid::new_v4();
+    let pass_handle = Uuid::new_v4();
+    let discovery_id = Uuid::new_v4();
+    let execute_input = json!({
+        "mode": "selection",
+        "discovery": {
+            "version": 1,
+            "requestId": discovery_id,
+            "issuedAt": "2027-01-15T08:00:00.000Z",
+            "expiresAt": "2027-01-15T08:00:30.000Z",
+            "tabId": 9,
+            "topOrigin": "https://example.com",
+            "targetOrigin": "https://example.com",
+            "targetPageUrl": "https://example.com/login",
+            "selectedItem": { "kind": "login", "id": item_id, "title": "Example" },
+            "frames": [{
+                "frameId": 0,
+                "documentId": Uuid::new_v4(),
+                "frameOrigin": "https://example.com",
+                "fields": [
+                    {
+                        "handle": user_handle, "control": "input", "inputType": "email",
+                        "isEmpty": true, "autocomplete": ["username"], "label": "Email",
+                        "name": "email", "id": "email", "placeholder": "", "context": "login"
+                    },
+                    {
+                        "handle": pass_handle, "control": "input", "inputType": "password",
+                        "isEmpty": true, "autocomplete": ["current-password"], "label": "Password",
+                        "name": "password", "id": "password", "placeholder": "", "context": "login"
+                    }
+                ]
+            }]
+        }
+    });
+
+    let approved = call(
+        &mut broker,
+        &secret,
+        "browser.autofill.execute",
+        execute_input.clone(),
+        Uuid::new_v4(),
+    );
+    assert_eq!(approved["ok"], true, "{approved}");
+    assert_eq!(
+        approved["result"]["frames"][0]["assignments"][0]["value"],
+        json!("alice@example.com")
+    );
+    assert_eq!(
+        approved["result"]["frames"][0]["assignments"][1]["value"],
+        json!("one-shot-secret-password")
+    );
+    assert_eq!(
+        *platform.seen_requests.lock().unwrap(),
+        vec![(
+            "https://example.com".to_owned(),
+            "Example".to_owned(),
+            "login".to_owned(),
+            false,
+        )]
+    );
+
+    // Browser Popup session MUST remain locked after one-shot fill.
+    assert!(!broker.runtime.is_unlocked());
+    assert_eq!(
+        call(&mut broker, &secret, "vault.status", json!({}), Uuid::new_v4())["result"]["unlocked"],
+        json!(false)
+    );
+    assert_eq!(
+        call(&mut broker, &secret, "vault.workspace", json!({}), Uuid::new_v4())["error"]["code"],
+        json!("unlock-required")
+    );
+
+    // Replaying the same discovery requestId must fail closed before waking the unlock window again.
+    let replayed = call(
+        &mut broker,
+        &secret,
+        "browser.autofill.execute",
+        execute_input.clone(),
+        Uuid::new_v4(),
+    );
+    assert_eq!(replayed["error"]["code"], json!("invalid-request"));
+    assert_eq!(platform.seen_requests.lock().unwrap().len(), 1);
+
+    // Cancellation from the temporary unlock window returns `cancelled` cleanly.
+    *platform.handler.lock().unwrap() = Some(Box::new(|_| {
+        Err(BrowserPlatformError {
+            code: "cancelled",
+            message: "已取消本次自动填充。".to_owned(),
+        })
+    }));
+    let mut cancelled_input = execute_input;
+    cancelled_input["discovery"]["requestId"] = json!(Uuid::new_v4());
+    let cancelled = call(
+        &mut broker,
+        &secret,
+        "browser.autofill.execute",
+        cancelled_input,
+        Uuid::new_v4(),
+    );
+    assert_eq!(cancelled["error"]["code"], json!("cancelled"));
+    assert!(!broker.runtime.is_unlocked());
+
+    drop(broker);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn ct_browser_002_one_shot_fill_enforces_master_password_reprompt_and_lock_free_wait() {
+    let root = std::env::temp_dir().join(format!(
+        "vaultmesh-tauri-browser-oneshot-reprompt-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root).expect("test root");
+    let vault_path = root.join("browser.vault");
+    let preview = crate::browser_preauth_preview::BrowserPreAuthPreviewStore::in_memory();
+
+    let (reprompt_id, quick_key) = {
+        let mut creator = DesktopRuntime::new(vault_path.clone()).expect("creator");
+        creator.create(PASSWORD.into()).expect("create vault");
+        let added = creator
+            .execute(
+                "items.add",
+                json!({
+                    "title": "Protected Bank",
+                    "username": "banker",
+                    "password": "protected-bank-password",
+                    "url": "https://bank.example.com/login",
+                    "notes": null,
+                    "folder": null,
+                    "favorite": false,
+                    "additionalUrls": [],
+                    "autofillOnPageLoad": false,
+                    "masterPasswordReprompt": true,
+                    "customFields": []
+                }),
+            )
+            .expect("seed reprompt login");
+        preview
+            .sync_from_runtime(&mut creator)
+            .expect("sync preview");
+        let (_, key) = creator.quick_unlock_material().expect("quick unlock key");
+        creator.lock();
+        (added["id"].as_str().expect("id").to_owned(), key)
+    };
+
+    // 1. Even if a faulty handler returned a quick-key runtime without `master_password`,
+    // `vault-core` still enforces `masterPasswordReprompt` and rejects with `re-prompt-required`.
+    let key_without_pw = quick_key.clone();
+    let platform = Arc::new(MockOneShotPlatform {
+        preview,
+        seen_requests: Mutex::new(Vec::new()),
+        handler: Mutex::new(Some(Box::new(move |req| {
+            let mut temp = DesktopRuntime::new(req.vault_path.clone()).expect("temp runtime");
+            temp.unlock_for_agent_with_quick_key(req.vault_path.clone(), key_without_pw.as_slice())
+                .expect("quick key unlock");
+            Ok(OneShotUnlockedRuntime {
+                runtime: temp,
+                master_password: None,
+            })
+        }))),
+    });
+
+    let secret = [0x55_u8; 32];
+    let broker = Arc::new(Mutex::new(
+        BrowserBrokerCore::new_with_platform(
+            vault_path.clone(),
+            Zeroizing::new(secret),
+            platform.clone(),
+        )
+        .expect("broker"),
+    ));
+
+    let make_live_execute = || {
+        let now = Utc::now();
+        let issued = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+        let expires = (now + chrono::Duration::seconds(30)).to_rfc3339_opts(SecondsFormat::Millis, true);
+        let pass_handle = Uuid::new_v4();
+        (
+            pass_handle,
+            json!({
+                "mode": "selection",
+                "discovery": {
+                    "version": 1,
+                    "requestId": Uuid::new_v4(),
+                    "issuedAt": issued,
+                    "expiresAt": expires,
+                    "tabId": 3,
+                    "topOrigin": "https://bank.example.com",
+                    "targetOrigin": "https://bank.example.com",
+                    "targetPageUrl": "https://bank.example.com/login",
+                    "selectedItem": { "kind": "login", "id": reprompt_id, "title": "Protected Bank" },
+                    "frames": [{
+                        "frameId": 0,
+                        "documentId": Uuid::new_v4(),
+                        "frameOrigin": "https://bank.example.com",
+                        "fields": [{
+                            "handle": pass_handle, "control": "input", "inputType": "password",
+                            "isEmpty": true, "autocomplete": ["current-password"], "label": "Password",
+                            "name": "password", "id": "password", "placeholder": "", "context": "login"
+                        }]
+                    }]
+                }
+            }),
+        )
+    };
+
+    let make_live_envelope = |operation: &str, input: Value| -> Vec<u8> {
+        let now = Utc::now();
+        let request_id = Uuid::new_v4();
+        let rpc = json!({
+            "kind": "vaultmesh.rpc",
+            "version": 2,
+            "requestId": request_id,
+            "issuedAt": now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "expiresAt": (now + chrono::Duration::seconds(30)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            "operation": operation,
+            "input": input,
+        });
+        envelope(&rpc, &secret)
+    };
+
+    let (_, missing_pw_input) = make_live_execute();
+    let rejected = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope("browser.autofill.execute", missing_pw_input),
+    );
+    assert_eq!(rejected["error"]["code"], json!("re-prompt-required"));
+    assert_eq!(
+        platform.seen_requests.lock().unwrap()[0].3,
+        true,
+        "preview index must mark item as masterPasswordReprompt = true"
+    );
+
+    // 2. Verify lock-free wait: while `browser.autofill.execute` waits for user master-password
+    // unlock on a background thread, `vault.status` from Popup completes immediately without blocking.
+    struct BlockingOneShotPlatform {
+        entered_tx: std::sync::mpsc::SyncSender<()>,
+        release_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+    impl BrowserBrokerPlatform for BlockingOneShotPlatform {
+        fn dispatch(
+            &self,
+            _runtime: &mut DesktopRuntime,
+            _operation: &str,
+            _input: &Map<String, Value>,
+            _now_millis: i64,
+        ) -> Option<Result<Value, BrowserPlatformError>> {
+            None
+        }
+        fn begin_one_shot_unlock_for_fill(
+            &self,
+            request: OneShotUnlockRequest,
+        ) -> Option<OneShotUnlockWaiter> {
+            let entered_tx = self.entered_tx.clone();
+            let release_rx = Arc::clone(&self.release_rx);
+            Some(OneShotUnlockWaiter::new(move || {
+                let _ = entered_tx.send(());
+                release_rx
+                    .lock()
+                    .expect("rx lock")
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("release signal");
+                let mut temp = DesktopRuntime::new(request.vault_path.clone()).expect("temp");
+                temp.unlock_for_agent_from(request.vault_path, PASSWORD.to_owned())
+                    .expect("master password unlock");
+                Ok(OneShotUnlockedRuntime {
+                    runtime: temp,
+                    master_password: Some(Zeroizing::new(PASSWORD.to_owned())),
+                })
+            }))
+        }
+    }
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let shared_broker = Arc::new(Mutex::new(
+        BrowserBrokerCore::new_with_platform(
+            vault_path,
+            Zeroizing::new(secret),
+            Arc::new(BlockingOneShotPlatform {
+                entered_tx,
+                release_rx: Arc::new(Mutex::new(release_rx)),
+            }),
+        )
+        .expect("shared broker"),
+    ));
+
+    let (pass_handle, valid_input) = make_live_execute();
+    let fill_line = make_live_envelope("browser.autofill.execute", valid_input);
+    let worker_broker = Arc::clone(&shared_broker);
+    let worker = std::thread::spawn(move || {
+        BrowserBrokerCore::handle_line_shared(&worker_broker, &fill_line)
+    });
+
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("waiter entered without holding broker lock");
+
+    // While worker is blocked inside `waiter.wait()`, Popup `vault.status` acquires the broker lock immediately!
+    let popup_status = BrowserBrokerCore::handle_line_shared(
+        &shared_broker,
+        &make_live_envelope("vault.status", json!({})),
+    );
+    assert_eq!(popup_status["ok"], json!(true));
+    assert_eq!(popup_status["result"]["unlocked"], json!(false));
+
+    release_tx.send(()).expect("release waiter");
+    let fill_result = worker.join().expect("join worker");
+    assert_eq!(fill_result["ok"], json!(true), "{fill_result}");
+    assert_eq!(
+        fill_result["result"]["frames"][0]["assignments"],
+        json!([{
+            "handle": pass_handle,
+            "value": "protected-bank-password",
+            "overwrite": false
+        }])
+    );
+    assert!(!shared_broker.lock().unwrap().runtime.is_unlocked());
+
+    drop(shared_broker);
+    drop(broker);
+    fs::remove_dir_all(root).expect("cleanup");
+}
