@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn ct_device_assist_broker_uses_injected_credential_store() {
-        let (store, dir, _legacy) = temp_store();
+        let (store, dir) = temp_store();
         let scoped = Arc::new(store.scoped("com.vaultmesh.desktop.lan-pairing"));
         let trust_path = dir.0.join("lan-peer-trust.json");
         let mut broker = DeviceAssistBroker::new(trust_path, scoped.clone());
