@@ -2,6 +2,7 @@
 
 - 状态：Accepted
 - 日期：2026-08-10
+- 修订：2026-11-11，Chromium 不再使用 `webAuthenticationProxy`，Passkey 改为页面级 shim 且仍仅限 Chromium（ADR-0057）
 
 ## 决策
 

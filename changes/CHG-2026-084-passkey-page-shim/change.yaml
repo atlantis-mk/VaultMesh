@@ -1,0 +1,37 @@
+schema: "2"
+id: "CHG-2026-084-passkey-page-shim"
+title: "以页面级 WebAuthn shim 取代全局 webAuthenticationProxy"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "移除全局劫持浏览器 Passkey 的 webAuthenticationProxy，改为逐请求决策的 MAIN world shim；该决定改变浏览器信任模型，必须先经 ADR-0057 批准并跨多个任务完成实现与真机验收。"
+requirements:
+  - "REQ-PASSKEY-001"
+tests:
+  - "CT-PASSKEY-001"
+  - "CT-PASSKEY-002"
+  - "CT-PASSKEY-003"
+  - "AT-PASSKEY-001"
+adrs:
+  - "ADR-0003"
+  - "ADR-0017"
+  - "ADR-0055"
+  - "ADR-0057"
+context_refs:
+  - "specs/browser-integration.md#Passkey"
+  - "docs/06-security-privacy.md#Passkey 边界"
+  - "docs/07-test-release-plan.md#CT-PASSKEY-001"
+related_changes:
+  - "CHG-2026-083-passkey-intercept-fallback"
+boundaries:
+  - "浏览器信任模型：移除 webAuthenticationProxy 权限，新增 MAIN world content script 与隔离世界消息桥"
+  - "Browser RPC 不新增操作；origin 与 sameOriginWithAncestors 只能由 background 依据 sender 与帧树写入"
+  - "Firefox 范围不变，不包含 Passkey shim"
+risks:
+  - "页面可检测或绕过 shim，只影响该页面是否使用 VaultMesh，不得降低秘密保护"
+  - "响应对象必须在 PublicKeyCredential 原型下可被主流网站库接受，需要真实站点验收"
+  - "CHG-2026-083 已 Active 且部分行为被取代，完成后需要一并收尾"
+next:
+  - "用户批准 ADR-0057 后在同一分支实现 shim、background 决策、popup 选择窗口并删除 passkey-proxy"
+  - "在真实 Chromium 完成 AT-PASSKEY-001"

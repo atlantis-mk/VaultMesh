@@ -25,8 +25,15 @@ test("accepts browser-specific manifests and rejects identity or permission drif
     key: developmentExtensionKey,
     minimum_chrome_version: "127",
     version_name: productVersion,
-    permissions: [...common.permissions, "webAuthenticationProxy"],
   }, { target: "chrome", version: productVersion, chromeExtensionKey: developmentExtensionKey });
+  assert.throws(() => validateExtensionManifest({
+    ...common,
+    manifest_version: 3,
+    key: developmentExtensionKey,
+    minimum_chrome_version: "127",
+    version_name: productVersion,
+    permissions: [...common.permissions, "webAuthenticationProxy"],
+  }, { target: "chrome", version: productVersion, chromeExtensionKey: developmentExtensionKey }), /Chrome extension manifest/);
   validateExtensionManifest({
     ...common,
     manifest_version: 2,

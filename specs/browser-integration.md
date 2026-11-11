@@ -25,10 +25,10 @@ WXT 必须使用固定的专用 development profile；Host manifest 必须同时
 ## 跨浏览器身份、Native Host 与打包
 
 Chrome/Chromium target 使用 MV3、固定 `WXT_CHROME_EXTENSION_KEY` 派生的 32 位 ID、
-`minimum_chrome_version` 与 `webAuthenticationProxy`。Firefox target 使用 WXT Firefox MV2、固定
-`browser_specific_settings.gecko.id`，并且必须省略上述 Chromium-only manifest 字段和 permission。
-两个 target 共享 popup/background/content 源码、Browser RPC v2、瞬态状态与秘密边界；runtime 对缺失
-`webAuthenticationProxy` 的既有 capability detection 必须保持 no-op，所以 Firefox 不宣称 Passkey proxy。
+`minimum_chrome_version`，且任何 target 都不得声明 `webAuthenticationProxy`。Firefox target 使用 WXT Firefox MV2、固定
+`browser_specific_settings.gecko.id`，并且必须省略上述 Chromium-only manifest 字段。
+两个 target 共享 popup/background/content 源码、Browser RPC v2、瞬态状态与秘密边界；Passkey shim 与 bridge
+只进入 Chromium target，所以 Firefox 不宣称 Passkey 支持。
 
 Native Messaging 使用浏览器特定 manifest，不能共享一份宽松 allowlist：
 
@@ -170,9 +170,11 @@ TOTP URI 只可在本次 content response、当前 popup 组件 state 和 deskto
 
 ## Passkey
 
-Chromium 127+ WebAuthn proxy 把 ES256 credential 存为 protected `authenticator-key` secret，并在 active desktop privileged process 签名。创建或导入时 Extension 可以提供当前 origin 记住的默认 Login opaque ID，但 Tauri broker 必须按 RP/origin 重新验证后才能写入关联；无有效默认值时可以唯一用户名匹配，仍不确定时表示为 Passkey-only Login，不进入普通 Secret/密钥分类。每次 registration/assertion 必须显示 RP/origin/account context 的 native confirmation。
+Chromium 127+ 页面级 WebAuthn shim 把 ES256 credential 存为 protected `authenticator-key` secret，并在 active desktop privileged process 签名。创建或导入时 Extension 可以提供当前 origin 记住的默认 Login opaque ID，但 Tauri broker 必须按 RP/origin 重新验证后才能写入关联；无有效默认值时可以唯一用户名匹配，仍不确定时表示为 Passkey-only Login，不进入普通 Secret/密钥分类。每次 registration/assertion 必须显示 RP/origin/account context 的 native confirmation。
 
-通行密钥接管开启且已配对时，Extension 必须全局挂载 proxy；锁定、空缓存、桌面暂不可达以及所有站点（包括 Google、Apple、Microsoft）均不得按站点或标签页主动直通。每个 assertion 先通过桌面端无秘密预检索索引执行 `passkeys.probe`，按 RP ID 与 `allowCredentials` 判断：`unavailable` 时不弹解锁框，当前请求以 `NotAllowedError` 结束、detach 5 分钟并提示用户在网站重试，重试由 Chrome 原生处理；`available` 时按需解锁并由原生允许框确认；`unknown` 时保守解锁后由 `passkeys.get` 严格重验。索引只保存 RP ID、credential ID、account、origin、item ID 等非秘密路由元数据，并绑定当前 Vault 路径与文件摘要。`create` 始终显示原生创建确认。插件安全策略提供通行密钥接管开关；关闭接管或确认未配对时 detach。Conditional mediation、largeBlob/PRF 不在当前范围。
+Extension 不使用 `chrome.webAuthenticationProxy`，不得持有浏览器全局 WebAuthn 状态（ADR-0057）。Chromium target 以 `world: "MAIN"`、`document_start`、所有 frame 注入 shim，包装 `CredentialsContainer.prototype.create/get`；隔离世界 bridge 经 `runtime.sendMessage` 交给 background。MAIN world 只序列化公开请求参数与还原公开响应，不持有秘密；`origin` 与 `sameOriginWithAncestors` 必须由 background 依据浏览器验证的 `sender` 与 `webNavigation` 帧树写入，覆盖页面提供的同名字段。只有 frame 与全部祖先同源时才由 VaultMesh 处理，其余 frame 交给浏览器执行 permissions policy。
+
+每个请求单独决策，需要回退时必须在同一次 `navigator.credentials` 调用内调用原生函数，不得要求网站或用户重试：通行密钥接管关闭、未配对、桌面不可达、`mediation: "conditional"`、依赖扩展结果的请求（`prf`、`largeBlob`、`hmacCreateSecret`、`credBlob`、`getCredBlob`、`payment`，或 `enforceCredentialProtectionPolicy` 为 true；其余扩展只作建议被忽略，仅转发 `appid` 与 `credProps`）、请求超限、跨源 frame 与 `passkeys.probe` 返回 `unavailable` 都直接回退。`probe` 为 `available` 或 `unknown` 时，background 必须优先在发起请求的标签页顶层 frame 内显示页面对话框（closed shadow root，仅响应受信任事件，Escape 取消），让用户选择“使用 VaultMesh”或“使用浏览器/系统”或取消，`create` 同样每次选择；页面无法显示时才回退到工具栏 popup/独立窗口。页面对话框只回答所属标签页的提示，不得输入或接收主密码、PIN 或生物识别，锁定时只提供“打开解锁窗口”；选择可以按 origin 与操作（create/get）记住，记住的值只保存该非秘密 enum，设置页可以全部清除。选择 VaultMesh 且 Vault 锁定时进入解锁等待，用户可以改用浏览器/系统；等待最长 5 分钟，超时与用户取消都以 `NotAllowedError` 结束，改用浏览器/系统与无匹配不是错误。页面 `AbortSignal`、导航、标签页关闭必须取消该请求拥有的等待。每次不由 VaultMesh 响应的决策必须向 background/页面控制台输出不含请求内容的原因码，便于诊断。索引只保存 RP ID、credential ID、account、origin、item ID 等非秘密路由元数据，并绑定当前 Vault 路径与文件摘要；索引不可用或过期时 `probe` 保守返回 `unknown`，由 `passkeys.get` 严格重验，无匹配仍回退。插件安全策略提供“接管网页通行密钥请求”开关（沿用 `passkeyProxyEnabled` 存储字段）；关闭时所有请求直接回退。能力查询 `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable` 与 `getClientCapabilities` 只在浏览器自己回答“没有平台认证器”时才由 shim 补位：背景确认接管开启、同源 frame 链且桌面端已配对可达（锁定也算可用）后，把 `userVerifyingPlatformAuthenticator`/`passkeyPlatformAuthenticator` 报告为可用，其余能力字段不变；浏览器已回答“有”时不得询问或改写，可用性结果只缓存 10 秒。这使依据该查询决定是否开始创建的网站（如 Google）仍会向 VaultMesh 发起请求，实际由用户在对话框中选择提供方。Firefox target 不包含 shim 与 bridge。
 
 新版 registration 必须从创建开始设置不可变的 BE 标志，签名计数固定为零；BS 只有在已授权对端持久化成功（包含重试时版本清单确认）后才能为真。旧 BE=0 凭据必须保持本机使用，重新注册后才可参与同步。同步 Passkey 不传递浏览器授权，使用时仍执行上述验证与确认。完整备份、复制与恢复规则由 `lan-vault-sync.md` 和 `ADR-0019` 拥有。
 
