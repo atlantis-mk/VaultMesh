@@ -54,7 +54,7 @@ Summary/detail 省略 protected value。有界且用户授权的 reveal/fill pre
 
 ## Passkey 边界
 
-Passkey private key 是 encrypted secret。active desktop runtime revalidate RP/origin，逐次 native confirmation 并签名，只返回 public WebAuthn response。Private key 不进入 page、popup 或 extension storage。扩展不使用 `webAuthenticationProxy`，因此不持有浏览器全局 WebAuthn 状态；MAIN world shim 只处理公开请求参数与公开响应，origin 与 sameOriginWithAncestors 只由 background 依据浏览器验证的 sender 与帧树写入，页面伪造的同名字段被覆盖。页面可以检测或绕过 shim，后果只是该页面不使用 VaultMesh，不降低秘密保护。无秘密预检索索引仅在 Vault 路径与文件摘要一致时提供 RP、credential ID、account、origin 等非秘密路由元数据；每个请求要么在用户选择并经解锁与 native confirmation 后由 VaultMesh 处理，要么在同一调用内回退浏览器，记住的选择只保存非秘密 enum（REQ-PASSKEY-001、ADR-0057）。
+Passkey private key 是 encrypted secret。active desktop runtime revalidate RP/origin，逐次 native confirmation 并签名，只返回 public WebAuthn response。Private key 不进入 page、popup 或 extension storage。扩展不使用 `webAuthenticationProxy`，因此不持有浏览器全局 WebAuthn 状态；MAIN world shim 只处理公开请求参数与公开响应，origin 与 sameOriginWithAncestors 只由 background 依据浏览器验证的 sender 与帧树写入，页面伪造的同名字段被覆盖。页面可以检测或绕过 shim，后果只是该页面不使用 VaultMesh，不降低秘密保护。无秘密预检索索引仅在 Vault 路径与文件摘要一致时提供 RP、credential ID、account、origin 等非秘密路由元数据；每个请求要么在用户选择并经解锁与 native confirmation 后由 VaultMesh 处理，要么在同一调用内回退浏览器，记住的选择只保存非秘密 enum；诊断记录只在 `storage.session` 保留最近 20 条 origin、操作与原因码，不含请求内容（REQ-PASSKEY-001、ADR-0057）。
 
 ## Email、Import 与 SSH 临时状态
 

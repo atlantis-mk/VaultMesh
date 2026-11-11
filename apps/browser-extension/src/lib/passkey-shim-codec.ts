@@ -30,9 +30,11 @@ export function blockingExtension(extensions: AuthenticationExtensionsClientInpu
 const BASE64URL = /^[A-Za-z0-9_-]*$/;
 
 export function toBase64Url(data: BufferSource): string {
-  const bytes = data instanceof ArrayBuffer
-    ? new Uint8Array(data)
-    : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  // `instanceof ArrayBuffer` is false for buffers made in another realm (iframe, worker),
+  // which would silently encode as empty. Views are detected structurally instead.
+  const bytes = ArrayBuffer.isView(data)
+    ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+    : new Uint8Array(data as ArrayBuffer);
   let binary = '';
   for (let index = 0; index < bytes.length; index += 0x8000) {
     binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
@@ -107,9 +109,18 @@ export type CredentialConstructors = {
   AuthenticatorAssertionResponse: { prototype: object };
 };
 
+/** Data attributes (`id`, `rawId`, `response`, ...) are read-only, like the real accessors without a setter. */
 function defineReadonly(target: object, properties: Record<string, unknown>) {
   for (const [name, value] of Object.entries(properties)) {
     Object.defineProperty(target, name, { value, enumerable: true, configurable: true, writable: false });
+  }
+}
+
+/** Operations (`toJSON`, `getTransports`, ...) must stay assignable: real ones live on the prototype,
+ * and libraries such as @github/webauthn-json do `credential.toJSON = ...` in strict mode. */
+function defineMethods(target: object, methods: Record<string, unknown>) {
+  for (const [name, value] of Object.entries(methods)) {
+    Object.defineProperty(target, name, { value, enumerable: true, configurable: true, writable: true });
   }
 }
 
@@ -137,6 +148,8 @@ function buildCredential(
     type: 'public-key',
     authenticatorAttachment: typeof json.authenticatorAttachment === 'string' ? json.authenticatorAttachment : null,
     response,
+  });
+  defineMethods(credential, {
     getClientExtensionResults: () => ({ ...extensionResults }),
     toJSON: () => JSON.parse(JSON.stringify(json)) as unknown,
   });
@@ -153,6 +166,8 @@ export function credentialFromCreateJson(value: unknown, constructors: Credentia
   defineReadonly(response, {
     clientDataJSON: fromBase64Url(raw.clientDataJSON),
     attestationObject: fromBase64Url(raw.attestationObject),
+  });
+  defineMethods(response, {
     getTransports: () => [...transports],
     getAuthenticatorData: () => authenticatorData.slice(0),
     getPublicKey: () => (publicKey ? publicKey.slice(0) : null),

@@ -41,6 +41,7 @@ import {
   type PluginSecurityPolicy,
 } from "@/lib/plugin-security-policy";
 import { createPasskeyBroker } from "@/lib/passkey-broker";
+import { clearPasskeyDiagnostics, readPasskeyDiagnostics, recordPasskeyDiagnostic } from "@/lib/passkey-diagnostics";
 import { PopupWorkspaceMemoryCache } from "@/lib/popup-workspace-cache";
 import {
   accountStageKey,
@@ -92,6 +93,10 @@ export default defineBackground(() => {
   // browser-wide authenticator proxy to keep attached.
   const passkeyBroker = createPasskeyBroker({
     isEnabled: () => activePluginSecurityPolicy.passkeyProxyEnabled !== false,
+    log: (message) => {
+      console.info(message);
+      void recordPasskeyDiagnostic(message);
+    },
     frames: async (tabId) => (await browser.webNavigation.getAllFrames({ tabId }) ?? []).map((frame) => ({
       frameId: frame.frameId,
       parentFrameId: frame.parentFrameId,
@@ -387,6 +392,15 @@ export default defineBackground(() => {
       if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
       return { status: passkeyBroker.choose(parsed.data.token, "native") ? "declined" as const : "expired" as const };
     }
+    if (parsed.data.kind === "vaultmesh.passkey-diagnostics.get") {
+      if (!isTrustedExtensionPage(sender)) return { entries: [] };
+      return { entries: await readPasskeyDiagnostics() };
+    }
+    if (parsed.data.kind === "vaultmesh.passkey-diagnostics.clear") {
+      if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
+      await clearPasskeyDiagnostics();
+      return { status: "cleared" as const };
+    }
     if (parsed.data.kind === "vaultmesh.passkey-choice") {
       // The extension popup may answer any prompt; the in-page dialog is the
       // top frame of the requesting tab and may answer only that tab's prompts.
@@ -415,6 +429,10 @@ export default defineBackground(() => {
         { id: parsed.data.id, operation: parsed.data.operation as "create" | "get", optionsJson: parsed.data.optionsJson },
         { tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin },
       );
+    }
+    if (parsed.data.kind === "vaultmesh.passkey.note") {
+      void recordPasskeyDiagnostic(`[VaultMesh Passkey] ${page.fillOrigin} -> browser (${parsed.data.reason}, decided in page)`);
+      return { status: "noted" as const };
     }
     if (parsed.data.kind === "vaultmesh.passkey.abort") {
       passkeyBroker.abort({ tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin }, parsed.data.id);

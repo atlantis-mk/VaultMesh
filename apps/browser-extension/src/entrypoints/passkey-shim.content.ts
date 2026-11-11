@@ -24,7 +24,10 @@ export default defineContentScript({
       transport,
       { PublicKeyCredential, AuthenticatorAttestationResponse, AuthenticatorAssertionResponse },
       undefined,
-      (reason) => console.debug(`[VaultMesh Passkey] handled by browser (${reason})`),
+      (reason) => {
+        console.debug(`[VaultMesh Passkey] handled by browser (${reason})`);
+        transport.note?.(reason);
+      },
     );
     installCapabilityShim(
       PublicKeyCredential as never,

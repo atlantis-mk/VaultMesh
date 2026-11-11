@@ -120,6 +120,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
       }
       if (choice.result === 'expired') return cancelled(page, op, 'choice-timed-out', 'VaultMesh 通行密钥请求已超时。');
       if (choice.result !== 'vaultmesh') return cancelled(page, op, 'user-cancelled-choice', '已取消通行密钥请求。');
+      log(`[VaultMesh Passkey] ${op} ${page.origin} -> VaultMesh (chose-vaultmesh)`);
       if (choice.remember) await rememberPasskeyChoice(request.operation, page.origin, 'vaultmesh').catch(() => undefined);
     }
 
@@ -149,6 +150,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
         if (typeof response.responseJson !== 'string' || response.responseJson.length > MAX_PASSKEY_RESPONSE_CHARS) {
           throw new Error('Invalid Passkey response');
         }
+        log(`[VaultMesh Passkey] ${promptOperation} ${origin} -> VaultMesh (served)`);
         return { status: 'ok', responseJson: response.responseJson };
       } catch (error) {
         // The vault locked between the check and the call: wait once more.
@@ -216,6 +218,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
       const view: PasskeyPrompt = { token, operation, origin, stage };
       void (async () => {
         const shown = options.showPrompt ? await options.showPrompt(active.page, view).catch(() => false) : false;
+        if (prompts.has(token)) log(`[VaultMesh Passkey] ${operation} ${origin} -> prompt (${stage}, ${shown ? 'in-page' : 'extension-window'})`);
         if (shown) active.promptOpened = true;
         else if (!active.promptOpened && prompts.has(token)) {
           active.promptOpened = true;

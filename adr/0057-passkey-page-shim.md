@@ -39,6 +39,7 @@ Chromium `chrome.webAuthenticationProxy` 面向远程桌面设计：attach 后�
 - 浏览器自身发起的流程（地址栏、Chrome 自带 Passkey 选择 UI、跨设备二维码）不经过 shim，仍由浏览器处理。
 - 需要处理 `AbortSignal`、`timeout`、重复请求、frame 导航、扩展 context 失效和响应对象的 `PublicKeyCredential` 原型伪装。
 - 条件式 UI（conditional mediation）仍不在当前范围。
+- 诊断记录：每次回退、取消与失败的原因码只在 `storage.session` 保留最近 20 条（origin、操作、原因码），设置页可查看与清除，不含任何请求内容。
 - 迁移：升级后不再有 proxy attach；旧版本遗留的 attach 状态随扩展重载自动解除。`passkeyProxyEnabled` 存储字段保留原名以避免策略迁移，语义改为“接管通行密钥请求”。
 - 回滚：恢复上一发布版本的扩展即可，没有持久化格式或 Vault 变化。
 

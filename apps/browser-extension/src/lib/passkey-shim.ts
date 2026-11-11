@@ -30,6 +30,8 @@ export type PasskeyShimResult =
 export type PasskeyShimTransport = {
   request(id: string, operation: PasskeyShimOperation, options: JsonObject): Promise<PasskeyShimResult>;
   abort(id: string): void;
+  /** Reports a non-secret reason code when the page-side shim handed a request to the browser. */
+  note?(reason: string): void;
 };
 
 type CredentialsPrototype = {
@@ -226,6 +228,9 @@ export function createWindowTransport(target: Window = window): PasskeyShimTrans
         pending.set(id, { resolve, acked: false, timer });
         target.postMessage({ channel: PASSKEY_CHANNEL, direction: 'request', id, operation, options }, targetOrigin);
       });
+    },
+    note(reason) {
+      target.postMessage({ channel: PASSKEY_CHANNEL, direction: 'note', id: crypto.randomUUID(), reason }, targetOrigin);
     },
     abort(id) {
       const entry = pending.get(id);

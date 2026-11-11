@@ -332,19 +332,22 @@ describe('cancel and failure reasons are attributable', () => {
     await flush();
     choice.broker.choose(choice.broker.currentPrompt()!.token, 'cancel');
     await pending;
-    expect(choice.logs).toEqual(['[VaultMesh Passkey] create https://example.test -> cancelled (user-cancelled-choice)']);
+    expect(choice.logs).toEqual([
+      '[VaultMesh Passkey] create https://example.test -> prompt (choose, extension-window)',
+      '[VaultMesh Passkey] create https://example.test -> cancelled (user-cancelled-choice)',
+    ]);
 
     await rememberPasskeyChoice('create', origin, 'vaultmesh');
     const declined = make({ 'passkeys.create': () => { throw new DesktopRpcError('cancelled', 'x'); } });
     await declined.broker.handle(createRequest, page);
-    expect(declined.logs[0]).toContain('desktop-confirmation-declined');
+    expect(declined.logs.at(-1)).toContain('desktop-confirmation-declined');
   });
 
   it('logs the desktop error that made a creation fail', async () => {
     await rememberPasskeyChoice('create', origin, 'vaultmesh');
     const { broker, logs } = make({ 'passkeys.create': () => { throw new DesktopRpcError('invalid-input', '该账户已存在 Passkey。'); } });
     await expect(broker.handle(createRequest, page)).resolves.toMatchObject({ status: 'error', name: 'InvalidStateError' });
-    expect(logs[0]).toBe('[VaultMesh Passkey] create https://example.test -> error (InvalidStateError, desktop-invalid-input: 该账户已存在 Passkey。)');
+    expect(logs.at(-1)).toBe('[VaultMesh Passkey] create https://example.test -> error (InvalidStateError, desktop-invalid-input: 该账户已存在 Passkey。)');
   });
 
   it('logs an unlock timeout separately from a user cancel', async () => {
@@ -354,7 +357,8 @@ describe('cancel and failure reasons are attributable', () => {
     const pending = broker.handle(getRequest, page);
     await vi.advanceTimersByTimeAsync(PASSKEY_PROMPT_WAIT_MS + 1);
     await pending;
-    expect(logs[0]).toContain('unlock-timed-out');
+    expect(logs[0]).toContain('prompt (unlock');
+    expect(logs.at(-1)).toContain('unlock-timed-out');
   });
 });
 
@@ -377,5 +381,27 @@ describe('availability', () => {
     const { broker, logs } = make({ 'vault.status': () => { throw new DesktopRpcError('unpaired', 'x'); } });
     await expect(broker.availability(page)).resolves.toBe(false);
     expect(logs[0]).toContain('desktop-unpaired');
+  });
+});
+
+describe('success and progress are recorded too', () => {
+  it('records the prompt, the choice and that VaultMesh served the credential', async () => {
+    const { broker, logs } = make({}, { showPrompt: async () => true });
+    const pending = broker.handle(createRequest, page);
+    await flush();
+    broker.choose(broker.currentPrompt()!.token, 'vaultmesh');
+    await expect(pending).resolves.toMatchObject({ status: 'ok' });
+    expect(logs).toEqual([
+      '[VaultMesh Passkey] create https://example.test -> prompt (choose, in-page)',
+      '[VaultMesh Passkey] create https://example.test -> VaultMesh (chose-vaultmesh)',
+      '[VaultMesh Passkey] create https://example.test -> VaultMesh (served)',
+    ]);
+  });
+
+  it('records a served credential without a prompt when the choice was remembered', async () => {
+    await rememberPasskeyChoice('get', origin, 'vaultmesh');
+    const { broker, logs } = make();
+    await broker.handle(getRequest, page);
+    expect(logs).toEqual(['[VaultMesh Passkey] get https://example.test -> VaultMesh (served)']);
   });
 });
