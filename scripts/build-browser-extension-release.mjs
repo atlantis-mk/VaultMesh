@@ -37,7 +37,8 @@ export function validateExtensionManifest(manifest, { target, version, chromeExt
       || manifest.version_name !== version) {
       throw new Error("Chrome extension manifest 身份或 MV3 基线无效。");
     }
-    if (!permissions.includes("webAuthenticationProxy") || manifest.browser_specific_settings) {
+    // ADR-0057: the browser-wide WebAuthn proxy is permanently removed from every target.
+    if (permissions.includes("webAuthenticationProxy") || manifest.browser_specific_settings) {
       throw new Error("Chrome extension manifest 浏览器专属字段无效。");
     }
   } else if (target === "firefox") {

@@ -2387,7 +2387,7 @@
         const secureRequired = ["card-tests", "sensitive-item-tests", "secret-types-tests", "save-capture-tests"].includes(currentSuite.id);
         $("#environment-status").textContent = secureRequired && location.protocol !== "https:"
           ? "当前不是 HTTPS：受保护正向用例环境不满足。先切换到受信任 HTTPS 再记录通过。"
-          : "使用已配对且解锁的实际扩展。Firefox 不支持 VaultMesh Passkey proxy；不可用环境请记录环境受限。";
+          : "使用已配对且解锁的实际扩展。Firefox 不支持 VaultMesh Passkey shim；不可用环境请记录环境受限。";
         const cases = [...(acceptanceCases[currentSuite.id] || [])];
         if (currentSuite.id === "secret-types-tests") {
           for (const form of $$('[data-secret-kind]', activeSuiteSection)) {

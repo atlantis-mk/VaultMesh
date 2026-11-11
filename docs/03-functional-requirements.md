@@ -583,8 +583,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：同一 WXT 扩展源码生成版本一致的 Chrome/Chromium MV3 ZIP 和 Firefox MV2 ZIP；Chrome
   使用固定 manifest key 派生 ID，Firefox 使用固定 `browser_specific_settings.gecko.id`。开发、Review
   本地安装 ZIP 与商店/正式发布必须共用仓库固定的 Chrome Web Store 条目公钥派生的同一 ID。构建不得隐式退回其他身份、使用空 Firefox ID、目标不匹配的 manifest 或未检查 ZIP。
-- 必须：Firefox manifest 省略 Chromium-only `minimum_chrome_version`、manifest key 和
-  `webAuthenticationProxy` permission；Firefox 不提供 Passkey proxy，其他 Browser RPC、瞬态状态、
+- 必须：Firefox manifest 省略 Chromium-only `minimum_chrome_version` 和 manifest key；任何 target 都不得声明
+  `webAuthenticationProxy` permission，Firefox 不提供 Passkey shim，其他 Browser RPC、瞬态状态、
   secret 最小化、lock/revoke 和 assignment 边界与 Chromium 等价。
 - 必须：macOS/Windows 桌面包分别安装 Chrome/Edge `allowed_origins` 与 Firefox
   `allowed_extensions` Native Messaging manifest。Host 必须在读取配对 secret 前验证精确的编译期
@@ -631,10 +631,13 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 - 必须：旧 BE=0 Passkey 不参与同步且不得改变备份资格；新注册 Passkey 使用 BE=1、counter=0，副本持久化成功后才设置 BS。私钥只经已授权 Rust 同步通道复制，使用仍执行逐次原生确认。
 
-- 必须：Chromium WebAuthn proxy 的 ES256 私钥保存在加密 secret 中，签名在 main 完成，每次 registration/assertion 显示 native confirmation。
+- 必须：Chromium 页面级 WebAuthn shim 的 ES256 私钥保存在加密 secret 中，签名在 main 完成，每次 registration/assertion 显示 native confirmation。
 - 必须：Passkey 创建或导入使用当前 RP/origin 的默认 Login 作为归属提示，并由 desktop 重新验证；无有效默认值时可以唯一用户名匹配，仍不确定时作为 Passkey-only Login，禁止进入普通 Secret/密钥分类。
-- 必须：Chromium 扩展在通行密钥接管开启且已配对时，必须于后台全局挂载 WebAuthn proxy，并在插件锁定、缓存为空、native 连接重连或桌面端暂时不可达期间保持挂载；不得按站点、硬编码身份提供方或当前标签页缓存主动 detach。普通站点与 Google、Apple、Microsoft 等站点使用同一拦截流程。每个 assertion 必须先通过桌面端无秘密预检索索引执行 `passkeys.probe`：有效索引确认无匹配时不得要求解锁，当前请求以 `NotAllowedError` 结束、proxy 暂时 detach 5 分钟并提示用户重试，重试由 Chrome 原生通行密钥处理；索引不可用或过期时保守返回 `unknown`，先解锁再严格验证。有匹配时解锁后仍须按所选条目显示原生允许框并签名。`create` 不执行“已有 Passkey”预检，始终进入原生创建确认。设置关闭接管或确认未配对时 detach；页面取消或 5 分钟未完成时请求失败，但不绕过。Chromium 已拦截的同一请求不能转交浏览器，不得以扩展 origin 或页面自动重发伪造回退。
-- 验收：`CT-PASSKEY-001`、`CT-PASSKEY-002`、`AT-PASSKEY-001`。
+- 必须：Chromium 扩展不得声明或使用 `webAuthenticationProxy`，不得持有浏览器全局 WebAuthn 状态；必须以 MAIN world shim 包装 `navigator.credentials.create/get`，并逐请求决策。VaultMesh 无法或不应处理的请求（接管关闭、未配对、桌面不可达、conditional mediation、依赖扩展结果的扩展（`prf`、`largeBlob`、`hmacCreateSecret`、`credBlob`、`getCredBlob`、`payment`、`enforceCredentialProtectionPolicy=true`，其余扩展被忽略）、请求超限、跨源 frame、`passkeys.probe` 为 `unavailable`、用户选择浏览器/系统）必须在同一次调用内回退到浏览器原生实现，不得要求重试。`origin` 与 `sameOriginWithAncestors` 只能由 background 依据 sender 与帧树写入。
+- 必须：浏览器自己报告没有平台认证器时，shim 才可以在 VaultMesh 可用（接管开启、同源 frame 链、桌面端已配对可达）时把 `isUserVerifyingPlatformAuthenticatorAvailable` 与 `getClientCapabilities` 的平台认证器能力报告为可用；浏览器已报告可用时不得改写或询问桌面端。
+- 必须：选择与解锁等待提示必须优先显示为发起请求标签页内的页面对话框（页面无法显示时回退插件窗口）；对话框不得收集任何凭据，解锁只在插件窗口完成，页面对话框只能应答所属标签页的提示。
+- 必须：`create` 与有匹配的 `get` 必须让用户选择“使用 VaultMesh”或“使用浏览器/系统”，选择可以按 origin 与操作记住并可在设置中清除；选择 VaultMesh 后仍须解锁（锁定时）并通过桌面端原生确认。用户取消、5 分钟未完成属于取消并以 `NotAllowedError` 结束；页面 abort、导航与标签页关闭必须取消等待。Firefox 不提供 Passkey 能力。
+- 验收：`CT-PASSKEY-001`、`CT-PASSKEY-002`、`CT-PASSKEY-003`、`AT-PASSKEY-001`。
 
 ## 本地 Agent Capability Broker
 

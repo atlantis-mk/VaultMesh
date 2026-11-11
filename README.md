@@ -76,7 +76,7 @@ xattr -dr com.apple.quarantine "/Applications/VaultMesh.app"
 | 本地加密 Vault | 离线创建、解锁、管理 Vault，支持可选 PIN 与平台快速解锁 |
 | 多种凭据类型 | 登录、支付卡、SSH 凭据、身份信息、开发者/服务密钥，按网站聚合多个账号 |
 | 浏览器自动填充 | Chrome / Firefox 扩展经配对后填充与保存凭据，从不自动提交表单 |
-| Passkey | 通过 Chromium WebAuthn proxy 管理软件 Passkey |
+| Passkey | 通过 Chromium 页面级 WebAuthn shim 管理软件 Passkey，无匹配或用户选择时直接使用浏览器/系统通行密钥 |
 | 局域网同步 | 已授权设备在同一局域网双向同步，锁定时只传输密文 |
 | 设备填充互通 | 授权后 Android 可在锁屏时提供本机号码与短时验证码 |
 | 邮件验证码 | 配置只读邮件来源，提取并短暂提供 email OTP |

@@ -12,7 +12,7 @@
 | R2 Review 发布基线 | Required（aarch64/x86_64） | Required（x86_64） | `CHG-2026-030` 以 `0.0.1-review` 为 fresh-install 基线，当前统一版本为 `0.0.8-review`，并使用独立 `channels/review/latest.json`；完整发布固定使用标准 GitHub-hosted 原生架构 Runner，并在 R2 成功后创建不含 Git Tag 的 GitHub Draft Prerelease；允许先发布只含已验证目标平台的阶段性 manifest 进行小规模验收，并在同版本 immutable artifact 就绪后追加缺失平台，但阶段性 manifest 与 Draft 均不计为完整正式发布或平台 AT；既有 `0.1.x` test 安装不得自动降级，目标平台 AT 未完成前为 Partial |
 | Tauri 登录时静默启动 | Required | Required | `CHG-2026-019` 实现；默认启用、保持锁定并可由用户关闭，目标平台 AT 未完成前保持发布 Gate |
 | Tauri 窗口内容捕获保护 | Required（启用平台提示；现代 macOS 不承诺通用截屏阻断） | Required（Windows 10 2004+ 公共系统捕获排除） | `CHG-2026-018` 实现；目标平台 AT 未完成前保持发布 Gate |
-| Chromium MV3 + Firefox MV2 extension + native host | Required | Required | 共享 WXT remote UI 与 Browser RPC；浏览器特定固定身份/Native Messaging manifest；Firefox 不包含 Chromium-only Passkey proxy；发布安装/签名验证待完成 |
+| Chromium MV3 + Firefox MV2 extension + native host | Required | Required | 共享 WXT remote UI 与 Browser RPC；浏览器特定固定身份/Native Messaging manifest；Firefox 不包含 Chromium-only Passkey shim；发布安装/签名验证待完成 |
 | 本地标准 stdio MCP client + owner-only Agent IPC | Required | Required | `CHG-2026-020` 实施中；Codex/OpenCode 是兼容性验收客户端，不构成产品白名单；只允许动作级 capability，目标平台打包与独立安全评审完成前保持发布 Gate |
 | 显式 LAN VaultMesh peer discovery/pairing | Required | Required | `CHG-2026-040`：默认关闭、十分钟 mDNS/TLS + 一次性配对码认证；不传输 Vault 或提供远程操作 |
 | 远程 MCP、云端 Agent、常驻网络监听 broker | Out | Out | 不引入 VaultMesh 服务端、远程 bearer 管理面或端口映射 |
@@ -53,10 +53,10 @@
 | Popup/OTP 字段页内图标显示并显式选择全局未过期邮箱 OTP | Required |
 | 插件 popup 内用户主动触发的 TOTP QR 识别与附加到 Login | Required |
 | Save/Ignore capture | Required |
-| Chromium 127+ ES256 Passkey proxy | Required |
+| Chromium 127+ ES256 Passkey（页面级 WebAuthn shim，ADR-0057） | Required |
 | 已授权 Android 手机号码与 SMS OTP 显式填充 | Required；REQ-DEVICE-ASSIST-001，支持 HTTP(S) 网页的电脑显式点选填充；号码授权后本地持久注册，短信认证推送后各电脑两分钟内本地使用，受 Android 系统接收能力限制，支持手动交付回退；用户保存互通开关后允许 Vault 锁定恢复，系统生命周期与开关语义见 REQ-ANDROID-026 |
 | 自动表单提交、conditional mediation、largeBlob/PRF | Out |
-| Firefox MV2 extension（Passkey proxy 除外） | Required；由 `CHG-2026-036` 推进双浏览器 ZIP 与 Native Host 发布验收 |
+| Firefox MV2 extension（Passkey shim 除外） | Required；由 `CHG-2026-036` 推进双浏览器 ZIP 与 Native Host 发布验收 |
 | Safari extension | Out |
 | 复用 Browser 配对/session 作为 Agent 授权 | Out |
 

@@ -46,7 +46,6 @@ export default defineConfig({
     permissions: [
       "alarms", "clipboardRead", "contextMenus", "idle",
       "nativeMessaging", "notifications", "storage", "webNavigation",
-      ...(!isFirefox ? ["webAuthenticationProxy" as const] : []),
     ],
     host_permissions: ["http://*/*", "https://*/*"],
     commands: {

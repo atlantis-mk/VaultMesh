@@ -28,7 +28,7 @@ VaultMesh 是无需账号或服务器、由本机桌面应用持有加密 Vault�
 - 恢复 trash/history、轮换主密码、创建/恢复加密备份。
 - 检查密码健康、生成凭证、使用有过期时间的特权剪贴板。
 - 配对浏览器，显式或按策略自动填充，捕获用户确认的新/更新数据。
-- 使用 Chromium WebAuthn proxy 管理软件 Passkey。
+- 使用 Chromium 页面级 WebAuthn shim 管理软件 Passkey，并可逐请求回退到浏览器/系统通行密钥。
 - 配置只读邮件来源，提取并短暂提供 email OTP。
 
 ## 非目标

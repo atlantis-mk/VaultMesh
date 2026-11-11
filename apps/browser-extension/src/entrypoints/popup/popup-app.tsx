@@ -1,4 +1,5 @@
 import { DeviceAssistPanel } from "./device-assist-panel";
+import { passkeyPromptText } from "@/lib/passkey-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PopupUnlockPage } from "./popup-unlock-page";
 import {
@@ -660,7 +661,7 @@ export function PopupApp({ initialWorkspace = null }: { initialWorkspace?: Initi
               retrying={loading}
             />
           ) : null}
-          {desktopState === "unavailable" ? <PasskeyUnlockNotice /> : null}
+          <PasskeyUnlockNotice />
           <div className="flex shrink-0 items-center gap-2">
             <Tabs className="min-w-0 flex-1" value={activeType} onValueChange={(value) => setActiveType(value as VaultItemType)}>
               <TabsList className="w-full justify-start overflow-x-auto">
@@ -822,45 +823,61 @@ function saveFailureReason(code?: string, message?: string): string {
   return code ? `桌面端返回错误 ${code}，请重试。` : "请重试。";
 }
 
-type PasskeyUnlockPrompt = { token: string; operation: "create" | "get"; origin: string | null };
+type PasskeyUnlockPrompt = { token: string; operation: "create" | "get"; origin: string | null; stage: "choose" | "unlock" };
 
 export function parsePasskeyUnlockPrompt(value: unknown): PasskeyUnlockPrompt | null {
   if (!value || typeof value !== "object") return null;
-  const prompt = value as { token?: unknown; operation?: unknown; origin?: unknown };
+  const prompt = value as { token?: unknown; operation?: unknown; origin?: unknown; stage?: unknown };
   if (typeof prompt.token !== "string" || (prompt.operation !== "create" && prompt.operation !== "get")) return null;
-  return { token: prompt.token, operation: prompt.operation, origin: typeof prompt.origin === "string" ? prompt.origin : null };
+  return {
+    token: prompt.token,
+    operation: prompt.operation,
+    origin: typeof prompt.origin === "string" ? prompt.origin : null,
+    stage: prompt.stage === "unlock" ? "unlock" : "choose",
+  };
 }
 
-/** Shown while a WebAuthn request waits for VaultMesh. Declining is the only
- * path that hands the request back to the browser. */
+/** Shown while a page's WebAuthn call waits for the user. Choosing the browser
+ * hands that same call to the browser's own authenticator. */
 function PasskeyUnlockNotice({ disabled = false }: { disabled?: boolean }) {
   const [prompt, setPrompt] = useState<PasskeyUnlockPrompt | null>(null);
+  const [remember, setRemember] = useState(false);
 
   useEffect(() => {
     let active = true;
-    void browser.runtime.sendMessage({ kind: "vaultmesh.passkey-unlock.get" }).then((response) => {
+    const refresh = () => browser.runtime.sendMessage({ kind: "vaultmesh.passkey-unlock.get" }).then((response) => {
       if (active) setPrompt(parsePasskeyUnlockPrompt(response));
     }).catch(() => undefined);
-    return () => { active = false; };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 1_000);
+    return () => { active = false; clearInterval(timer); };
   }, []);
 
-  async function decline() {
+  async function choose(choice: "vaultmesh" | "native" | "cancel") {
     if (!prompt || disabled) return;
-    await browser.runtime.sendMessage({ kind: "vaultmesh.passkey-unlock.decline", token: prompt.token }).catch(() => undefined);
+    await browser.runtime.sendMessage({ kind: "vaultmesh.passkey-choice", token: prompt.token, choice, remember: remember && prompt.stage === "choose" }).catch(() => undefined);
     setPrompt(null);
-    window.close();
+    setRemember(false);
+    if (choice !== "vaultmesh") window.close();
   }
 
   if (!prompt) return null;
-  return <div className="flex flex-col gap-2 rounded-md bg-muted px-3 py-2 text-sm" role="status"><p>{passkeyPromptText(prompt)}</p><Button size="sm" variant="ghost" disabled={disabled} onClick={() => void decline()}>不解锁，改用浏览器通行密钥</Button></div>;
+  return (
+    <div className="flex flex-col gap-2 rounded-md bg-muted px-3 py-2 text-sm" role="status">
+      <p>{passkeyPromptText(prompt)}</p>
+      {prompt.stage === "choose" ? (
+        <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />记住此网站的选择</label>
+      ) : null}
+      <div className="flex flex-wrap gap-2">
+        {prompt.stage === "choose" ? <Button size="sm" disabled={disabled} onClick={() => void choose("vaultmesh")}>使用 VaultMesh</Button> : null}
+        <Button size="sm" variant="outline" disabled={disabled} onClick={() => void choose("native")}>{prompt.stage === "unlock" ? "不解锁，改用浏览器/系统" : "使用浏览器/系统"}</Button>
+        <Button size="sm" variant="ghost" disabled={disabled} onClick={() => void choose("cancel")}>取消</Button>
+      </div>
+    </div>
+  );
 }
 
-export function passkeyPromptText(prompt: PasskeyUnlockPrompt): string {
-  const site = prompt.origin ?? "当前网站";
-  return prompt.operation === "create"
-    ? `${site} 正在创建通行密钥。解锁后由 VaultMesh 保存。`
-    : `${site} 正在请求通行密钥登录。解锁后由 VaultMesh 继续。`;
-}
+export { passkeyPromptText };
 
 
 function VaultWorkspaceSkeleton() {
