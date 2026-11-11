@@ -38,6 +38,9 @@ const buildEnvironment = {
   VAULTMESH_BROWSER_EXTENSION_ID: developmentExtensionId,
 };
 
+// --no-install 只产出 DMG 与插件 ZIP，不覆盖 /Applications、不退出运行中的应用、不重置浏览器配对。
+const skipInstall = process.argv.includes("--no-install");
+
 let movedExistingApp = false;
 let installAttempted = false;
 let previousAppWasRunning = false;
@@ -85,45 +88,53 @@ try {
   await cp(generatedZip, extensionZip, { force: true });
   await run("unzip", ["-tq", extensionZip]);
 
-  if (await exists(installedTauriApp)) {
-    const bundleId = (await capture("/usr/bin/plutil", [
-      "-extract", "CFBundleIdentifier", "raw", "-o", "-",
-      path.join(installedTauriApp, "Contents", "Info.plist"),
-    ])).trim();
-    if (!["com.vaultmesh.desktop", "com.vaultmesh.tauri.preview"].includes(bundleId)) {
-      throw new Error(`${installedTauriApp} 不是可识别的 VaultMesh 安装，拒绝覆盖。`);
-    }
-    previousAppWasRunning = (await installedVaultMeshPids()).length > 0;
-    await stopInstalledVaultMesh(bundleId);
-    await stopInstalledNativeHosts();
-    await rename(installedTauriApp, backupApp);
-    movedExistingApp = true;
+  if (skipInstall) {
+    console.log("\nVaultMesh Tauri 本机打包已完成（未安装）：");
+    console.log(`Tauri DMG：${localDmg}`);
+    console.log(`插件 ZIP：${extensionZip}`);
+    console.log(`开发者模式目录：${path.join(extensionOut, "chrome-mv3")}`);
+    console.log(`扩展 ID：${developmentExtensionId}`);
   } else {
-    await stopInstalledNativeHosts();
+    if (await exists(installedTauriApp)) {
+      const bundleId = (await capture("/usr/bin/plutil", [
+        "-extract", "CFBundleIdentifier", "raw", "-o", "-",
+        path.join(installedTauriApp, "Contents", "Info.plist"),
+      ])).trim();
+      if (!["com.vaultmesh.desktop", "com.vaultmesh.tauri.preview"].includes(bundleId)) {
+        throw new Error(`${installedTauriApp} 不是可识别的 VaultMesh 安装，拒绝覆盖。`);
+      }
+      previousAppWasRunning = (await installedVaultMeshPids()).length > 0;
+      await stopInstalledVaultMesh(bundleId);
+      await stopInstalledNativeHosts();
+      await rename(installedTauriApp, backupApp);
+      movedExistingApp = true;
+    } else {
+      await stopInstalledNativeHosts();
+    }
+    installAttempted = true;
+    await run("ditto", [packagedApp, installedTauriApp]);
+    await run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", installedTauriApp]);
+
+    await resetLocalBrowserPairing();
+    const launch = await launchInstalledTauriApp();
+    await verifyBrowserHost({
+      nativeHostPath: installedTauriHost,
+      extensionId: launch.extensionId,
+    });
+
+    if (movedExistingApp) {
+      await rm(backupApp, { recursive: true, force: true });
+      movedExistingApp = false;
+    }
+
+    console.log("\nVaultMesh Tauri 本机打包安装已完成：");
+    console.log(`应用：${installedTauriApp}`);
+    console.log(`Tauri DMG：${localDmg}`);
+    console.log(`插件 ZIP：${extensionZip}`);
+    console.log(`开发者模式目录：${path.join(extensionOut, "chrome-mv3")}`);
+    console.log(`扩展 ID：${launch.extensionId}`);
+    console.log("加密 Vault 未被本地打包脚本读取、复制或删除；本机浏览器配对凭据已按新签名刷新。");
   }
-  installAttempted = true;
-  await run("ditto", [packagedApp, installedTauriApp]);
-  await run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", installedTauriApp]);
-
-  await resetLocalBrowserPairing();
-  const launch = await launchInstalledTauriApp();
-  await verifyBrowserHost({
-    nativeHostPath: installedTauriHost,
-    extensionId: launch.extensionId,
-  });
-
-  if (movedExistingApp) {
-    await rm(backupApp, { recursive: true, force: true });
-    movedExistingApp = false;
-  }
-
-  console.log("\nVaultMesh Tauri 本机打包安装已完成：");
-  console.log(`应用：${installedTauriApp}`);
-  console.log(`Tauri DMG：${localDmg}`);
-  console.log(`插件 ZIP：${extensionZip}`);
-  console.log(`开发者模式目录：${path.join(extensionOut, "chrome-mv3")}`);
-  console.log(`扩展 ID：${launch.extensionId}`);
-  console.log("加密 Vault 未被本地打包脚本读取、复制或删除；本机浏览器配对凭据已按新签名刷新。");
 } catch (error) {
   const rollbackErrors = [];
   let safeToReplaceInstalledApp = true;
