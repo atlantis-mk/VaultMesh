@@ -14,11 +14,13 @@ function parsePrompt(value: unknown): PasskeyPromptView | null {
   return { token: prompt.token, operation: prompt.operation, origin: typeof prompt.origin === "string" ? prompt.origin.slice(0, 256) : null, stage: prompt.stage };
 }
 
-function parseMessage(data: unknown): { direction: "request" | "abort"; id: string; operation?: "create" | "get" | "availability"; options?: Record<string, unknown> } | null {
+function parseMessage(data: unknown): { direction: "request" | "abort" | "note"; id: string; reason?: string; operation?: "create" | "get" | "availability"; options?: Record<string, unknown> } | null {
   if (!data || typeof data !== "object") return null;
   const message = data as { channel?: unknown; direction?: unknown; id?: unknown; operation?: unknown; options?: unknown };
   if (message.channel !== PASSKEY_CHANNEL || typeof message.id !== "string" || !UUID.test(message.id)) return null;
   if (message.direction === "abort") return { direction: "abort", id: message.id };
+  const reason = (data as { reason?: unknown }).reason;
+  if (message.direction === "note") return typeof reason === "string" && /^[A-Za-z0-9:_-]{1,64}$/.test(reason) ? { direction: "note", id: message.id, reason } : null;
   if (
     message.direction === "request"
     && (message.operation === "create" || message.operation === "get" || message.operation === "availability")
@@ -78,6 +80,10 @@ export default defineContentScript({
       if (!message) return;
       if (message.direction === "abort") {
         void send({ kind: "vaultmesh.passkey.abort", id: message.id });
+        return;
+      }
+      if (message.direction === "note") {
+        void send({ kind: "vaultmesh.passkey.note", reason: message.reason });
         return;
       }
       post({ direction: "ack", id: message.id });

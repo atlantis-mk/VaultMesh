@@ -12,6 +12,7 @@ import {
   type PluginSecurityPolicy,
 } from "@/lib/plugin-security-policy";
 import { clearPasskeyChoices } from "@/lib/passkey-preferences";
+import { PasskeyDiagnosticsPanel } from "./passkey-diagnostics-panel";
 import { RecoveryPanel, type RecoveryTarget } from "./recovery-panel";
 
 type PinStatus = { enabled: boolean; locked: boolean; failureLimit: number; remainingAttempts: number };
@@ -187,6 +188,7 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.lockOnSystemLock} onChange={(event) => setPluginPolicy({ ...pluginPolicy, lockOnSystemLock: event.target.checked })} />系统锁屏时锁定插件</label>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.passkeyProxyEnabled !== false} onChange={(event) => setPluginPolicy({ ...pluginPolicy, passkeyProxyEnabled: event.target.checked })} />接管网页通行密钥请求 (Passkey)</label>
             <Button type="button" size="sm" variant="outline" className="self-start text-xs" disabled={busy} onClick={() => void run(() => clearPasskeyChoices(), "已清除各网站记住的通行密钥选择。", false)}>清除网站通行密钥选择</Button>
+            <PasskeyDiagnosticsPanel />
             <div className="flex flex-col gap-1 text-xs"><span id="plugin-idle-timeout-label">浏览器空闲后锁定插件</span><div className="grid grid-cols-3 gap-1.5" role="group" aria-labelledby="plugin-idle-timeout-label">{idleTimeoutOptions.map(({ value, label }) => <Button key={value} type="button" size="sm" className="w-full px-1 text-xs" variant={pluginPolicy.idleTimeoutMinutes === value ? "default" : "outline"} aria-pressed={pluginPolicy.idleTimeoutMinutes === value} onClick={() => setPluginPolicy({ ...pluginPolicy, idleTimeoutMinutes: value })}>{label}</Button>)}</div></div>
             {desktopSettings ? <div className="flex flex-col gap-1 text-xs"><span id="clipboard-timeout-label">剪贴板自动清除</span><div className="grid grid-cols-2 gap-1.5" role="group" aria-labelledby="clipboard-timeout-label">{clipboardTimeoutOptions.map(({ value, label }) => <Button key={value} type="button" size="sm" className="w-full text-xs" variant={desktopSettings.clipboardClearTimeoutMs === value ? "default" : "outline"} aria-pressed={desktopSettings.clipboardClearTimeoutMs === value} onClick={() => setDesktopSettings({ ...desktopSettings, clipboardClearTimeoutMs: value })}>{label}</Button>)}</div></div> : <p className="text-xs text-muted-foreground">桌面端剪贴板设置暂不可用，不影响插件锁定策略。</p>}
             <div className="flex flex-wrap gap-2">

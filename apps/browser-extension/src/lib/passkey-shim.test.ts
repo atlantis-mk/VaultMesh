@@ -50,6 +50,17 @@ const assertionJson = JSON.stringify({
 });
 
 describe('base64url codec', () => {
+  it('encodes buffers and views created in another realm instead of silently emptying them', async () => {
+    const vm = await import('node:vm');
+    const foreignBuffer = vm.runInNewContext('new ArrayBuffer(4)') as ArrayBuffer;
+    new Uint8Array(foreignBuffer).set([250, 251, 252, 253]);
+    expect(foreignBuffer instanceof ArrayBuffer).toBe(false);
+    expect(toBase64Url(foreignBuffer)).toBe('-vv8_Q');
+    const foreignView = vm.runInNewContext('new Uint8Array([1, 2, 3, 4, 5]).subarray(1, 4)') as BufferSource;
+    expect(toBase64Url(foreignView)).toBe('AgME');
+    expect(toBase64Url(new DataView(bytes(9, 8, 7), 1, 2))).toBe('CAc');
+  });
+
   it('round-trips bytes and rejects non-canonical input', () => {
     expect(toBase64Url(bytes(250, 251, 252, 253))).toBe('-vv8_Q');
     expect([...new Uint8Array(fromBase64Url('-vv8_Q'))]).toEqual([250, 251, 252, 253]);
@@ -76,6 +87,31 @@ describe('WebAuthn page shim', () => {
     expect(credential.getClientExtensionResults()).toEqual({ credProps: { rk: true } });
     expect(new Uint8Array((credential.response as AuthenticatorAttestationResponse).attestationObject)).toEqual(new Uint8Array([160]));
     expect((credential.response as AuthenticatorAttestationResponse).getTransports()).toEqual(['internal']);
+  });
+
+  it('stays compatible with libraries that assign toJSON onto the credential in strict mode', async () => {
+    // @github/webauthn-json does `credential.toJSON = () => ...`; a read-only toJSON made GitHub's
+    // "Add passkey" fail with "Cannot assign to read only property 'toJSON'".
+    const registration = setup({ status: 'ok', responseJson: registrationJson });
+    const created = await registration.prototype.create({ publicKey: creation() }) as unknown as PublicKeyCredential;
+    const assignToJson = new Function('credential', '"use strict"; credential.toJSON = () => "overridden"; credential.getClientExtensionResults = () => ({ patched: true }); return credential.toJSON();');
+    expect(assignToJson(created)).toBe('overridden');
+    expect(created.getClientExtensionResults()).toEqual({ patched: true });
+    const attestation = created.response as AuthenticatorAttestationResponse;
+    const patchResponse = new Function('response', '"use strict"; response.getTransports = () => ["usb"]; return response.getTransports();');
+    expect(patchResponse(attestation)).toEqual(['usb']);
+
+    const assertion = setup({ status: 'ok', responseJson: assertionJson });
+    const got = await assertion.prototype.get({ publicKey: request() }) as unknown as PublicKeyCredential;
+    expect(new Function('credential', '"use strict"; credential.toJSON = () => 7; return credential.toJSON();')(got)).toBe(7);
+  });
+
+  it('keeps data attributes read-only like the real accessors', async () => {
+    const { prototype } = setup({ status: 'ok', responseJson: assertionJson });
+    const credential = await prototype.get({ publicKey: request() }) as unknown as PublicKeyCredential;
+    const tamper = new Function('credential', '"use strict"; credential.id = "other";');
+    expect(() => tamper(credential)).toThrow(TypeError);
+    expect(credential.id).toBe('AQID');
   });
 
   it('returns an assertion whose userHandle and signature are buffers', async () => {

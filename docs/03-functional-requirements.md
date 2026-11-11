@@ -635,6 +635,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：Passkey 创建或导入使用当前 RP/origin 的默认 Login 作为归属提示，并由 desktop 重新验证；无有效默认值时可以唯一用户名匹配，仍不确定时作为 Passkey-only Login，禁止进入普通 Secret/密钥分类。
 - 必须：Chromium 扩展不得声明或使用 `webAuthenticationProxy`，不得持有浏览器全局 WebAuthn 状态；必须以 MAIN world shim 包装 `navigator.credentials.create/get`，并逐请求决策。VaultMesh 无法或不应处理的请求（接管关闭、未配对、桌面不可达、conditional mediation、依赖扩展结果的扩展（`prf`、`largeBlob`、`hmacCreateSecret`、`credBlob`、`getCredBlob`、`payment`、`enforceCredentialProtectionPolicy=true`，其余扩展被忽略）、请求超限、跨源 frame、`passkeys.probe` 为 `unavailable`、用户选择浏览器/系统）必须在同一次调用内回退到浏览器原生实现，不得要求重试。`origin` 与 `sameOriginWithAncestors` 只能由 background 依据 sender 与帧树写入。
 - 必须：浏览器自己报告没有平台认证器时，shim 才可以在 VaultMesh 可用（接管开启、同源 frame 链、桌面端已配对可达）时把 `isUserVerifyingPlatformAuthenticatorAvailable` 与 `getClientCapabilities` 的平台认证器能力报告为可用；浏览器已报告可用时不得改写或询问桌面端。
+- 必须：每次回退、取消、失败、提示显示、用户选择与 VaultMesh 已返回凭据必须有不含请求内容的原因码，并只在 `storage.session` 保留最近 20 条（origin、操作、原因码）供设置页查看与清除；不得写入 `storage.local`，不得包含请求参数、challenge、credential ID、用户信息或 Vault 数据。
 - 必须：选择与解锁等待提示必须优先显示为发起请求标签页内的页面对话框（页面无法显示时回退插件窗口）；对话框不得收集任何凭据，解锁只在插件窗口完成，页面对话框只能应答所属标签页的提示。
 - 必须：`create` 与有匹配的 `get` 必须让用户选择“使用 VaultMesh”或“使用浏览器/系统”，选择可以按 origin 与操作记住并可在设置中清除；选择 VaultMesh 后仍须解锁（锁定时）并通过桌面端原生确认。用户取消、5 分钟未完成属于取消并以 `NotAllowedError` 结束；页面 abort、导航与标签页关闭必须取消等待。Firefox 不提供 Passkey 能力。
 - 验收：`CT-PASSKEY-001`、`CT-PASSKEY-002`、`CT-PASSKEY-003`、`AT-PASSKEY-001`。
