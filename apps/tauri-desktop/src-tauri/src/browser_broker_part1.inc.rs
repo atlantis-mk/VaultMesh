@@ -29,7 +29,11 @@ use vaultmesh_ffi::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::browser_fill::BrowserFillService;
+use crate::{
+    browser_fill::BrowserFillService,
+    browser_preauth_preview::PasskeyPreviewMatch,
+    passkey_service::PasskeyService,
+};
 
 const RPC_VERSION: u32 = 2;
 const MAX_LINE_BYTES: usize = 384 * 1024;
@@ -83,6 +87,7 @@ pub const TAURI_BROWSER_SLICE_OPERATIONS: &[&str] = &[
     "email.otp.candidates",
     "email.otp.fill",
     "passkeys.create",
+    "passkeys.probe",
     "passkeys.get",
     "confirmation.request",
     "items.list",
@@ -183,6 +188,7 @@ fn requires_unlock(operation: &str) -> bool {
             | "browser.pairing.status"
             | "browser.pairing.revoke"
             | "browser.autofill.candidates"
+            | "passkeys.probe"
             | "confirmation.request"
     )
 }
@@ -211,6 +217,7 @@ fn requires_gesture(operation: &str) -> bool {
             | "email.otp.poll"
             | "email.otp.candidates"
             | "passkeys.create"
+            | "passkeys.probe"
             | "passkeys.get"
             | "items.list"
             | "items.trash.list"
@@ -963,6 +970,52 @@ impl BrowserBrokerCore {
                     ),
                     Err(error) => rpc_failure(envelope_request_id, error.code, &error.message),
                 }
+            }
+            "passkeys.probe" => {
+                let Some(request_json) = request
+                    .input
+                    .get("requestDetailsJson")
+                    .and_then(Value::as_str)
+                else {
+                    return rpc_failure(
+                        envelope_request_id,
+                        "invalid-request",
+                        "Passkey 请求格式无效。",
+                    );
+                };
+                let view = match PasskeyService::get_request_view(request_json) {
+                    Ok(view) => view,
+                    Err(message) => {
+                        return rpc_failure(
+                            envelope_request_id,
+                            "invalid-request",
+                            &message,
+                        );
+                    }
+                };
+                let result = match self.preauth_preview.passkey_match(
+                    self.runtime.current_path().as_path(),
+                    &view.rp_id,
+                    &view.allow_credentials,
+                ) {
+                    PasskeyPreviewMatch::Available(passkey) => json!({
+                        "status": "available",
+                        "rpId": view.rp_id,
+                        "origin": view.origin,
+                        "account": passkey.account,
+                    }),
+                    PasskeyPreviewMatch::Unavailable => json!({
+                        "status": "unavailable",
+                        "rpId": view.rp_id,
+                        "origin": view.origin,
+                    }),
+                    PasskeyPreviewMatch::Unknown => json!({
+                        "status": "unknown",
+                        "rpId": view.rp_id,
+                        "origin": view.origin,
+                    }),
+                };
+                rpc_success(envelope_request_id, result)
             }
             operation if is_runtime_operation(operation) => {
                 match self

@@ -123,6 +123,19 @@ struct StoredPasskey {
     last_used_at: Option<String>,
 }
 
+pub struct PasskeyGetRequestView {
+    pub rp_id: String,
+    pub origin: String,
+    pub allow_credentials: Vec<String>,
+}
+
+pub struct PasskeyGetSelection {
+    pub item_id: Uuid,
+    pub rp_id: String,
+    pub origin: String,
+    pub account: Option<String>,
+}
+
 pub struct PasskeyService;
 
 impl PasskeyService {
@@ -143,13 +156,44 @@ impl PasskeyService {
                 Some(request.user.display_name.unwrap_or(request.user.name)),
             ));
         }
-        let request: GetRequest = parse(request_json)?;
-        validate_common(&request.rp_id, &request.challenge, &request.extensions)?;
-        let (origin, _) = validated_origin(
-            &request.rp_id,
-            &request.extensions.remote_desktop_client_override,
-        )?;
+        let (request, origin, _) = parse_get_request(request_json)?;
         Ok((request.rp_id, origin, None))
+    }
+
+    pub fn get_request_view(request_json: &str) -> Result<PasskeyGetRequestView, String> {
+        let (request, origin, _) = parse_get_request(request_json)?;
+        Ok(PasskeyGetRequestView {
+            rp_id: request.rp_id,
+            origin,
+            allow_credentials: request
+                .allow_credentials
+                .into_iter()
+                .map(|credential| credential.id)
+                .collect(),
+        })
+    }
+
+    pub fn prepare_get(
+        runtime: &mut DesktopRuntime,
+        request_json: &str,
+    ) -> Result<Option<PasskeyGetSelection>, String> {
+        let (request, origin, _) = parse_get_request(request_json)?;
+        let Some(selected) = select_passkey(runtime, &request, None)? else {
+            return Ok(None);
+        };
+        let item_id = selected["id"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .ok_or("Passkey 数据无效。")?;
+        Ok(Some(PasskeyGetSelection {
+            item_id,
+            rp_id: request.rp_id,
+            origin,
+            account: selected["account"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+        }))
     }
 
     pub fn create(
@@ -285,53 +329,14 @@ impl PasskeyService {
         Ok(json!({"id":credential_id,"rawId":credential_id,"type":"public-key","authenticatorAttachment":"platform","response":{"clientDataJSON":URL_SAFE_NO_PAD.encode(client),"attestationObject":URL_SAFE_NO_PAD.encode(attestation),"authenticatorData":URL_SAFE_NO_PAD.encode(auth_data),"publicKey":URL_SAFE_NO_PAD.encode(der.as_bytes()),"publicKeyAlgorithm":ES256,"transports":["internal"]},"clientExtensionResults": if request.extensions.cred_props { json!({"credProps":{"rk":true}}) } else { json!({}) }}).to_string())
     }
 
-    pub fn get(
-        runtime: &mut DesktopRuntime,
-        request_json: &str,
-        now: &str,
-    ) -> Result<String, String> {
-        Self::get_for_item(runtime, request_json, now, None)
-    }
-
     pub fn get_for_item(
         runtime: &mut DesktopRuntime,
         request_json: &str,
         now: &str,
         allowed_item_id: Option<Uuid>,
     ) -> Result<String, String> {
-        let request: GetRequest = parse(request_json)?;
-        validate_common(&request.rp_id, &request.challenge, &request.extensions)?;
-        if request.allow_credentials.len() > 200
-            || !matches!(
-                request.user_verification.as_str(),
-                "discouraged" | "preferred" | "required"
-            )
-        {
-            return Err("Passkey 请求格式无效。".into());
-        }
-        for descriptor in &request.allow_credentials {
-            validate_descriptor(descriptor)?;
-            validate_b64(&descriptor.id)?;
-        }
-        let (origin, cross_origin) = validated_origin(
-            &request.rp_id,
-            &request.extensions.remote_desktop_client_override,
-        )?;
-        let summaries = passkey_summaries(runtime, &request.rp_id)?;
-        let selected = summaries
-            .iter()
-            .rev()
-            .find(|v| {
-                let item_allowed = allowed_item_id.is_none_or(|allowed| {
-                    v["id"].as_str().and_then(|id| Uuid::parse_str(id).ok()) == Some(allowed)
-                });
-                item_allowed
-                    && (request.allow_credentials.is_empty()
-                        || request
-                            .allow_credentials
-                            .iter()
-                            .any(|d| scope(v, "credential:").as_deref() == Some(&d.id)))
-            })
+        let (request, origin, cross_origin) = parse_get_request(request_json)?;
+        let selected = select_passkey(runtime, &request, allowed_item_id)?
             .ok_or("没有找到该网站可用的 Passkey。")?;
         let id = selected["id"].as_str().ok_or("Passkey 数据无效。")?;
         let secret = runtime
@@ -346,7 +351,7 @@ impl PasskeyService {
             serde_json::from_str(secret.as_str()).map_err(|_| "Passkey 数据无效。")?;
         if stored.version != 1
             || stored.rp_id != request.rp_id
-            || scope(selected, "credential:").as_deref() != Some(&stored.credential_id)
+            || scope(&selected, "credential:").as_deref() != Some(&stored.credential_id)
             || stored.private_key_jwk.kty != "EC"
             || stored.private_key_jwk.crv != "P-256"
             || validate_b64(&stored.credential_id).is_err()
@@ -403,6 +408,46 @@ impl PasskeyService {
         };
         Ok(json!({"id":stored.credential_id,"rawId":stored.credential_id,"type":"public-key","authenticatorAttachment":"platform","response":{"clientDataJSON":URL_SAFE_NO_PAD.encode(client),"authenticatorData":URL_SAFE_NO_PAD.encode(auth_data),"signature":URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes()),"userHandle":stored.user_handle},"clientExtensionResults":client_extension_results}).to_string())
     }
+}
+
+fn parse_get_request(request_json: &str) -> Result<(GetRequest, String, bool), String> {
+    let request: GetRequest = parse(request_json)?;
+    validate_common(&request.rp_id, &request.challenge, &request.extensions)?;
+    if request.allow_credentials.len() > 200
+        || !matches!(
+            request.user_verification.as_str(),
+            "discouraged" | "preferred" | "required"
+        )
+    {
+        return Err("Passkey 请求格式无效。".into());
+    }
+    for descriptor in &request.allow_credentials {
+        validate_descriptor(descriptor)?;
+        validate_b64(&descriptor.id)?;
+    }
+    let (origin, cross_origin) = validated_origin(
+        &request.rp_id,
+        &request.extensions.remote_desktop_client_override,
+    )?;
+    Ok((request, origin, cross_origin))
+}
+
+fn select_passkey(
+    runtime: &mut DesktopRuntime,
+    request: &GetRequest,
+    allowed_item_id: Option<Uuid>,
+) -> Result<Option<Value>, String> {
+    let summaries = passkey_summaries(runtime, &request.rp_id)?;
+    Ok(summaries.into_iter().rev().find(|value| {
+        let item_allowed = allowed_item_id.is_none_or(|allowed| {
+            value["id"].as_str().and_then(|id| Uuid::parse_str(id).ok()) == Some(allowed)
+        });
+        item_allowed
+            && (request.allow_credentials.is_empty()
+                || request.allow_credentials.iter().any(|descriptor| {
+                    scope(value, "credential:").as_deref() == Some(&descriptor.id)
+                }))
+    }))
 }
 
 fn passkey_summaries(runtime: &mut DesktopRuntime, rp: &str) -> Result<Vec<Value>, String> {
@@ -906,6 +951,20 @@ mod tests {
             }
         })
         .to_string();
+        let prepared = PasskeyService::prepare_get(&mut runtime, &get_request)
+            .expect("prepare matching Passkey")
+            .expect("matching Passkey");
+        assert_eq!(prepared.item_id, passkey_item_id);
+        assert_eq!(prepared.rp_id, "example.test");
+        assert_eq!(prepared.origin, "https://example.test");
+        assert_eq!(prepared.account.as_deref(), Some("ada@example.test"));
+        let other_credential_id = URL_SAFE_NO_PAD.encode(b"different credential");
+        let missing_request = get_request.replace(credential_id, &other_credential_id);
+        assert!(
+            PasskeyService::prepare_get(&mut runtime, &missing_request)
+                .expect("valid unmatched request")
+                .is_none()
+        );
         assert!(
             PasskeyService::get_for_item(
                 &mut runtime,

@@ -298,6 +298,7 @@ fn is_broker_operation(operation: &str) -> bool {
             | "browser.autofill.profile"
             | "browser.autofill.execute"
             | "browser.fill.request"
+            | "passkeys.probe"
     )
 }
 

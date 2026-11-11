@@ -14,7 +14,7 @@ use crate::device_credentials::ScopedCredentialStore;
 
 pub const PREAUTH_PREVIEW_SERVICE: &str = "com.vaultmesh.desktop.browser-autofill-preview";
 const PREAUTH_PREVIEW_ACCOUNT: &str = "preview-index-v1";
-const PREAUTH_PREVIEW_VERSION: u32 = 1;
+const PREAUTH_PREVIEW_VERSION: u32 = 2;
 const MAX_PREVIEW_ITEMS_PER_KIND: usize = 500;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +70,25 @@ pub struct PreAuthSecretRecord {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreAuthPasskeyRecord {
+    pub item_id: String,
+    pub title: String,
+    pub account: Option<String>,
+    pub rp_id: String,
+    pub credential_id: String,
+    pub origin: Option<String>,
+    pub login_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PasskeyPreviewMatch {
+    Available(PreAuthPasskeyRecord),
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreAuthSshRecord {
     pub id: String,
     pub title: String,
@@ -89,6 +108,8 @@ pub struct BrowserPreAuthPreviewSnapshot {
     pub cards: Vec<PreAuthCardRecord>,
     pub identities: Vec<PreAuthIdentityRecord>,
     pub secrets: Vec<PreAuthSecretRecord>,
+    #[serde(default)]
+    pub passkeys: Vec<PreAuthPasskeyRecord>,
     pub ssh_credentials: Vec<PreAuthSshRecord>,
 }
 
@@ -183,6 +204,7 @@ impl BrowserPreAuthPreviewStore {
         let secrets_raw = runtime
             .execute("secrets.list", json!({}))
             .map_err(|error| error.public_message().to_owned())?;
+        let passkeys = extract_passkeys(runtime, &secrets_raw)?;
         let ssh_raw = runtime
             .execute("ssh.list", json!({}))
             .map_err(|error| error.public_message().to_owned())?;
@@ -195,6 +217,7 @@ impl BrowserPreAuthPreviewStore {
             cards: extract_cards(&cards_raw),
             identities: extract_identities(&identities_raw),
             secrets: extract_secrets(&secrets_raw),
+            passkeys,
             ssh_credentials: extract_ssh(&ssh_raw),
         };
         let encoded = serde_json::to_vec(&snapshot)
@@ -218,6 +241,31 @@ impl BrowserPreAuthPreviewStore {
             return None;
         }
         Some(snapshot)
+    }
+
+    pub fn passkey_match(
+        &self,
+        vault_path: &Path,
+        rp_id: &str,
+        allow_credentials: &[String],
+    ) -> PasskeyPreviewMatch {
+        let Some(snapshot) = self.load_verified_snapshot(vault_path) else {
+            return PasskeyPreviewMatch::Unknown;
+        };
+        snapshot
+            .passkeys
+            .iter()
+            .rev()
+            .find(|passkey| {
+                passkey.rp_id == rp_id
+                    && (allow_credentials.is_empty()
+                        || allow_credentials
+                            .iter()
+                            .any(|credential| credential == &passkey.credential_id))
+            })
+            .cloned()
+            .map(PasskeyPreviewMatch::Available)
+            .unwrap_or(PasskeyPreviewMatch::Unavailable)
     }
 
     pub fn summaries_for_kind(&self, vault_path: &Path, field_kind: &str) -> Option<Value> {
@@ -537,6 +585,80 @@ fn extract_secrets(raw: &Value) -> Vec<PreAuthSecretRecord> {
         .collect()
 }
 
+fn extract_passkeys(
+    runtime: &mut DesktopRuntime,
+    raw: &Value,
+) -> Result<Vec<PreAuthPasskeyRecord>, String> {
+    let mut passkeys = Vec::new();
+    for entry in raw
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .get("isPasskey")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .take(MAX_PREVIEW_ITEMS_PER_KIND)
+    {
+        let Some(item_id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let detail = runtime
+            .execute("secrets.detail", json!({ "id": item_id }))
+            .map_err(|error| error.public_message().to_owned())?;
+        let Some(rp_id) = scope_with_prefix(&detail, "rp:") else {
+            continue;
+        };
+        let Some(credential_id) = scope_with_prefix(&detail, "credential:") else {
+            continue;
+        };
+        let Some(title) = detail.get("title").and_then(Value::as_str) else {
+            continue;
+        };
+        let account = detail
+            .get("account")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let origin = detail
+            .get("website")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let login_id = detail
+            .get("loginId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        passkeys.push(PreAuthPasskeyRecord {
+            item_id: item_id.to_owned(),
+            title: title.to_owned(),
+            account,
+            rp_id,
+            credential_id,
+            origin,
+            login_id,
+        });
+    }
+    Ok(passkeys)
+}
+
+fn scope_with_prefix(value: &Value, prefix: &str) -> Option<String> {
+    value
+        .get("scopes")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .find_map(|scope| {
+            scope
+                .strip_prefix(prefix)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+}
+
 fn extract_ssh(raw: &Value) -> Vec<PreAuthSshRecord> {
     raw.as_array()
         .into_iter()
@@ -605,6 +727,30 @@ mod tests {
                 }),
             )
             .expect("add login");
+        runtime
+            .execute(
+                "secrets.add",
+                json!({
+                    "title": "Synthetic Passkey",
+                    "kind": "authenticator-key",
+                    "secret": "synthetic-private-key-material-should-not-leak",
+                    "provider": "VaultMesh Passkey",
+                    "account": "ada@example.test",
+                    "environment": "Passkey",
+                    "scopes": [
+                        "vaultmesh:passkey:v1",
+                        "rp:example.test",
+                        "credential:synthetic-credential-id"
+                    ],
+                    "expiresAt": null,
+                    "website": "https://example.test",
+                    "notes": "synthetic passkey notes",
+                    "folder": "Passkeys",
+                    "favorite": false,
+                    "masterPasswordReprompt": false
+                }),
+            )
+            .expect("add passkey metadata");
 
         let preview = BrowserPreAuthPreviewStore::in_memory();
         preview.sync_from_runtime(&mut runtime).expect("sync preview");
@@ -616,6 +762,7 @@ mod tests {
         assert!(!raw_json.contains("JBSWY3DPEHPK3PXP"));
         assert!(!raw_json.contains("private-note-should-not-leak"));
         assert!(!raw_json.contains("custom-secret-value"));
+        assert!(!raw_json.contains("synthetic-private-key-material-should-not-leak"));
 
         let logins = preview
             .summaries_for_kind(&vault_path, "login")
@@ -628,9 +775,39 @@ mod tests {
         assert_eq!(login["hasTotpSecret"], json!(true));
         assert_eq!(login["masterPasswordReprompt"], json!(true));
 
+        let available = preview.passkey_match(
+            &vault_path,
+            "example.test",
+            &["synthetic-credential-id".to_owned()],
+        );
+        let PasskeyPreviewMatch::Available(passkey) = available else {
+            panic!("expected passkey preview match");
+        };
+        assert_eq!(passkey.title, "Synthetic Passkey");
+        assert_eq!(passkey.account.as_deref(), Some("ada@example.test"));
+        assert_eq!(passkey.rp_id, "example.test");
+        assert_eq!(passkey.credential_id, "synthetic-credential-id");
+        assert_eq!(passkey.origin.as_deref(), Some("https://example.test"));
+        assert_eq!(
+            preview.passkey_match(
+                &vault_path,
+                "example.test",
+                &["different-credential-id".to_owned()]
+            ),
+            PasskeyPreviewMatch::Unavailable
+        );
+        assert_eq!(
+            preview.passkey_match(&vault_path, "other.example", &[]),
+            PasskeyPreviewMatch::Unavailable
+        );
+
         // Tampering or external modification to vault.enc invalidates the preview until next unlock sync.
         fs::write(&vault_path, b"modified-vault-ciphertext").expect("modify vault");
         assert!(preview.summaries_for_kind(&vault_path, "login").is_none());
+        assert_eq!(
+            preview.passkey_match(&vault_path, "example.test", &[]),
+            PasskeyPreviewMatch::Unknown
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }

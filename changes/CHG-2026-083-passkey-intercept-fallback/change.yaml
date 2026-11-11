@@ -1,0 +1,32 @@
+schema: "2"
+id: "CHG-2026-083-passkey-intercept-fallback"
+title: "修正 Passkey 全站拦截与浏览器重试回退"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "消除硬编码站点与标签页缓存导致的 Passkey 主动直通，以锁定态无秘密预检、严格匹配和用户重试回退统一浏览器授权流程。"
+requirements:
+  - "REQ-PASSKEY-001"
+tests:
+  - "CT-PASSKEY-001"
+  - "CT-PASSKEY-002"
+  - "AT-PASSKEY-001"
+adrs:
+  - "ADR-0003"
+  - "ADR-0055"
+context_refs:
+  - "specs/browser-integration.md#Passkey"
+  - "docs/06-security-privacy.md#Passkey 边界"
+  - "docs/07-test-release-plan.md#CT-PASSKEY-001"
+related_changes: []
+boundaries:
+  - "Browser RPC v2 新增只读 passkeys.probe，并新增 passkey-unavailable 错误码"
+  - "Browser Pre-Auth Preview Index 升级为 v2，只允许非秘密 Passkey 路由元数据"
+  - "WebAuthn proxy 全站挂载；无匹配时结束当前请求、detach 并提示用户重试"
+risks:
+  - "过期或损坏的预检索索引不得产生 false unavailable，必须保守返回 unknown"
+  - "detach 是浏览器全局状态，5 分钟重试窗口会影响其他站点的 Passkey 路由"
+  - "预检索记录不得包含私钥、userHandle、签名、Vault 秘密或其他受保护值"
+next:
+  - "在真实 Chromium 完成 AT-PASSKEY-001：有匹配签名、无匹配提示重试及浏览器原生重试成功"
