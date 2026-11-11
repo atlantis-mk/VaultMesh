@@ -534,8 +534,8 @@ fn operation_policy_is_exhaustive_and_confirmation_tokens_are_single_use() {
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(TAURI_BROWSER_SLICE_OPERATIONS.len(), 122);
-    assert_eq!(operations.len(), 122);
+    assert_eq!(TAURI_BROWSER_SLICE_OPERATIONS.len(), 123);
+    assert_eq!(operations.len(), 123);
     for operation in TAURI_BROWSER_SLICE_OPERATIONS {
         let owners = [
             is_broker_operation(operation),
@@ -908,6 +908,120 @@ fn ct_browser_002_locked_candidates_use_verified_preauth_preview_without_unlocki
         Uuid::new_v4(),
     );
     assert_eq!(auto_fill["error"]["code"], "unlock-required");
+
+    drop(broker);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn ct_passkey_001_locked_probe_uses_verified_non_secret_passkey_metadata() {
+    let (root, _path, mut broker, secret) = setup("locked-passkey-probe");
+    let credential_id = "c3ludGhldGljIGNyZWRlbnRpYWw";
+    let request_json = json!({
+        "challenge": URL_SAFE_NO_PAD.encode(b"assertion challenge"),
+        "rpId": "example.test",
+        "allowCredentials": [{ "type": "public-key", "id": credential_id }],
+        "userVerification": "preferred",
+        "extensions": {
+            "remoteDesktopClientOverride": {
+                "origin": "https://example.test",
+                "sameOriginWithAncestors": true
+            }
+        }
+    })
+    .to_string();
+
+    let cold = call(
+        &mut broker,
+        &secret,
+        "passkeys.probe",
+        json!({ "requestDetailsJson": request_json }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(cold["ok"], true, "{cold}");
+    assert_eq!(cold["result"]["status"], "unknown");
+
+    assert_eq!(
+        call(
+            &mut broker,
+            &secret,
+            "vault.unlock",
+            json!({ "masterPassword": PASSWORD, "userGestureId": Uuid::new_v4() }),
+            Uuid::new_v4(),
+        )["ok"],
+        true
+    );
+    let unlocked_without_match = call(
+        &mut broker,
+        &secret,
+        "passkeys.probe",
+        json!({ "requestDetailsJson": request_json }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(unlocked_without_match["result"]["status"], "unavailable");
+
+    let added = call(
+        &mut broker,
+        &secret,
+        "secrets.add",
+        json!({
+            "title": "Synthetic Passkey",
+            "kind": "authenticator-key",
+            "secret": "synthetic-private-key-material",
+            "provider": "VaultMesh Passkey",
+            "account": "ada@example.test",
+            "environment": "Passkey",
+            "scopes": [
+                "vaultmesh:passkey:v1",
+                "rp:example.test",
+                "credential:c3ludGhldGljIGNyZWRlbnRpYWw"
+            ],
+            "expiresAt": null,
+            "website": "https://example.test",
+            "notes": null,
+            "folder": "Passkeys",
+            "favorite": false,
+            "masterPasswordReprompt": false,
+            "userGestureId": Uuid::new_v4()
+        }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(added["ok"], true);
+
+    assert_eq!(
+        call(
+            &mut broker,
+            &secret,
+            "vault.lock",
+            json!({ "userGestureId": Uuid::new_v4() }),
+            Uuid::new_v4(),
+        )["result"]["unlocked"],
+        false
+    );
+    let available = call(
+        &mut broker,
+        &secret,
+        "passkeys.probe",
+        json!({ "requestDetailsJson": request_json }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(available["ok"], true);
+    assert_eq!(available["result"]["status"], "available");
+    assert_eq!(available["result"]["rpId"], "example.test");
+    assert_eq!(available["result"]["origin"], "https://example.test");
+    assert_eq!(available["result"]["account"], "ada@example.test");
+    assert!(!available.to_string().contains("synthetic-private-key-material"));
+
+    let mismatched_request =
+        request_json.replace(credential_id, "ZGlmZmVyZW50IGNyZWRlbnRpYWw");
+    let unavailable = call(
+        &mut broker,
+        &secret,
+        "passkeys.probe",
+        json!({ "requestDetailsJson": mismatched_request }),
+        Uuid::new_v4(),
+    );
+    assert_eq!(unavailable["result"]["status"], "unavailable");
 
     drop(broker);
     fs::remove_dir_all(root).expect("cleanup");

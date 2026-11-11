@@ -1,7 +1,8 @@
-# ADR-0055：浏览器未解锁候选摘要预检索与桌面统一临时解锁单次填充
+# ADR-0055：浏览器未解锁非秘密预检索与桌面统一临时解锁单次操作
 
 - 状态：Accepted
 - 日期：2026-11-09
+- 修订：2026-11-11，预检索索引 v2 增加 Passkey 非秘密路由元数据
 - 关联 Work：`CHG-2026-060`
 - 关闭 OPEN：无
 
@@ -18,6 +19,7 @@
 1. **桌面端加密无秘密预授权候选摘要索引（Browser Pre-Auth Autofill Preview Index）**：
    - 沿用 `ADR-0044`（Android 预授权候选预览）与 `ADR-0053`（桌面统一钥匙串根秘密 `root-secret-v1`）边界，在桌面端 `DeviceCredentialStore` 中维护与当前 `vault.enc` 文件 SHA-256 摘要绑定的加密候选预览索引（作用域 `com.vaultmesh.desktop.browser-autofill-preview`）。
    - 预览索引仅保存非秘密匹配与展示元数据：`id`、`kind`、`title`、`subtitle`（用户名、掩码卡号摘要、身份摘要或主机名）、归一化站点匹配列表（`url`、`additionalUrls`、`website`、`host`）、`autofillOnPageLoad`、`masterPasswordReprompt` 与布尔标志 `hasTotpSecret`。
+   - 预览索引 v2 额外保存 Passkey 的 item ID、login ID、title、account、origin、RP ID 与 credential ID，仅供 `passkeys.probe` 在锁定态判断当前 WebAuthn 请求是否存在匹配。credential ID 是公开标识；不得保存 Passkey private key、userHandle、signature、Vault secret、受保护字段或解密 payload。索引缺失、版本过旧、路径或 Vault 文件摘要不一致时必须返回 `unknown`，不得返回无匹配。
    - **严禁写入任何秘密值**：密码、TOTP 种子、完整卡号/CVV/PIN、敏感信息正文、SSH 私钥/口令、备注、自定义字段值与恢复码一律不得进入预览索引。
    - 桌面端或浏览器会话每次解锁成功及发生 Vault 变更（新增、修改、删除、恢复、密码轮换）时同步刷新预览索引；当 `BrowserBrokerCore` 处于锁定状态处理 `browser.autofill.candidates` 时，先校验磁盘 `vault.enc` 的实时 SHA-256 与索引记录一致，再按相同的同源/同主域名/页面上下文规则返回候选并标记 `requiresUnlock: true`。
 2. **未解锁态候选展示与输入框实时过滤**：
@@ -40,6 +42,7 @@
 ## 后果
 
 - `browser.autofill.candidates` 与 `browser.autofill.execute` 在 `BROWSER_RPC_POLICIES` 中标记为 `requiresUnlock: false`，由各自处理器内部执行预览索引校验或单次临时解锁。
+- `passkeys.probe` 为 Browser RPC v2 的只读 metadata 操作，`requiresUnlock: false`；它只返回 `available`、`unavailable` 或 `unknown` 及非秘密 RP/origin/account 上下文。实际 assertion 仍由 `passkeys.get` 在解锁后重新选择、显示 native confirmation 并签名。
 - `agent-unlock` 窗口状态协议扩展支持 `browser-autofill` 请求上下文，并在 30 秒超时后自动清理关闭。
 
 ## 被拒方案
@@ -51,4 +54,5 @@
 
 - `AT-AUTOFILL-001`、`AT-AUTOFILL-002`：验证锁定状态下候选检索、实时输入过滤、点击候选唤起桌面端临时解锁窗口完成单次填充，且填充后 Popup 仍保持锁定。
 - `CT-BROWSER-002`：验证预授权候选索引不含任何秘密字段、绑定 `vault.enc` SHA-256 摘要，以及 RPC 契约一致性。
+- `CT-PASSKEY-001`：验证 Passkey 预检索索引仅含非秘密路由元数据、锁定态 RP/`allowCredentials` 匹配、过期索引返回 `unknown`，且实际 assertion 在 native confirmation 前重新验证。
 - `AT-AGENT-UNLOCK-001`：验证统一临时解锁窗口在 30 秒倒计时结束后自动取消并关闭窗口。

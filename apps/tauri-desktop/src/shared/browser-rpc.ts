@@ -53,6 +53,7 @@ export const BrowserRpcOperationSchema = z.enum([
   'email.otp.candidates',
   'email.otp.fill',
   'passkeys.create',
+  'passkeys.probe',
   'passkeys.get',
   'confirmation.request',
   'items.list',

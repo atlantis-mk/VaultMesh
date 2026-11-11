@@ -66,6 +66,7 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   // callable through the authenticated native channel and never disclose key
   // material to the extension.
   'passkeys.create': automaticAudit,
+  'passkeys.probe': metadata(false),
   'passkeys.get': automaticPageDisclosure,
   // The target policy is checked when the token is created. This helper must
   // remain callable while locked so `vault.create` can obtain its required

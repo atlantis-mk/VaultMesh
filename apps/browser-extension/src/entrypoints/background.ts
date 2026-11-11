@@ -40,7 +40,7 @@ import {
   type BrowserIdleState,
   type PluginSecurityPolicy,
 } from "@/lib/plugin-security-policy";
-import { hasPasskeyForHost, installPasskeyProxy, isNativePasskeyBypassUrl } from "@/lib/passkey-proxy";
+import { installPasskeyProxy } from "@/lib/passkey-proxy";
 import { PopupWorkspaceMemoryCache } from "@/lib/popup-workspace-cache";
 import {
   accountStageKey,
@@ -62,6 +62,7 @@ import {
 const CONTEXT_MENU_ID = "vaultmesh-request-fill";
 const NATIVE_RECONNECT_ALARM = "vaultmesh-native-reconnect";
 const EMAIL_OTP_POLL_MS = 3_000;
+const PASSKEY_RETRY_NOTIFICATION_ID = "vaultmesh-passkey-retry";
 const automaticAttempts = new AutofillAttemptRegistry();
 const popupWorkspaceCache = new PopupWorkspaceMemoryCache();
 type PendingPluginFill = {
@@ -87,41 +88,14 @@ const extensionAction = (browser as unknown as {
   browserAction?: BrowserActionApi;
 }).action ?? (browser as unknown as { browserAction?: BrowserActionApi }).browserAction;
 
-async function updatePasskeyBypassForActiveTab(): Promise<void> {
-  if (!activePasskeyProxy) return;
-  try {
-    let [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab) {
-      const tabs = await browser.tabs.query({ active: true });
-      tab = tabs[0];
-    }
-    if (!tab?.url) {
-      activePasskeyProxy.setTabBypass(true);
-      return;
-    }
-    if (isNativePasskeyBypassUrl(tab.url)) {
-      activePasskeyProxy.setTabBypass(true);
-      return;
-    }
-    let host = "";
-    try {
-      host = new URL(tab.url).hostname;
-    } catch {
-      host = "";
-    }
-    const snapshot = popupWorkspaceCache.read()?.snapshot;
-    const hasPasskey = Boolean(host && hasPasskeyForHost(snapshot, host));
-    activePasskeyProxy.setTabBypass(!hasPasskey);
-  } catch {
-    // Ignore query failures during window closures.
-  }
-}
-
 export default defineBackground(() => {
   let activeBiometricSession: string | null = null;
   // Listener registration is deliberately synchronous: Chromium requires the
   // WebAuthn proxy handlers to exist as soon as the MV3 worker starts.
-  const passkeyProxy = installPasskeyProxy({ openUnlockPrompt: openPasskeyUnlockPrompt });
+  const passkeyProxy = installPasskeyProxy({
+    openUnlockPrompt: openPasskeyUnlockPrompt,
+    notifyRetry: notifyPasskeyRetry,
+  });
   activePasskeyProxy = passkeyProxy;
 
   // The background worker, rather than the popup, owns the native
@@ -133,19 +107,17 @@ export default defineBackground(() => {
     stopEmailOtpPolling();
     void cancelDeviceAssists();
     void passkeyProxy.sync();
-    void updatePasskeyBypassForActiveTab();
   });
-  void warmPopupWorkspaceCache().then(() => updatePasskeyBypassForActiveTab());
+  void warmPopupWorkspaceCache();
   void syncEmailOtpPolling();
   void passkeyProxy.sync();
   void refreshPluginSecurityPolicy();
-  void updatePasskeyBypassForActiveTab();
   void browser.alarms.create(NATIVE_RECONNECT_ALARM, { periodInMinutes: 1 });
   browser.runtime.onStartup.addListener(() => {
     popupWorkspaceCache.clear();
     persistentNativeConnection.ensureConnected();
     void syncEmailOtpPolling();
-    void warmPopupWorkspaceCache().then(() => updatePasskeyBypassForActiveTab());
+    void warmPopupWorkspaceCache();
     void refreshPluginSecurityPolicy().then((policy) => {
       if (policy.lockOnBrowserRestart) lockExtensionWithRetry(3, () => passkeyProxy.sync());
     });
@@ -163,13 +135,6 @@ export default defineBackground(() => {
   });
   browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
     void deviceAssistTabActivated(tabId, windowId);
-    void updatePasskeyBypassForActiveTab();
-  });
-  browser.tabs.onUpdated?.addListener((_tabId, changeInfo) => {
-    if (changeInfo.url || changeInfo.status === "complete") void updatePasskeyBypassForActiveTab();
-  });
-  browser.windows.onFocusChanged?.addListener(() => {
-    void updatePasskeyBypassForActiveTab();
   });
   browser.tabs.onRemoved.addListener((tabId) => {
     automaticAttempts.reset(tabId);
@@ -185,14 +150,12 @@ export default defineBackground(() => {
     if (details.frameId === 0) {
       automaticAttempts.reset(details.tabId);
       void stopEmailOtpBoostForTab(details.tabId);
-      void updatePasskeyBypassForActiveTab();
     }
   });
   browser.webNavigation.onHistoryStateUpdated.addListener((details) => {
     void cancelDeviceAssists(details.tabId, details.frameId);
     if (details.frameId === 0) {
       automaticAttempts.reset(details.tabId);
-      void updatePasskeyBypassForActiveTab();
     }
     // Same-origin iframe routes keep their content script and document id too.
     // Every affected frame must retire discovery handles before the next scan.
@@ -215,6 +178,10 @@ export default defineBackground(() => {
     else discardSaveCapture(captureId);
   });
   browser.notifications.onClicked.addListener((notificationId) => {
+    if (notificationId === PASSKEY_RETRY_NOTIFICATION_ID) {
+      void browser.notifications.clear(notificationId).catch(() => undefined);
+      return;
+    }
     if (!notificationId.startsWith(CREDENTIAL_NOTIFICATION_PREFIX)) return;
     const captureId = notificationId.slice(CREDENTIAL_NOTIFICATION_PREFIX.length);
     const pending = pendingCredentialCaptures.get(captureId);
@@ -260,7 +227,6 @@ export default defineBackground(() => {
       if (message.request.operation === 'vault.lock' || message.request.operation === 'browser.pairing.revoke') popupWorkspaceCache.clear();
       const response = await persistentNativeConnection.request(message.request);
       popupWorkspaceCache.observeRpcResponse(message.request.operation, response);
-      void updatePasskeyBypassForActiveTab();
       if (message.request.operation === "biometric.authentication.poll" && isBiometricUnlockResponse(response)) activeBiometricSession = null;
       if (['vault.create', 'vault.unlock', 'biometric.unlock', 'pin.unlock'].includes(message.request.operation) || (message.request.operation === 'biometric.authentication.poll' && isBiometricUnlockResponse(response))) void passkeyProxy.sync();
       if (['vault.create', 'vault.unlock', 'biometric.unlock', 'pin.unlock'].includes(message.request.operation) || (message.request.operation === 'biometric.authentication.poll' && isBiometricUnlockResponse(response))) startEmailOtpPolling();
@@ -505,6 +471,15 @@ async function openPasskeyUnlockPrompt(): Promise<void> {
   await browser.windows.create({ url: browser.runtime.getURL("/popup.html?passkey=1"), type: "popup", focused: true, width: 400, height: 600 });
 }
 
+async function notifyPasskeyRetry(): Promise<void> {
+  await browser.notifications.create(PASSKEY_RETRY_NOTIFICATION_ID, {
+    type: "basic",
+    iconUrl: browser.runtime.getURL("/icon.svg"),
+    title: "请重试通行密钥",
+    message: "VaultMesh 没有匹配的通行密钥。请在网站重试，浏览器将处理本次通行密钥。",
+  });
+}
+
 async function refreshPluginSecurityPolicy(): Promise<PluginSecurityPolicy> {
   activePluginSecurityPolicy = await loadPluginSecurityPolicy();
   browser.idle.setDetectionInterval(idleDetectionIntervalSeconds(activePluginSecurityPolicy));
@@ -517,14 +492,11 @@ async function warmPopupWorkspaceCache(): Promise<void> {
     const status = await backgroundDesktopRpc("vault.status") as { unlocked?: unknown };
     if (status.unlocked !== true) {
       popupWorkspaceCache.clear();
-      void updatePasskeyBypassForActiveTab();
       return;
     }
     popupWorkspaceCache.storeSnapshot(await backgroundDesktopRpc("vault.workspace"));
-    void updatePasskeyBypassForActiveTab();
   } catch {
     popupWorkspaceCache.clear();
-    void updatePasskeyBypassForActiveTab();
   }
 }
 

@@ -945,11 +945,30 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                     } else {
                         "get"
                     };
-                    let (rp_id, origin, account) = PasskeyService::describe(kind, &request_json)
-                        .map_err(|message| failure(&message))?;
+                    let mut prepared_get = None;
+                    let (rp_id, origin, account) = if kind == "create" {
+                        PasskeyService::describe(kind, &request_json)
+                            .map_err(|message| failure(&message))?
+                    } else {
+                        let Some(selection) = PasskeyService::prepare_get(runtime, &request_json)
+                            .map_err(|message| failure(&message))?
+                        else {
+                            return Err(BrowserPlatformError {
+                                code: "passkey-unavailable",
+                                message: "VaultMesh 没有该网站可用的 Passkey。".to_owned(),
+                            });
+                        };
+                        let presentation = (
+                            selection.rp_id.clone(),
+                            selection.origin.clone(),
+                            selection.account.clone(),
+                        );
+                        prepared_get = Some(selection);
+                        presentation
+                    };
                     let detail = account
-                    .map(|account| format!("账号：{account}\n来源：{origin}\n私钥始终保留在 VaultMesh 加密保险库中。"))
-                    .unwrap_or_else(|| format!("来源：{origin}\n私钥始终保留在 VaultMesh 加密保险库中。"));
+                        .map(|account| format!("账号：{account}\n来源：{origin}\n私钥始终保留在 VaultMesh 加密保险库中。"))
+                        .unwrap_or_else(|| format!("来源：{origin}\n私钥始终保留在 VaultMesh 加密保险库中。"));
                     let approved = {
                         let _dialog_guard = self.native_dialog_focus.begin();
                         self.app
@@ -983,7 +1002,14 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                             .and_then(|value| Uuid::parse_str(value).ok());
                         PasskeyService::create(runtime, &request_json, default_login_id, &now)
                     } else {
-                        PasskeyService::get(runtime, &request_json, &now)
+                        let selection =
+                            prepared_get.ok_or_else(|| failure("Passkey 选择已失效。"))?;
+                        PasskeyService::get_for_item(
+                            runtime,
+                            &request_json,
+                            &now,
+                            Some(selection.item_id),
+                        )
                     }
                     .map_err(|message| failure(&format!("{message} ({rp_id})")))?;
                     Ok(json!({ "responseJson": response }))

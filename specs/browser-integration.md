@@ -170,7 +170,9 @@ TOTP URI 只可在本次 content response、当前 popup 组件 state 和 deskto
 
 ## Passkey
 
-Chromium 127+ WebAuthn proxy 把 ES256 credential 存为 protected `authenticator-key` secret，并在 active desktop privileged process 签名。创建或导入时 Extension 可以提供当前 origin 记住的默认 Login opaque ID，但 Tauri broker 必须按 RP/origin 重新验证后才能写入关联；无有效默认值时可以唯一用户名匹配，仍不确定时表示为 Passkey-only Login，不进入普通 Secret/密钥分类。每次 registration/assertion 必须显示 RP/origin/account context 的 native confirmation。插件锁定时 proxy 保持挂载并拦截请求、提示解锁，仅在用户明确拒绝解锁后按 REQ-PASSKEY-001 暂时交还浏览器。支持浏览器原生生物识别（如 Google 账号登录 accounts.google.com 等）直通 Chrome 原生 Touch ID，后台按前台标签页动态放行；插件安全策略提供通行密钥接管开关供用户选择。Conditional mediation、largeBlob/PRF 不在当前范围。
+Chromium 127+ WebAuthn proxy 把 ES256 credential 存为 protected `authenticator-key` secret，并在 active desktop privileged process 签名。创建或导入时 Extension 可以提供当前 origin 记住的默认 Login opaque ID，但 Tauri broker 必须按 RP/origin 重新验证后才能写入关联；无有效默认值时可以唯一用户名匹配，仍不确定时表示为 Passkey-only Login，不进入普通 Secret/密钥分类。每次 registration/assertion 必须显示 RP/origin/account context 的 native confirmation。
+
+通行密钥接管开启且已配对时，Extension 必须全局挂载 proxy；锁定、空缓存、桌面暂不可达以及所有站点（包括 Google、Apple、Microsoft）均不得按站点或标签页主动直通。每个 assertion 先通过桌面端无秘密预检索索引执行 `passkeys.probe`，按 RP ID 与 `allowCredentials` 判断：`unavailable` 时不弹解锁框，当前请求以 `NotAllowedError` 结束、detach 5 分钟并提示用户在网站重试，重试由 Chrome 原生处理；`available` 时按需解锁并由原生允许框确认；`unknown` 时保守解锁后由 `passkeys.get` 严格重验。索引只保存 RP ID、credential ID、account、origin、item ID 等非秘密路由元数据，并绑定当前 Vault 路径与文件摘要。`create` 始终显示原生创建确认。插件安全策略提供通行密钥接管开关；关闭接管或确认未配对时 detach。Conditional mediation、largeBlob/PRF 不在当前范围。
 
 新版 registration 必须从创建开始设置不可变的 BE 标志，签名计数固定为零；BS 只有在已授权对端持久化成功（包含重试时版本清单确认）后才能为真。旧 BE=0 凭据必须保持本机使用，重新注册后才可参与同步。同步 Passkey 不传递浏览器授权，使用时仍执行上述验证与确认。完整备份、复制与恢复规则由 `lan-vault-sync.md` 和 `ADR-0019` 拥有。
 

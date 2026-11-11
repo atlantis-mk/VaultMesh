@@ -1,44 +1,52 @@
-import { backgroundDesktopRpc, DesktopRpcError, type WorkspaceSnapshot } from '@/lib/desktop-rpc';
+import { backgroundDesktopRpc, DesktopRpcError } from '@/lib/desktop-rpc';
 import { rememberedLoginSelection } from '@/lib/autofill-preferences';
 
 type WebAuthenticationProxyApi = typeof browser.webAuthenticationProxy;
 type FinishRequest = (details: { requestId: number; responseJson?: string; error?: { name: string; message: string } }) => Promise<void>;
 type PasskeyOperation = 'passkeys.create' | 'passkeys.get';
+type PasskeyProbeOperation = 'passkeys.probe';
+
+export type PasskeyProbeResult =
+  | { status: 'available'; rpId: string; origin: string; account?: string | null }
+  | { status: 'unavailable' | 'unknown'; rpId: string; origin: string };
 
 export type PasskeyUnlockPrompt = { token: string; operation: 'create' | 'get'; origin: string | null };
 
 export type PasskeyProxyOptions = {
   proxy?: WebAuthenticationProxyApi;
-  rpc?: (operation: 'vault.status' | PasskeyOperation, input?: Record<string, unknown>) => Promise<unknown>;
+  rpc?: (operation: 'vault.status' | PasskeyProbeOperation | PasskeyOperation, input?: Record<string, unknown>) => Promise<unknown>;
   /** Opens the extension unlock UI. Failures are tolerated; the toolbar popup still shows the prompt. */
   openUnlockPrompt?: () => Promise<void>;
+  /** Prompts the user to retry after the current request is handed back to Chromium. */
+  notifyRetry?: () => Promise<void>;
   now?: () => number;
   unlockPollMs?: number;
-  autoAttach?: boolean;
 };
 
 /** Upper bound for holding a WebAuthn request while the user unlocks. */
 export const PASSKEY_UNLOCK_WAIT_MS = 5 * 60_000;
-/** After an explicit "use the browser" choice the proxy stays detached this long, so the site's retry reaches the browser. */
+/** After handing a request back to Chromium the proxy stays detached this long so a retry reaches the browser. */
 export const PASSKEY_BYPASS_MS = 5 * 60_000;
 
 type PendingUnlock = PasskeyUnlockPrompt & { requestId: number; settle: (outcome: 'unlocked' | 'declined' | 'expired') => void };
+type Invocation<T> =
+  | { status: 'value'; value: T }
+  | { status: 'declined' | 'expired' | 'cancelled' };
 
-/** Connect Chromium's WebAuthn proxy to the encrypted desktop vault. The
- * proxy attaches dynamically only when the active site has a stored passkey
- * in VaultMesh, leaving Chrome's native Touch ID and platform authenticators
- * completely unblocked for sites that do not use VaultMesh passkeys. */
+/** Chromium's WebAuthn proxy is process-global. VaultMesh keeps it attached
+ * whenever interception is enabled and decides per request whether it can
+ * serve the credential or must hand a retry back to the browser. */
 export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
   const proxy = options.proxy ?? (browser as typeof browser & { webAuthenticationProxy?: WebAuthenticationProxyApi }).webAuthenticationProxy;
   const rpc = options.rpc ?? backgroundDesktopRpc;
   const openUnlockPrompt = options.openUnlockPrompt ?? (async () => undefined);
+  const notifyRetry = options.notifyRetry ?? (async () => undefined);
   const now = options.now ?? Date.now;
   const unlockPollMs = options.unlockPollMs ?? 1_000;
-  const autoAttach = options.autoAttach ?? false;
   let attached = false;
   let bypassUntil = 0;
-  let tabBypass = !autoAttach;
   let policyEnabled = true;
+  let lastUnlocked: boolean | null = null;
   const cancelled = new Set<number>();
   const pendingUnlocks = new Map<string, PendingUnlock>();
 
@@ -49,7 +57,6 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
       detach: noop,
       pendingUnlockPrompt: () => null,
       declineUnlock: () => false,
-      setTabBypass: () => undefined,
       setEnabled: () => undefined,
     };
   }
@@ -80,40 +87,111 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
     finish: FinishRequest,
     extraInput: Record<string, unknown> = {},
   ) {
-    if (isNativePasskeyBypassRequest(requestDetailsJson)) {
-      await detach();
-      await finish({ requestId, error: { name: 'NotAllowedError', message: '已直通浏览器原生生物识别/通行密钥。' } }).catch(() => undefined);
-      return;
-    }
     try {
-      let result: { responseJson?: unknown };
-      try {
-        result = await rpc(operation, { requestDetailsJson, ...extraInput }) as { responseJson?: unknown };
-      } catch (error) {
-        if (!waitsForVaultMesh(error)) throw error;
-        const outcome = await waitForUnlock(requestId, operation, requestDetailsJson);
-        if (cancelled.delete(requestId)) return;
-        if (outcome === 'declined') {
-          await finish({ requestId, error: { name: 'NotAllowedError', message: '已选择不解锁 VaultMesh，请重试以使用浏览器的通行密钥。' } }).catch(() => undefined);
-          await bypass();
+      if (operation === 'passkeys.get') {
+        const probe = await invokeWithUnlock<PasskeyProbeResult>(
+          'passkeys.probe',
+          { requestDetailsJson },
+          requestId,
+          operation,
+          requestDetailsJson,
+        );
+        if (await settleWaitingOutcome(probe, requestId, finish)) return;
+        if (probe.status !== 'value') return;
+        const result = parseProbeResult(probe.value);
+        if (result.status === 'unavailable') {
+          await finishForBrowserRetry(
+            requestId,
+            finish,
+            'VaultMesh 没有该网站可用的通行密钥，请在网站重试；重试将由浏览器处理。',
+          );
           return;
         }
-        if (outcome === 'expired') {
-          await finish({ requestId, error: { name: 'NotAllowedError', message: 'VaultMesh 未解锁，通行密钥请求已超时。' } }).catch(() => undefined);
-          return;
-        }
-        result = await rpc(operation, { requestDetailsJson, ...extraInput }) as { responseJson?: unknown };
       }
+
+      const response = await invokeWithUnlock<{ responseJson?: unknown }>(
+        operation,
+        { requestDetailsJson, ...extraInput },
+        requestId,
+        operation,
+        requestDetailsJson,
+      );
+      if (await settleWaitingOutcome(response, requestId, finish)) return;
+      if (response.status !== 'value') return;
       if (cancelled.delete(requestId)) return;
-      if (typeof result.responseJson !== 'string' || result.responseJson.length > 256 * 1024) throw new Error('Invalid Passkey response');
-      await finish({ requestId, responseJson: result.responseJson });
+      if (typeof response.value.responseJson !== 'string' || response.value.responseJson.length > 256 * 1024) {
+        throw new Error('Invalid Passkey response');
+      }
+      await finish({ requestId, responseJson: response.value.responseJson });
     } catch (error) {
       if (cancelled.delete(requestId)) return;
+      if (error instanceof DesktopRpcError && error.code === 'passkey-unavailable') {
+        await finishForBrowserRetry(
+          requestId,
+          finish,
+          'VaultMesh 没有该网站可用的通行密钥，请在网站重试；重试将由浏览器处理。',
+        );
+        return;
+      }
       await finish({ requestId, error: domException(error) }).catch(() => undefined);
       if (error instanceof DesktopRpcError && (error.code === 'unpaired' || error.code === 'cancelled')) {
         await bypass();
       }
     }
+  }
+
+  async function invokeWithUnlock<T>(
+    operation: 'vault.status' | PasskeyProbeOperation | PasskeyOperation,
+    input: Record<string, unknown>,
+    requestId: number,
+    promptOperation: PasskeyOperation,
+    requestDetailsJson: string,
+  ): Promise<Invocation<T>> {
+    try {
+      return { status: 'value', value: await rpc(operation, input) as T };
+    } catch (error) {
+      if (!waitsForVaultMesh(error)) throw error;
+      const outcome = await waitForUnlock(requestId, promptOperation, requestDetailsJson);
+      if (cancelled.delete(requestId)) return { status: 'cancelled' };
+      if (outcome === 'declined') return { status: 'declined' };
+      if (outcome === 'expired') return { status: 'expired' };
+      return { status: 'value', value: await rpc(operation, input) as T };
+    }
+  }
+
+  async function settleWaitingOutcome<T>(
+    invocation: Invocation<T>,
+    requestId: number,
+    finish: FinishRequest,
+  ): Promise<boolean> {
+    if (invocation.status === 'value') return false;
+    if (invocation.status === 'cancelled') return true;
+    if (invocation.status === 'expired') {
+      await finish({
+        requestId,
+        error: { name: 'NotAllowedError', message: 'VaultMesh 未解锁，通行密钥请求已超时。' },
+      }).catch(() => undefined);
+      return true;
+    }
+    await finishForBrowserRetry(
+      requestId,
+      finish,
+      '已选择不解锁 VaultMesh，请在网站重试；重试将由浏览器处理。',
+      false,
+    );
+    return true;
+  }
+
+  async function finishForBrowserRetry(
+    requestId: number,
+    finish: FinishRequest,
+    message: string,
+    notify = true,
+  ) {
+    await finish({ requestId, error: { name: 'NotAllowedError', message } }).catch(() => undefined);
+    if (cancelled.delete(requestId)) return;
+    await bypass();
+    if (notify) await notifyRetry().catch(() => undefined);
   }
 
   function waitForUnlock(requestId: number, operation: PasskeyOperation, requestDetailsJson: string): Promise<'unlocked' | 'declined' | 'expired'> {
@@ -170,7 +248,7 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
 
   async function attach() {
     if (attached) return;
-    if (!policyEnabled || tabBypass || bypassUntil > now()) return;
+    if (!policyEnabled || bypassUntil > now()) return;
     if (await tryAttach()) return;
     // A restarted MV3 worker forgets that Chromium still holds this
     // extension's attachment; re-attach from a clean state once.
@@ -198,8 +276,11 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
     try {
       const status = await rpc('vault.status') as { unlocked?: unknown };
       if (status.unlocked === true) {
-        bypassUntil = 0;
+        if (lastUnlocked !== true) bypassUntil = 0;
+        lastUnlocked = true;
         for (const pending of [...pendingUnlocks.values()]) pending.settle('unlocked');
+      } else {
+        lastUnlocked = false;
       }
     } catch (error) {
       // Only a confirmed unpaired extension cannot serve WebAuthn. Transient
@@ -209,18 +290,8 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
         return;
       }
     }
-    if (!policyEnabled || tabBypass || bypassUntil > now()) await detach();
+    if (!policyEnabled || bypassUntil > now()) await detach();
     else await attach();
-  }
-
-  function setTabBypass(active: boolean) {
-    if (tabBypass === active) return;
-    tabBypass = active;
-    if (tabBypass) {
-      void detach();
-    } else {
-      void sync();
-    }
   }
 
   function setEnabled(enabled: boolean) {
@@ -237,7 +308,32 @@ export function installPasskeyProxy(options: PasskeyProxyOptions = {}) {
   // cannot reach the browser's own authenticator.
   void attach();
 
-  return { sync, detach, pendingUnlockPrompt, declineUnlock, setTabBypass, setEnabled };
+  return { sync, detach, pendingUnlockPrompt, declineUnlock, setEnabled };
+}
+
+function parseProbeResult(value: unknown): PasskeyProbeResult {
+  if (!value || typeof value !== 'object') throw new Error('Invalid Passkey probe response');
+  const candidate = value as { status?: unknown; rpId?: unknown; origin?: unknown; account?: unknown };
+  if (
+    (candidate.status !== 'available' && candidate.status !== 'unavailable' && candidate.status !== 'unknown')
+    || typeof candidate.rpId !== 'string'
+    || typeof candidate.origin !== 'string'
+  ) {
+    throw new Error('Invalid Passkey probe response');
+  }
+  if (candidate.status === 'available') {
+    return {
+      status: 'available',
+      rpId: candidate.rpId,
+      origin: candidate.origin,
+      account: typeof candidate.account === 'string' ? candidate.account : null,
+    };
+  }
+  return {
+    status: candidate.status as 'unavailable' | 'unknown',
+    rpId: candidate.rpId,
+    origin: candidate.origin,
+  };
 }
 
 function waitsForVaultMesh(error: unknown): boolean {
@@ -261,133 +357,9 @@ export function passkeyRequestOrigin(requestDetailsJson: string): string | null 
   }
 }
 
-export function passkeyRequestRpId(requestDetailsJson: string): string | null {
-  if (requestDetailsJson.length < 2 || requestDetailsJson.length > 128 * 1024) return null;
-  try {
-    const request = JSON.parse(requestDetailsJson) as {
-      rpId?: unknown;
-      rp?: { id?: unknown };
-    };
-    if (typeof request.rpId === 'string' && request.rpId.length > 0) return request.rpId;
-    if (typeof request.rp?.id === 'string' && request.rp.id.length > 0) return request.rp.id;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-export function isNativePasskeyBypassHost(host: string): boolean {
-  const normalized = host.toLowerCase().trim();
-  if (!normalized) return false;
-  const bypassSuffixes = [
-    'google.com',
-    'google.co.jp',
-    'google.co.uk',
-    'google.de',
-    'google.fr',
-    'google.com.hk',
-    'google.com.tw',
-    'googleusercontent.com',
-    'apple.com',
-    'icloud.com',
-    'live.com',
-    'microsoft.com',
-    'microsoftonline.com',
-  ];
-  return bypassSuffixes.some((suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`));
-}
-
-export function isNativePasskeyBypassUrl(url: string | null | undefined): boolean {
-  if (!url) return false;
-  try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
-    return isNativePasskeyBypassHost(parsed.hostname);
-  } catch {
-    return false;
-  }
-}
-
-export function isNativePasskeyBypassRequest(requestDetailsJson: string): boolean {
-  const origin = passkeyRequestOrigin(requestDetailsJson);
-  if (origin && isNativePasskeyBypassUrl(origin)) return true;
-  const rpId = passkeyRequestRpId(requestDetailsJson);
-  if (rpId && isNativePasskeyBypassHost(rpId)) return true;
-  return false;
-}
-
 export async function defaultLoginIdForPasskeyRequest(requestDetailsJson: string): Promise<string | null> {
   const origin = passkeyRequestOrigin(requestDetailsJson);
   return origin ? rememberedLoginSelection(origin) : null;
-}
-
-/**
- * Checks whether the given workspace snapshot has a passkey associated with the specified host.
- * This ensures VaultMesh only dynamically attaches Chromium's WebAuthn proxy for sites
- * that actually have credentials stored in the vault, leaving native macOS Touch ID
- * unintercepted for all other sites (e.g. GitHub, Google, etc.).
- */
-export function hasPasskeyForHost(
-  snapshot: WorkspaceSnapshot | null | undefined,
-  host: string | null | undefined,
-): boolean {
-  if (!snapshot || !host) return false;
-  const targetHost = host.toLowerCase().trim();
-  if (!targetHost) return false;
-
-  const loginsById = new Map<string, (typeof snapshot.items)[number]>();
-  for (const item of snapshot.items ?? []) {
-    loginsById.set(item.id, item);
-  }
-
-  const passkeys = (snapshot.secrets ?? []).filter((s) => s.isPasskey);
-  for (const passkey of passkeys) {
-    if (passkey.website) {
-      const candidate = extractHost(passkey.website);
-      if (candidate && hostsMatch(targetHost, candidate)) {
-        return true;
-      }
-    }
-    if (passkey.loginId) {
-      const login = loginsById.get(passkey.loginId);
-      if (login?.url) {
-        const candidate = extractHost(login.url);
-        if (candidate && hostsMatch(targetHost, candidate)) {
-          return true;
-        }
-      }
-    }
-    if (passkey.title) {
-      const titleCandidate = extractHost(passkey.title);
-      if (titleCandidate && hostsMatch(targetHost, titleCandidate)) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-function extractHost(candidate: string | null | undefined): string | null {
-  if (!candidate) return null;
-  const trimmed = candidate.trim().toLowerCase();
-  if (!trimmed) return null;
-  try {
-    const url = trimmed.includes('://') ? new URL(trimmed) : new URL(`https://${trimmed}`);
-    return url.hostname.toLowerCase();
-  } catch {
-    const matched = trimmed.match(/(?:https?:\/\/)?([a-z0-9.-]+\.[a-z]{2,})/);
-    return matched ? matched[1] : null;
-  }
-}
-
-function hostsMatch(target: string, candidate: string): boolean {
-  const t = target.toLowerCase();
-  const c = candidate.toLowerCase();
-  if (t === c) return true;
-  if (t.endsWith(`.${c}`)) return true;
-  if (c.endsWith(`.${t}`)) return true;
-  return false;
 }
 
 function domException(error: unknown) {
