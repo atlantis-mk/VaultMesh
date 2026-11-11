@@ -1,17 +1,19 @@
 use std::{
     collections::HashMap,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 #[cfg(unix)]
 use std::{
     fs,
-    io::{Read, Write},
     os::unix::{fs::FileTypeExt, net::UnixListener},
-    sync::atomic::{AtomicBool, Ordering},
-    thread::{self, JoinHandle},
-    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
