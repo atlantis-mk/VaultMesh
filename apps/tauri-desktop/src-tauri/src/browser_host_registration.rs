@@ -27,7 +27,7 @@ pub const FIREFOX_EXTENSION_ID: &str = "vaultmesh@atlantis-mk.github.io";
 #[cfg(any(target_os = "windows", test))]
 const HOST_CONFIG_NAME: &str = "browser-host-config.json";
 #[cfg(any(target_os = "windows", test))]
-const HOST_MANIFEST_NAME: &str = "com.vaultmesh.browser.json";
+pub const HOST_MANIFEST_NAME: &str = "com.vaultmesh.browser.json";
 #[cfg(any(target_os = "windows", test))]
 const FIREFOX_HOST_MANIFEST_NAME: &str = "com.vaultmesh.browser.firefox.json";
 

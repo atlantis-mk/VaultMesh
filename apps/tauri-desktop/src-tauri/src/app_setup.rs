@@ -588,42 +588,50 @@ pub fn run() {
                 credentials_store.scoped(browser_preauth_preview::PREAUTH_PREVIEW_SERVICE),
             );
             let browser_autofill_unlocks = Arc::new(Mutex::new(BrowserAutofillUnlockQueue::default()));
-            #[cfg(unix)]
-            let (browser_listener, browser_http_listener) =
-                BrowserPairingService::new(app_data.join("browser-pairing.json"), &credentials_store)
-                    .load_or_create()
+            // Loopback HTTP API (ADR-0056) must run on every platform: the
+            // stateless native host discovers the desktop on 127.0.0.1:42800..=42850.
+            // Only the Unix-socket endpoint stays Unix-only.
+            let (_browser_listener_unused, browser_http_listener) = {
+                let broker_arc = BrowserPairingService::new(
+                    app_data.join("browser-pairing.json"),
+                    &credentials_store,
+                )
+                .load_or_create()
+                .ok()
+                .and_then(|secret| {
+                    let platform = Arc::new(TauriBrowserPlatform::new(
+                        app.handle().clone(),
+                        app_data.clone(),
+                        Arc::clone(&settings),
+                        settings_path.clone(),
+                        Arc::clone(&clipboard_value),
+                        Arc::clone(&native_dialog_focus),
+                        Arc::clone(&email_otp),
+                        Arc::clone(&desktop_biometric),
+                        browser_preauth_preview.clone(),
+                        Arc::clone(&browser_autofill_unlocks),
+                    ));
+                    BrowserBrokerCore::new_with_platform(vault_path.clone(), secret, platform).ok()
+                })
+                .map(|broker| Arc::new(Mutex::new(broker)));
+                #[cfg(unix)]
+                let unix = broker_arc.as_ref().and_then(|broker_arc| {
+                    BrowserBrokerUnixListener::start(
+                        std::env::temp_dir().join("vaultmesh-tauri-browser.sock"),
+                        Arc::clone(broker_arc),
+                    )
                     .ok()
-                    .and_then(|secret| {
-                        let platform = Arc::new(TauriBrowserPlatform::new(
-                            app.handle().clone(),
-                            app_data.clone(),
-                            Arc::clone(&settings),
-                            settings_path.clone(),
-                            Arc::clone(&clipboard_value),
-                            Arc::clone(&native_dialog_focus),
-                            Arc::clone(&email_otp),
-                            Arc::clone(&desktop_biometric),
-                            browser_preauth_preview.clone(),
-                            Arc::clone(&browser_autofill_unlocks),
-                        ));
-                        BrowserBrokerCore::new_with_platform(vault_path.clone(), secret, platform).ok()
-                    })
-                    .map(|broker| {
-                        let broker_arc = Arc::new(Mutex::new(broker));
-                        let unix = BrowserBrokerUnixListener::start(
-                            std::env::temp_dir().join("vaultmesh-tauri-browser.sock"),
-                            Arc::clone(&broker_arc),
-                        )
+                    .map(Arc::new)
+                });
+                #[cfg(not(unix))]
+                let unix: Option<Arc<BrowserBrokerHttpListener>> = None;
+                let http = broker_arc.as_ref().and_then(|broker_arc| {
+                    BrowserBrokerHttpListener::start(Arc::clone(broker_arc))
                         .ok()
-                        .map(Arc::new);
-                        let http = BrowserBrokerHttpListener::start(Arc::clone(&broker_arc))
-                            .ok()
-                            .map(Arc::new);
-                        (unix, http)
-                    })
-                    .unwrap_or((None, None));
-            #[cfg(not(unix))]
-            let browser_http_listener = None;
+                        .map(Arc::new)
+                });
+                (unix, http)
+            };
             #[cfg(target_os = "windows")]
             let browser_integration = {
                 let browser_app_handle = app.handle().clone();
@@ -726,7 +734,7 @@ pub fn run() {
                 #[cfg(target_os = "windows")]
                 _agent_pipe_listener: agent_pipe_listener,
                 #[cfg(unix)]
-                _browser_listener: browser_listener,
+                _browser_listener: _browser_listener_unused,
                 _browser_http_listener: browser_http_listener,
                 _bitwarden_development_listener: bitwarden_development_listener,
                 #[cfg(target_os = "windows")]

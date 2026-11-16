@@ -282,6 +282,56 @@ fn check_windows_browser_installed(browser: &BrowserDefinition) -> bool {
     false
 }
 
+#[cfg(target_os = "windows")]
+fn check_windows_manifest_registered(app_data: &Path) -> (bool, Option<String>) {
+    let manifest_path = app_data.join(crate::browser_host_registration::HOST_MANIFEST_NAME);
+    if !manifest_path.is_file() {
+        return (false, None);
+    }
+    if let Ok(bytes) = fs::read(&manifest_path) {
+        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+            let name_matches = value.get("name").and_then(Value::as_str) == Some(BROWSER_HOST_NAME);
+            let path_valid = value.get("path").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
+            if name_matches && path_valid {
+                return (true, Some(manifest_path.display().to_string()));
+            }
+        }
+    }
+    (false, Some(manifest_path.display().to_string()))
+}
+
+#[cfg(target_os = "windows")]
+fn check_windows_extension_installed(browser: &BrowserDefinition, extension_id: &str) -> bool {
+    let Ok(local_app_data) = std::env::var("LOCALAPPDATA") else {
+        return false;
+    };
+    let user_data = match browser.id {
+        "chrome" => "Google/Chrome/User Data",
+        "edge" => "Microsoft/Edge/User Data",
+        "brave" => "BraveSoftware/Brave-Browser/User Data",
+        _ => return false,
+    };
+    let base = Path::new(&local_app_data).join(user_data);
+    if !base.is_dir() {
+        return false;
+    }
+    if base.join("Default/Extensions").join(extension_id).is_dir() {
+        return true;
+    }
+    if let Ok(entries) = fs::read_dir(&base) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("Profile ")
+                && entry.path().join("Extensions").join(extension_id).is_dir()
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn diagnose(state: &RuntimeState, repair: bool) -> Result<Value, String> {
     if repair {
         #[cfg(target_os = "macos")]
@@ -321,7 +371,9 @@ pub fn diagnose(state: &RuntimeState, repair: bool) -> Result<Value, String> {
         #[cfg(target_os = "windows")]
         let (installed, manifest_registered, manifest_path, extension_installed) = {
             let installed = check_windows_browser_installed(def);
-            (installed, false, None, false)
+            let (reg, path) = check_windows_manifest_registered(&state.app_data);
+            let ext = check_windows_extension_installed(def, DEFAULT_DEVELOPMENT_EXTENSION_ID);
+            (installed, reg, path, ext)
         };
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
