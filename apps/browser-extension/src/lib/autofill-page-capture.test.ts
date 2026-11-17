@@ -23,6 +23,58 @@ afterEach(async () => {
 });
 
 describe("startAutofillPage save capture", () => {
+  it("captures a form-less password step with hidden controls before the password and an external Next button", () => {
+    document.body.innerHTML = `<main>
+      <section><input type="hidden" name="token" value="never-capture">
+        <input autocomplete="username" value="ada@example.test" style="display:none">
+        <input name="Passwd" type="password" autocomplete="current-password" value="synthetic password">
+      </section>
+      <footer><button type="button"><span>下一步</span></button></footer>
+    </main>`;
+    const sendMessage = vi.fn(async () => ({}));
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    document.querySelector("button span")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "vaultmesh.save-capture", pageContext: "login",
+      data: { login: { username: "ada@example.test", password: "synthetic password" } },
+    }));
+    expect(JSON.stringify(sendMessage.mock.calls)).not.toContain("never-capture");
+    controller.dispose();
+  });
+
+  it("stages the account from a form-less first step with a hidden leading control and an external Next button", () => {
+    document.body.innerHTML = `<main><section>
+      <input type="hidden" name="token" value="never-capture">
+      <input id="identifierId" name="identifier" autocomplete="username webauthn" value="ada@example.test">
+      <input name="hiddenPassword" type="password" aria-hidden="true" style="display:none">
+    </section><footer><button type="button">Next</button></footer></main>`;
+    const sendMessage = vi.fn(async () => ({}));
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    document.querySelector("button")!.click();
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      kind: "vaultmesh.account-stage", pageUrl: "http://localhost:3000/", username: "ada@example.test",
+    });
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "vaultmesh.save-capture" }));
+    controller.dispose();
+  });
+
+  it("does not guess a form for an external Next button shared by different login forms", () => {
+    document.body.innerHTML = `<main>
+      <form><input autocomplete="username" value="ada"><input type="password" value="first password"></form>
+      <form><input autocomplete="username" value="grace"><input type="password" value="second password"></form>
+      <button type="button">Next</button>
+    </main>`;
+    const sendMessage = vi.fn(async () => ({}));
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    document.querySelector("button")!.click();
+
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "vaultmesh.save-capture" }));
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "vaultmesh.account-stage" }));
+    controller.dispose();
+  });
+
   it("captures keyboard SPA submission before the target handler unmounts its form", async () => {
     document.body.innerHTML = '<form><input autocomplete="username" value="ada"><input type="password" value="test-password"></form>';
     document.querySelectorAll<HTMLInputElement>("input").forEach(makeVisible);

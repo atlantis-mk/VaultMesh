@@ -1,4 +1,4 @@
-import { analyzeFormSemantics, formControls, isNewPasswordControl, type SupportedControl } from "@/lib/form-discovery";
+import { analyzeFormSemantics, formControls, isNewPasswordControl, isSemanticallyVisible, type SupportedControl } from "@/lib/form-discovery";
 import type { PageContext } from "@/lib/protocol";
 
 export type CapturedLogin = {
@@ -98,7 +98,7 @@ export function captureSubmittedData(root: ParentNode, pageUrl: string, options:
   const controls = captureControls(root);
   const context = options.context ?? inferContext(controls);
   return {
-    ...(options.includeLogin === false ? {} : captureLogin(controls, context)),
+    ...(options.includeLogin === false ? {} : captureLogin(controls, context, root)),
     ...captureIdentity(controls, pageUrl, context),
     ...captureCard(controls, pageUrl),
   };
@@ -106,6 +106,10 @@ export function captureSubmittedData(root: ParentNode, pageUrl: string, options:
 
 export function submittedDataContext(root: ParentNode): PageContext {
   return inferContext(captureControls(root));
+}
+
+export function submittedAccountValue(root: ParentNode): string {
+  return accountValue(captureControls(root));
 }
 
 export function capturedDataSignature(data: CapturedSaveData): string {
@@ -121,7 +125,7 @@ export function hasCapturedData(data: CapturedSaveData): boolean {
   return Boolean(data.login || data.identity || data.card || data.secrets?.length || data.sshCredentials?.length);
 }
 
-function captureLogin(controls: SupportedControl[], context: PageContext): Pick<CapturedSaveData, "login"> | {} {
+function captureLogin(controls: SupportedControl[], context: PageContext, root: ParentNode): Pick<CapturedSaveData, "login"> | {} {
   if (!["login", "signup", "password-change", "password-reset"].includes(context)) return {};
   const passwords = controls.filter((control): control is HTMLInputElement => control instanceof HTMLInputElement && control.type === "password");
   const preferred = passwords.find((control) => autocompleteTokens(control).includes("new-password"))
@@ -130,7 +134,22 @@ function captureLogin(controls: SupportedControl[], context: PageContext): Pick<
   if (!preferred?.value) return {};
   const newPasswords = passwords.filter((control) => autocompleteTokens(control).includes("new-password") || isNewPasswordControl(control));
   if (newPasswords.includes(preferred) && newPasswords.some((control) => control.value !== preferred.value)) return {};
-  return { login: { username: accountValue(controls, preferred), password: preferred.value } };
+  return { login: { username: accountValue(controls, preferred) || submittedHiddenUsername(root, preferred), password: preferred.value } };
+}
+
+function submittedHiddenUsername(root: ParentNode, password: HTMLInputElement): string {
+  // Multi-step sign-in pages retain the selected account in a hidden username
+  // input. Read only explicit username controls from this submitted scope;
+  // never infer an account from arbitrary hidden tokens or page text.
+  const usernames = new Set(formControls(root)
+    .filter((control): control is HTMLInputElement => control instanceof HTMLInputElement &&
+      ["text", "email", "tel", "hidden"].includes(control.type) &&
+      autocompleteTokens(control).includes("username") &&
+      !control.matches(':disabled,[aria-disabled="true"]') &&
+      control.form === password.form)
+    .map((control) => controlValue(control).slice(0, 2_048))
+    .filter(Boolean));
+  return usernames.size === 1 ? usernames.values().next().value! : "";
 }
 
 function captureIdentity(controls: SupportedControl[], pageUrl: string, context: PageContext): Pick<CapturedSaveData, "identity"> | {} {
@@ -235,7 +254,7 @@ function captureControls(root: ParentNode): SupportedControl[] {
   return formControls(root)
     .filter((control) => !(control instanceof HTMLInputElement && ["button", "submit", "reset", "checkbox", "radio", "file", "hidden"].includes(control.type)))
     .filter((control) => !("disabled" in control) || !control.disabled)
-    .filter((control) => !control.matches(':disabled,[aria-disabled="true"]') && !control.closest('[inert],[aria-hidden="true"],[hidden]'));
+    .filter((control) => !control.matches(':disabled,[aria-disabled="true"]') && isSemanticallyVisible(control));
 }
 
 function inferContext(controls: SupportedControl[]): PageContext {
@@ -247,7 +266,9 @@ function accountValue(controls: SupportedControl[], password?: HTMLInputElement)
   const accounts = controls.filter((control) => {
     if (control instanceof HTMLInputElement && control.type === "password") return false;
     const tokens = autocompleteTokens(control);
-    return tokens.includes("username") || tokens.includes("email") || /user(name)?|e-?mail|account|login|phone|mobile|用户名|账号|邮箱|手机/i.test(metadata(control));
+    return tokens.includes("username") || tokens.includes("email") ||
+      control instanceof HTMLInputElement && ["email", "tel"].includes(control.type) ||
+      /user(name)?|e-?mail|account|login|phone|mobile|用户名|账号|邮箱|手机/i.test(metadata(control));
   });
   // A page can hold several sign-in forms. Prefer the filled account that
   // belongs to the submitted password's form, then any filled account.
