@@ -852,7 +852,7 @@ function isVisible(control: SupportedControl) {
   return memoized((pass) => pass.visibility, control, () => isSemanticallyVisible(control) && control.getClientRects().length > 0);
 }
 
-function isSemanticallyVisible(control: HTMLElement) {
+export function isSemanticallyVisible(control: HTMLElement) {
   return memoized((pass) => pass.semanticVisibility, control as SupportedControl, () => computeSemanticVisibility(control));
 }
 

@@ -8,7 +8,7 @@ import { fillGeneratedLogin, fillGeneratedPassword } from "@/lib/generated-login
 import { generatePassword } from "@/lib/generated-credentials";
 import { AutofillAvailabilityResponseSchema, AutofillCandidatesResponseSchema, SaveCaptureDecisionResponseSchema, SaveCapturePendingResponseSchema, SaveCaptureQueuedResponseSchema, type AutofillCandidate, type InlineAutofillCandidate } from "@/lib/protocol";
 import { loadPasswordGeneratorOptions, loadUsernameGeneratorOptions } from "@/lib/generator-preferences";
-import { captureSubmittedData, capturedDataSignature, hasCapturedData, submittedDataContext, type CapturedSaveData } from "@/lib/save-capture";
+import { captureSubmittedData, capturedDataSignature, hasCapturedData, submittedAccountValue, submittedDataContext, type CapturedSaveData } from "@/lib/save-capture";
 import { SaveCapturePrompt } from "@/lib/save-capture-prompt";
 import { createUuid } from "@/lib/uuid";
 import type { AutofillTarget } from "@/lib/protocol";
@@ -654,7 +654,7 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     }
 
     const captureHasData = hasCapturedData(data);
-    const submittedUsername = data.login?.username || accountValue(root);
+    const submittedUsername = data.login?.username || submittedAccountValue(root);
     if (!captureHasData && submittedUsername && (pageContext === "login" || pageContext === "signup")) {
       void sendMessage({ kind: "vaultmesh.account-stage", pageUrl, username: submittedUsername });
     }
@@ -759,7 +759,7 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     handledEvents.add(event);
     if (event.isTrusted && isOtpRequestAction(button)) void sendMessage({ kind: "vaultmesh.otp-watch-requested" }).catch(() => undefined);
     if (!isSaveAction(button)) return;
-    const root = submissionRoot(button);
+    const root = withFieldDiscoveryCache(() => submissionRoot(button));
     if (!root) return;
     if (root instanceof HTMLFormElement && !root.checkValidity() || root.querySelector('[aria-invalid="true"]')) return;
     // Read while the submitting controls still exist: SPA click handlers can
@@ -984,8 +984,14 @@ function submissionRoot(button: HTMLElement): ParentNode | null {
   const explicit = button.closest("form,[role='form']");
   if (explicit) return explicit;
   for (let root: ParentNode | null = button.parentNode; root && root !== button.ownerDocument.body && root !== button.ownerDocument; root = root.parentNode) {
-    const controls = formControls(root);
-    if (controls.length) return semanticCluster(controls[0]!).root;
+    // Hidden protocol/account inputs can precede the interactive step. They
+    // have no semantic cluster and must not become the submission root.
+    const clusters = new Set(formControls(root).flatMap((control) => {
+      const cluster = semanticCluster(control);
+      return cluster.controls.includes(control) ? [cluster.root] : [];
+    }));
+    if (clusters.size > 1) return null;
+    if (clusters.size === 1) return clusters.values().next().value!;
   }
   return null;
 }
@@ -999,15 +1005,6 @@ function capturePromptDetails(captureId: string, pageUrl: string, data: Captured
 
 function isResponseStatus(response: unknown, status: string): boolean {
   return Boolean(response && typeof response === "object" && "status" in response && response.status === status);
-}
-
-function accountValue(root: ParentNode): string {
-  const controls = formControls(root).filter((control): control is HTMLInputElement => control instanceof HTMLInputElement && control.type !== "password");
-  const explicit = controls.find((control) => {
-    const metadata = `${control.autocomplete} ${control.name} ${control.id} ${control.placeholder}`;
-    return /username|email|account|login|phone|mobile|用户名|账号|邮箱|手机/i.test(metadata);
-  });
-  return explicit?.value ?? "";
 }
 
 function isSaveAction(button: HTMLElement) {
