@@ -99,4 +99,33 @@ describe('browser RPC command authorization', () => {
       expect(NativeLoginPlanSchema.safeParse(input).success).toBe(false);
     }
   });
+
+  it('allows passkeys.probe, passkeys.create, and passkeys.get while locked because the broker handles one-shot unlock internally', () => {
+    expect(BROWSER_RPC_POLICIES['passkeys.probe']).toEqual({ capability: 'metadata', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false });
+    expect(BROWSER_RPC_POLICIES['passkeys.create']).toEqual({ capability: 'mutation', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false });
+    expect(BROWSER_RPC_POLICIES['passkeys.get']).toEqual({ capability: 'page-disclosure', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false });
+    for (const op of ['passkeys.probe', 'passkeys.create', 'passkeys.get'] as const) {
+      expect(authorizeBrowserRpc(request(op), false).authorized).toBe(true);
+      expect(authorizeBrowserRpc(request(op), true).authorized).toBe(true);
+    }
+  });
+
+  it('requires a user gesture for browser.unlock.request while allowing locked invocation', () => {
+    expect(BROWSER_RPC_POLICIES['browser.unlock.request']).toEqual({
+      capability: 'system-dialog',
+      requiresUnlock: false,
+      requiresGesture: true,
+      requiresConfirmation: false,
+    });
+    expect(authorizeBrowserRpc(request('browser.unlock.request'), false)).toMatchObject({
+      authorized: false,
+      code: 'invalid-request',
+    });
+    expect(
+      authorizeBrowserRpc(request('browser.unlock.request', { userGestureId: crypto.randomUUID() }), false).authorized,
+    ).toBe(true);
+    expect(
+      authorizeBrowserRpc(request('browser.unlock.request', { userGestureId: crypto.randomUUID() }), true).authorized,
+    ).toBe(true);
+  });
 });

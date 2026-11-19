@@ -3,7 +3,7 @@ import { useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { generatePassword, generateRandomLogin, type GeneratedLogin, type PasswordGeneratorOptions, type UsernameGeneratorOptions } from "@/lib/generated-credentials";
 import { DEFAULT_PASSWORD_GENERATOR_OPTIONS, DEFAULT_USERNAME_GENERATOR_OPTIONS } from "@/lib/generator-preferences";
-import type { InlineAutofillCandidate } from "@/lib/protocol";
+import type { AutofillCandidate, InlineAutofillCandidate } from "@/lib/protocol";
 
 type CandidateGroup = {
   key: string;
@@ -19,11 +19,15 @@ export function InlineAutofillView({
   generatedMode,
   generatedEmailRequired = false,
   statusMessage = null,
+  locked = false,
+  canOpenPopup = false,
   passwordGeneratorOptions = DEFAULT_PASSWORD_GENERATOR_OPTIONS,
   usernameGeneratorOptions = DEFAULT_USERNAME_GENERATOR_OPTIONS,
   onGeneratedPasswordSelect,
   onGeneratedSelect,
   onSelect,
+  onUnlockRequest,
+  onOpenPopup,
 }: {
   candidates: InlineAutofillCandidate[];
   currentHost: string;
@@ -32,11 +36,15 @@ export function InlineAutofillView({
   generatedMode: "none" | "login" | "password";
   generatedEmailRequired?: boolean;
   statusMessage?: string | null;
+  locked?: boolean;
+  canOpenPopup?: boolean;
   passwordGeneratorOptions?: PasswordGeneratorOptions;
   usernameGeneratorOptions?: UsernameGeneratorOptions;
   onGeneratedPasswordSelect: (password: string) => void;
   onGeneratedSelect: (login: GeneratedLogin) => void;
   onSelect: (candidate: InlineAutofillCandidate) => void;
+  onUnlockRequest?: () => void;
+  onOpenPopup?: () => void;
 }) {
   const groups = candidateGroups(candidates, currentHost, currentHostname);
   return (
@@ -55,14 +63,27 @@ export function InlineAutofillView({
               onSelect={onGeneratedSelect}
             />
           : null}
-        {groups.length === 0 && generatedMode === "none" && !statusMessage ? <div className="empty">当前站点没有可用项目</div> : null}
+        {groups.length === 0 && generatedMode === "none" && !statusMessage
+          ? (locked
+              ? <div className="locked-state">VaultMesh 已锁定</div>
+              : <div className="empty">当前站点没有可用项目</div>)
+          : null}
         <div className="groups">
           {groups.map((group) => (
             <section className="group" role="group" aria-label={group.label ?? undefined} key={group.key}>
               {group.label ? <div className="group-label">{group.label}</div> : null}
               {group.candidates.map((candidate) => (
-                <button className="option" type="button" role="option" key={`${candidate.kind}:${candidate.id}`} onPointerDown={(event) => event.preventDefault()} onClick={() => onSelect(candidate)}>
-                  <span className="mark" aria-hidden="true">{candidate.kind === "email-otp" ? "码" : "V"}</span>
+                <button
+                  className="option"
+                  type="button"
+                  role="option"
+                  key={candidate.kind === "passkey" ? `${candidate.kind}:${candidate.id}:${candidate.credentialId}` : `${candidate.kind}:${candidate.id}`}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => onSelect(candidate)}
+                >
+                  <span className="mark" aria-hidden="true">
+                    {candidate.kind === "email-otp" ? "码" : candidate.kind === "passkey" ? "钥" : candidate.kind === "passkey-native" ? "系" : "V"}
+                  </span>
                   <span className="text">
                     <span className="name">{candidate.title}</span>
                     <span className="subtitle">{candidate.subtitle}</span>
@@ -73,6 +94,33 @@ export function InlineAutofillView({
           ))}
         </div>
       </ScrollArea>
+      {!statusMessage ? (
+        <div className="footer">
+          {locked ? (
+            <button
+              className="footer-action footer-action-primary"
+              type="button"
+              data-vaultmesh-footer-action="unlock"
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={() => onUnlockRequest?.()}
+            >
+              解锁 VaultMesh
+            </button>
+          ) : canOpenPopup ? (
+            <button
+              className="footer-action"
+              type="button"
+              data-vaultmesh-footer-action="open-popup"
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={() => onOpenPopup?.()}
+            >
+              打开 VaultMesh
+            </button>
+          ) : (
+            <div className="footer-hint">点击工具栏 VaultMesh 图标可搜索或添加项目</div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -127,14 +175,22 @@ function GeneratedLoginOption({
 }
 
 export function candidateGroups(candidates: InlineAutofillCandidate[], currentHost: string, currentHostname: string): CandidateGroup[] {
+  const passkeys = candidates.filter(
+    (candidate): candidate is Extract<InlineAutofillCandidate, { kind: "passkey" | "passkey-native" }> =>
+      candidate.kind === "passkey" || candidate.kind === "passkey-native",
+  );
   const emailOtp = candidates.filter((candidate) => candidate.kind === "email-otp");
   // Paired-phone sources are not vault matches for this site; keep them apart.
   const device = candidates.filter((candidate) => candidate.kind === "device-assist");
-  const vault = candidates.filter((candidate) => candidate.kind !== "email-otp" && candidate.kind !== "device-assist");
+  const vault = candidates.filter(
+    (candidate): candidate is AutofillCandidate =>
+      candidate.kind !== "passkey" && candidate.kind !== "passkey-native" && candidate.kind !== "email-otp" && candidate.kind !== "device-assist",
+  );
   const deviceGroup: CandidateGroup[] = device.length > 0 ? [{ key: "device-assist", label: "已配对手机", candidates: device }] : [];
-  const groups: CandidateGroup[] = emailOtp.length > 0
-    ? [{ key: "email-otp", label: "邮箱验证码", candidates: emailOtp }]
-    : [];
+  const groups: CandidateGroup[] = [
+    ...(passkeys.length > 0 ? [{ key: "passkey", label: "通行密钥", candidates: passkeys }] : []),
+    ...(emailOtp.length > 0 ? [{ key: "email-otp", label: "邮箱验证码", candidates: emailOtp }] : []),
+  ];
 
   if (!vault.some((candidate) => candidate.kind === "login")) {
     const available: CandidateGroup[] = vault.length > 0 ? [{ key: "available", label: null, candidates: vault }] : [];

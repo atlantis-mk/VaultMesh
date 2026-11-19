@@ -1,4 +1,9 @@
 export type FrameLike = { frameId: number; parentFrameId: number; url: string };
+export type FrameAncestry = {
+  origin: string;
+  topOrigin: string;
+  sameOriginWithAncestors: boolean;
+};
 
 export function sameOriginFrameIds(frames: FrameLike[], topOrigin: string) {
   const byId = new Map(frames.map((frame) => [frame.frameId, frame]));
@@ -22,9 +27,11 @@ export function sameOriginFrameIds(frames: FrameLike[], topOrigin: string) {
   return frames.filter((frame) => originFor(frame) === topOrigin).map((frame) => frame.frameId);
 }
 
-/** True only when the frame and every ancestor resolve to exactly `origin`.
- * Unknown ancestors, opaque origins and cycles all fail closed. */
-export function sameOriginWithAncestors(frames: FrameLike[], frameId: number, origin: string): boolean {
+/** Validates an acyclic frame chain of canonical HTTP(S) origins from `frameId`
+ * up to the root frame. Unknown frames, opaque/non-HTTP(S) origins and cycles
+ * all fail closed with `null`. */
+export function resolveFrameAncestry(frames: FrameLike[], frameId: number, senderOrigin: string): FrameAncestry | null {
+  if (httpOrigin(senderOrigin) !== senderOrigin) return null;
   const byId = new Map(frames.map((frame) => [frame.frameId, frame]));
   const resolve = (frame: FrameLike, seen: Set<number>): string | null => {
     const direct = httpOrigin(frame.url);
@@ -36,13 +43,27 @@ export function sameOriginWithAncestors(frames: FrameLike[], frameId: number, or
   };
   let current = byId.get(frameId);
   const visited = new Set<number>();
+  let allSameOrigin = true;
   while (current) {
-    if (visited.has(current.frameId) || resolve(current, new Set()) !== origin) return false;
+    if (visited.has(current.frameId)) return null;
     visited.add(current.frameId);
-    if (current.parentFrameId < 0) return true;
+    const resolved = resolve(current, new Set());
+    if (!resolved) return null;
+    if (current.frameId === frameId && resolved !== senderOrigin) return null;
+    if (resolved !== senderOrigin) allSameOrigin = false;
+    if (current.parentFrameId < 0) {
+      return { origin: senderOrigin, topOrigin: resolved, sameOriginWithAncestors: allSameOrigin };
+    }
     current = byId.get(current.parentFrameId);
   }
-  return false;
+  return null;
+}
+
+/** True only when the frame and every ancestor resolve to exactly `origin`.
+ * Unknown ancestors, opaque origins and cycles all fail closed. */
+export function sameOriginWithAncestors(frames: FrameLike[], frameId: number, origin: string): boolean {
+  const ancestry = resolveFrameAncestry(frames, frameId, origin);
+  return ancestry !== null && ancestry.sameOriginWithAncestors;
 }
 
 function httpOrigin(url: string) {

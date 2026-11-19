@@ -76,7 +76,7 @@ export class DesktopRpcError extends Error {
 export type Operation =
   | "vault.status" | "vault.workspace" | "vault.create" | "vault.unlock" | "vault.unlock-history" | "vault.lock" | "vault.backup" | "vault.restore" | "vault.change-password"
   | "biometric.authentication.start" | "biometric.authentication.poll" | "biometric.authentication.cancel" | "biometric.status" | "biometric.enable" | "biometric.disable" | "biometric.unlock" | "pin.status" | "pin.enable" | "pin.disable" | "pin.unlock" | "security.settings.get" | "security.settings.update"
-  | "events.poll" | "browser.pairing.status" | "browser.pairing.revoke" | "confirmation.request"
+  | "events.poll" | "browser.pairing.status" | "browser.pairing.revoke" | "browser.unlock.request" | "confirmation.request"
   | "browser.autofill.candidates" | "browser.autofill.profile" | "browser.autofill.execute" | "browser.card.capture-status" | "browser.login.password-changed" | "browser.fill.record" | "browser.fill.history" | "browser.fill.request"
   | "device.assist.capabilities" | "device.assist.start" | "device.assist.poll" | "device.assist.select" | "device.assist.finish" | "device.assist.cancel"
   | "email.otp.watch" | "email.otp.poll" | "email.otp.candidates" | "email.otp.fill"
@@ -99,7 +99,27 @@ export async function desktopRpc(operation: Operation, input: Record<string, unk
  * message back into the same service worker. */
 export async function backgroundDesktopRpc(operation: Operation, input: Record<string, unknown> = {}, userGestureId?: string): Promise<unknown> {
   const request = createRequest(operation, input, userGestureId);
-  return parseResponse(request, persistentNativeConnection.request(request));
+  const result = await parseResponse(request, persistentNativeConnection.request(request));
+  if (PAGE_TRIGGERED_UNLOCK_OPERATIONS.has(operation)) notifyPossibleUnlockTransition(operation);
+  return result;
+}
+
+/** Operations a web page can trigger that may move a locked vault into the
+ * persistent browser session (desktop unlock window). The background worker
+ * observes them to warm the popup workspace cache without blocking the RPC. */
+const PAGE_TRIGGERED_UNLOCK_OPERATIONS = new Set<Operation>(["browser.autofill.execute", "passkeys.create", "passkeys.get"]);
+let possibleUnlockObserver: ((operation: Operation) => void) | null = null;
+
+export function setPossibleUnlockObserver(observer: ((operation: Operation) => void) | null): void {
+  possibleUnlockObserver = observer;
+}
+
+function notifyPossibleUnlockTransition(operation: Operation): void {
+  try {
+    possibleUnlockObserver?.(operation);
+  } catch {
+    // Warm-up is best effort and must never fail the page-triggered operation.
+  }
 }
 
 export type DesktopRpcRuntimeMessage = { kind: "vaultmesh.desktop-rpc"; request: NativeRpcRequest };

@@ -2,6 +2,7 @@ import { DeviceAssistPanel } from "./device-assist-panel";
 import { passkeyPromptText } from "@/lib/passkey-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PopupUnlockPage } from "./popup-unlock-page";
+import { PopupUnlockFactory } from "@/lib/popup-unlock-adapter";
 import {
   BracesIcon,
   CheckIcon,
@@ -93,6 +94,9 @@ export function PopupApp({ initialWorkspace = null }: { initialWorkspace?: Initi
   const [items, setItems] = useState<VaultItem[]>(() => initialWorkspace ? toVaultItems(initialWorkspace.snapshot) : []);
   const [desktopState, setDesktopState] = useState<DesktopState>(initialWorkspace ? "ready" : "unavailable");
   const [hasVault, setHasVault] = useState(initialWorkspace?.hasVault ?? false);
+  // In-memory only: set when the user clicks "立即锁定" in settings so the locked
+  // popup does not immediately re-open the desktop unlock window.
+  const [suppressAutoUnlock, setSuppressAutoUnlock] = useState(false);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState<AddItemKind | null>(null);
   const [fillConfirmation, setFillConfirmation] = useState<VaultItem | null>(null);
@@ -347,7 +351,15 @@ export function PopupApp({ initialWorkspace = null }: { initialWorkspace?: Initi
   useEffect(() => { if (page !== pagination.page) setPage(pagination.page); }, [page, pagination.page]);
 
   if (desktopState === "locked" && activeTab === "vault") {
-    return <PopupUnlockPage hasVault={hasVault} onUnlocked={() => refreshWorkspace({ assumeUnlocked: true })} notice={(busy) => <PasskeyUnlockNotice disabled={busy} />} />;
+    return (
+      <PopupUnlockPage
+        adapter={PopupUnlockFactory.resolve({ hasVault, suppressAutoUnlock })}
+        onUnlocked={() => refreshWorkspace({ assumeUnlocked: true })}
+        onManualUnlockRequest={() => setSuppressAutoUnlock(false)}
+        onVaultDetected={setHasVault}
+        notice={(busy) => <PasskeyUnlockNotice disabled={busy} />}
+      />
+    );
   }
 
   function toggleSelection(id: string) {
@@ -742,7 +754,7 @@ export function PopupApp({ initialWorkspace = null }: { initialWorkspace?: Initi
             </div>
           </ScrollArea>}
           </>
-        ) : activeTab === "generator" ? <GeneratorPanel onNotice={setNotice} /> : <SettingsPanel fillHistory={fillHistory} recoveryTargets={recoveryTargets(items)} onRecoveryChanged={async () => { await refreshWorkspace(); }} onNotice={setNotice} onLocked={() => { setActiveTab("vault"); void refreshWorkspace(); }} />}
+        ) : activeTab === "generator" ? <GeneratorPanel onNotice={setNotice} /> : <SettingsPanel fillHistory={fillHistory} recoveryTargets={recoveryTargets(items)} onRecoveryChanged={async () => { await refreshWorkspace(); }} onNotice={setNotice} onLocked={() => { setSuppressAutoUnlock(true); setActiveTab("vault"); void refreshWorkspace(); }} />}
       </section>
 
       <ToastMessage id="popup-notice" message={notice?.message ?? null} variant={notice?.variant ?? "default"} />
@@ -823,17 +835,33 @@ function saveFailureReason(code?: string, message?: string): string {
   return code ? `桌面端返回错误 ${code}，请重试。` : "请重试。";
 }
 
-type PasskeyUnlockPrompt = { token: string; operation: "create" | "get"; origin: string | null; stage: "choose" | "unlock" };
+type PasskeyUnlockPrompt = {
+  token: string;
+  operation: "create" | "get";
+  origin: string | null;
+  topOrigin?: string | null;
+  sameOriginWithAncestors?: boolean;
+  stage: "choose" | "unlock" | "no-match";
+};
 
 export function parsePasskeyUnlockPrompt(value: unknown): PasskeyUnlockPrompt | null {
   if (!value || typeof value !== "object") return null;
-  const prompt = value as { token?: unknown; operation?: unknown; origin?: unknown; stage?: unknown };
+  const prompt = value as {
+    token?: unknown;
+    operation?: unknown;
+    origin?: unknown;
+    topOrigin?: unknown;
+    sameOriginWithAncestors?: unknown;
+    stage?: unknown;
+  };
   if (typeof prompt.token !== "string" || (prompt.operation !== "create" && prompt.operation !== "get")) return null;
   return {
     token: prompt.token,
     operation: prompt.operation,
     origin: typeof prompt.origin === "string" ? prompt.origin : null,
-    stage: prompt.stage === "unlock" ? "unlock" : "choose",
+    topOrigin: typeof prompt.topOrigin === "string" ? prompt.topOrigin : null,
+    sameOriginWithAncestors: typeof prompt.sameOriginWithAncestors === "boolean" ? prompt.sameOriginWithAncestors : undefined,
+    stage: prompt.stage === "unlock" || prompt.stage === "no-match" ? prompt.stage : "choose",
   };
 }
 
@@ -855,17 +883,26 @@ function PasskeyUnlockNotice({ disabled = false }: { disabled?: boolean }) {
 
   async function choose(choice: "vaultmesh" | "native" | "cancel") {
     if (!prompt || disabled) return;
-    await browser.runtime.sendMessage({ kind: "vaultmesh.passkey-choice", token: prompt.token, choice, remember: remember && prompt.stage === "choose" }).catch(() => undefined);
+    const canRemember = prompt.stage === "no-match"
+      || (prompt.stage === "choose" && !(prompt.operation === "create" && prompt.sameOriginWithAncestors === false));
+    await browser.runtime.sendMessage({
+      kind: "vaultmesh.passkey-choice",
+      token: prompt.token,
+      choice,
+      remember: remember && canRemember && choice !== "cancel",
+    }).catch(() => undefined);
     setPrompt(null);
     setRemember(false);
     if (choice !== "vaultmesh") window.close();
   }
 
   if (!prompt) return null;
+  const canRemember = prompt.stage === "no-match"
+    || (prompt.stage === "choose" && !(prompt.operation === "create" && prompt.sameOriginWithAncestors === false));
   return (
     <div className="flex flex-col gap-2 rounded-md bg-muted px-3 py-2 text-sm" role="status">
       <p>{passkeyPromptText(prompt)}</p>
-      {prompt.stage === "choose" ? (
+      {canRemember ? (
         <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />记住此网站的选择</label>
       ) : null}
       <div className="flex flex-wrap gap-2">

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { ArrowRightIcon, FolderOpenIcon, ShieldCheckIcon } from 'lucide-react';
 
@@ -20,6 +20,10 @@ export function CreateVaultPage() {
   const clearError = useVaultStore((state) => state.clearError);
   const navigate = useNavigate();
 
+  useEffect(() => {
+    void window.vaultMesh?.desktop?.setCompactWindowMode?.(false).catch(() => {});
+  }, []);
+
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     if (password !== confirmation) {
@@ -29,6 +33,7 @@ export function CreateVaultPage() {
     setLocalError(null);
     try {
       if (await createVault(password)) {
+        void window.vaultMesh?.desktop?.setCompactWindowMode?.(false).catch(() => {});
         void navigate({ to: '/vault', replace: true });
       }
     } finally {

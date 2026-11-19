@@ -23,17 +23,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::Sha256;
 use uuid::Uuid;
+use vaultmesh_core::{PasskeyError, describe_passkey_request};
 use vaultmesh_ffi::{
     DesktopRuntime, DesktopRuntimeError, VAULTMESH_STATUS_AUTH_FAILED,
-    VAULTMESH_STATUS_INVALID_ARGUMENT, VAULTMESH_STATUS_LOCKED,
+    VAULTMESH_STATUS_INVALID_ARGUMENT, VAULTMESH_STATUS_LOCKED, VAULTMESH_STATUS_NOT_FOUND,
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{
-    browser_fill::BrowserFillService,
-    browser_preauth_preview::PasskeyPreviewMatch,
-    passkey_service::PasskeyService,
-};
+use crate::{browser_fill::BrowserFillService, passkey_service::PasskeyService};
 
 const RPC_VERSION: u32 = 2;
 const MAX_LINE_BYTES: usize = 384 * 1024;
@@ -68,6 +65,7 @@ pub const TAURI_BROWSER_SLICE_OPERATIONS: &[&str] = &[
     "events.poll",
     "browser.pairing.status",
     "browser.pairing.revoke",
+    "browser.unlock.request",
     "browser.autofill.candidates",
     "browser.autofill.profile",
     "browser.autofill.execute",
@@ -187,8 +185,11 @@ fn requires_unlock(operation: &str) -> bool {
             | "events.poll"
             | "browser.pairing.status"
             | "browser.pairing.revoke"
+            | "browser.unlock.request"
             | "browser.autofill.candidates"
+            | "passkeys.create"
             | "passkeys.probe"
+            | "passkeys.get"
             | "confirmation.request"
     )
 }
@@ -277,47 +278,149 @@ fn requires_confirmation(operation: &str) -> bool {
 
 type HmacSha256 = Hmac<Sha256>;
 
+#[derive(Debug)]
 pub struct BrowserPlatformError {
     pub code: &'static str,
     pub message: String,
 }
 
-pub struct OneShotUnlockedRuntime {
-    pub runtime: DesktopRuntime,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowserUnlockSource {
+    Popup,
+    Autofill,
+    Passkey,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowserUnlockFactor {
+    MasterPassword,
+    Pin,
+    Biometric,
+}
+
+#[derive(Clone)]
+pub struct BrowserUnlockResolution {
+    pub factor: BrowserUnlockFactor,
+    pub vault_path: PathBuf,
+    pub vault_key: Zeroizing<Vec<u8>>,
     pub master_password: Option<Zeroizing<String>>,
 }
 
-pub struct OneShotUnlockRequest {
+pub struct BrowserSessionUnlockRequest {
     pub vault_path: PathBuf,
-    pub origin: String,
-    pub item_title: String,
-    pub item_kind: String,
+    pub source: BrowserUnlockSource,
+    pub origin: Option<String>,
+    pub item_title: Option<String>,
+    pub item_kind: Option<String>,
     pub master_password_reprompt: bool,
 }
 
-pub struct OneShotUnlockWaiter {
-    wait_fn: Box<dyn FnOnce() -> Result<OneShotUnlockedRuntime, BrowserPlatformError> + Send>,
+pub struct BrowserSessionUnlockWaiter {
+    wait_fn: Box<dyn FnOnce() -> Result<BrowserUnlockResolution, BrowserPlatformError> + Send>,
 }
 
-impl OneShotUnlockWaiter {
+impl BrowserSessionUnlockWaiter {
     pub fn new<F>(wait_fn: F) -> Self
     where
-        F: FnOnce() -> Result<OneShotUnlockedRuntime, BrowserPlatformError> + Send + 'static,
+        F: FnOnce() -> Result<BrowserUnlockResolution, BrowserPlatformError> + Send + 'static,
     {
         Self {
             wait_fn: Box::new(wait_fn),
         }
     }
 
-    pub fn wait(self) -> Result<OneShotUnlockedRuntime, BrowserPlatformError> {
+    pub fn wait(self) -> Result<BrowserUnlockResolution, BrowserPlatformError> {
         (self.wait_fn)()
     }
 }
 
+pub struct BrowserRepromptRequest {
+    pub vault_path: PathBuf,
+    pub origin: String,
+    pub item_title: String,
+    pub item_kind: String,
+}
+
+pub struct BrowserRepromptWaiter {
+    wait_fn: Box<dyn FnOnce() -> Result<Zeroizing<String>, BrowserPlatformError> + Send>,
+}
+
+impl BrowserRepromptWaiter {
+    pub fn new<F>(wait_fn: F) -> Self
+    where
+        F: FnOnce() -> Result<Zeroizing<String>, BrowserPlatformError> + Send + 'static,
+    {
+        Self {
+            wait_fn: Box::new(wait_fn),
+        }
+    }
+
+    pub fn wait(self) -> Result<Zeroizing<String>, BrowserPlatformError> {
+        (self.wait_fn)()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PasskeyOpKind {
+    Create,
+    Get,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PasskeyConfirmationRequest {
+    pub kind: PasskeyOpKind,
+    pub rp_id: String,
+    pub origin: String,
+    pub top_origin: Option<String>,
+    pub account: Option<String>,
+}
+
 pub struct DeferredBrokerExecution {
     pub(crate) envelope_request_id: String,
-    input: Map<String, Value>,
-    waiter: OneShotUnlockWaiter,
+    work: DeferredBrokerWork,
+}
+
+enum DeferredBrokerWork {
+    BrowserSessionUnlock {
+        waiter: BrowserSessionUnlockWaiter,
+    },
+    AutofillSessionUnlock {
+        input: Map<String, Value>,
+        waiter: BrowserSessionUnlockWaiter,
+    },
+    AutofillReprompt {
+        input: Map<String, Value>,
+        waiter: BrowserRepromptWaiter,
+    },
+    Passkey(DeferredPasskeyWork),
+}
+
+struct DeferredPasskeyWork {
+    kind: PasskeyOpKind,
+    request_json: String,
+    rp_id: String,
+    origin: String,
+    top_origin: Option<String>,
+    account: Option<String>,
+    login_id: Option<Uuid>,
+    requested_item_id: Option<Uuid>,
+    requested_credential_id: Option<String>,
+    selected_item_id: Option<Uuid>,
+    selected_credential_id: Option<String>,
+    expires_at_millis: i64,
+    unlock_waiter: Option<BrowserSessionUnlockWaiter>,
+    platform: Arc<dyn BrowserBrokerPlatform>,
+}
+
+struct PreparedPasskeyExecution {
+    kind: PasskeyOpKind,
+    request_json: String,
+    rp_id: String,
+    login_id: Option<Uuid>,
+    selected_item_id: Option<Uuid>,
+    selected_credential_id: Option<String>,
+    expires_at_millis: i64,
 }
 
 pub enum BrokerLineOutcome {
@@ -327,24 +430,126 @@ pub enum BrokerLineOutcome {
 
 impl DeferredBrokerExecution {
     pub fn wait_and_finish(self, broker: &Arc<Mutex<BrowserBrokerCore>>) -> Value {
-        let unlocked = self.waiter.wait();
-        let Ok(mut guard) = broker.lock() else {
-            if let Ok(mut session) = unlocked {
-                session.runtime.lock();
+        let envelope_request_id = self.envelope_request_id;
+        match self.work {
+            DeferredBrokerWork::BrowserSessionUnlock { waiter } => {
+                let resolution = waiter.wait();
+                let Ok(mut guard) = broker.lock() else {
+                    return host_status("desktop-unavailable", Some(&envelope_request_id));
+                };
+                guard.finish_browser_session_unlock(
+                    &envelope_request_id,
+                    resolution,
+                    Utc::now().timestamp_millis(),
+                )
             }
-            return host_status("desktop-unavailable", Some(&self.envelope_request_id));
-        };
-        guard.finish_one_shot_autofill(
-            &self.envelope_request_id,
-            &self.input,
-            unlocked,
-            Utc::now().timestamp_millis(),
-        )
+            DeferredBrokerWork::AutofillSessionUnlock { input, waiter } => {
+                let resolution = waiter.wait();
+                let Ok(mut guard) = broker.lock() else {
+                    return host_status("desktop-unavailable", Some(&envelope_request_id));
+                };
+                guard.finish_autofill_session_unlock(
+                    &envelope_request_id,
+                    &input,
+                    resolution,
+                    Utc::now().timestamp_millis(),
+                )
+            }
+            DeferredBrokerWork::AutofillReprompt { input, waiter } => {
+                let password = waiter.wait();
+                let Ok(mut guard) = broker.lock() else {
+                    return host_status("desktop-unavailable", Some(&envelope_request_id));
+                };
+                guard.finish_autofill_reprompt(
+                    &envelope_request_id,
+                    &input,
+                    password,
+                    Utc::now().timestamp_millis(),
+                )
+            }
+            DeferredBrokerWork::Passkey(mut work) => {
+                if let Some(waiter) = work.unlock_waiter.take() {
+                    let resolution = waiter.wait();
+                    let Ok(mut guard) = broker.lock() else {
+                        return host_status("desktop-unavailable", Some(&envelope_request_id));
+                    };
+                    if let Err(response) = guard.commit_browser_passkey_unlock(
+                        &envelope_request_id,
+                        &mut work,
+                        resolution,
+                        Utc::now().timestamp_millis(),
+                    ) {
+                        return response;
+                    }
+                }
+                let prepared = match confirm_passkey_outside_lock(
+                    &envelope_request_id,
+                    work,
+                    || Utc::now().timestamp_millis(),
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(response) => return response,
+                };
+                let Ok(mut guard) = broker.lock() else {
+                    return host_status("desktop-unavailable", Some(&envelope_request_id));
+                };
+                guard.finish_passkey(
+                    &envelope_request_id,
+                    prepared,
+                    Utc::now().timestamp_millis(),
+                )
+            }
+        }
     }
 
     fn finish_sync_at(self, broker: &mut BrowserBrokerCore, now_millis: i64) -> Value {
-        let unlocked = self.waiter.wait();
-        broker.finish_one_shot_autofill(&self.envelope_request_id, &self.input, unlocked, now_millis)
+        let envelope_request_id = self.envelope_request_id;
+        match self.work {
+            DeferredBrokerWork::BrowserSessionUnlock { waiter } => {
+                let resolution = waiter.wait();
+                broker.finish_browser_session_unlock(&envelope_request_id, resolution, now_millis)
+            }
+            DeferredBrokerWork::AutofillSessionUnlock { input, waiter } => {
+                let resolution = waiter.wait();
+                broker.finish_autofill_session_unlock(
+                    &envelope_request_id,
+                    &input,
+                    resolution,
+                    now_millis,
+                )
+            }
+            DeferredBrokerWork::AutofillReprompt { input, waiter } => {
+                let password = waiter.wait();
+                broker.finish_autofill_reprompt(
+                    &envelope_request_id,
+                    &input,
+                    password,
+                    now_millis,
+                )
+            }
+            DeferredBrokerWork::Passkey(mut work) => {
+                if let Some(waiter) = work.unlock_waiter.take() {
+                    let resolution = waiter.wait();
+                    if let Err(response) = broker.commit_browser_passkey_unlock(
+                        &envelope_request_id,
+                        &mut work,
+                        resolution,
+                        now_millis,
+                    ) {
+                        return response;
+                    }
+                }
+                let prepared = match confirm_passkey_outside_lock(
+                    &envelope_request_id,
+                    work,
+                    || now_millis,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(response) => return response,
+                };
+                broker.finish_passkey(&envelope_request_id, prepared, now_millis)
+            }
+        }
     }
 }
 
@@ -361,6 +566,10 @@ pub trait BrowserBrokerPlatform: Send + Sync {
         Ok(())
     }
 
+    fn after_quick_unlock(&self, _runtime: &mut DesktopRuntime) -> Result<(), BrowserPlatformError> {
+        Ok(())
+    }
+
     fn after_runtime_mutation(&self, _operation: &str) -> Result<(), BrowserPlatformError> {
         Ok(())
     }
@@ -374,10 +583,24 @@ pub trait BrowserBrokerPlatform: Send + Sync {
         Ok(false)
     }
 
-    fn begin_one_shot_unlock_for_fill(
+    fn confirm_passkey(
         &self,
-        _request: OneShotUnlockRequest,
-    ) -> Option<OneShotUnlockWaiter> {
+        _request: &PasskeyConfirmationRequest,
+    ) -> Result<bool, BrowserPlatformError> {
+        Ok(false)
+    }
+
+    fn begin_browser_session_unlock(
+        &self,
+        _request: BrowserSessionUnlockRequest,
+    ) -> Option<BrowserSessionUnlockWaiter> {
+        None
+    }
+
+    fn begin_master_password_reprompt(
+        &self,
+        _request: BrowserRepromptRequest,
+    ) -> Option<BrowserRepromptWaiter> {
         None
     }
 
@@ -758,6 +981,36 @@ impl BrowserBrokerCore {
             ));
         }
 
+        if request.operation == "browser.unlock.request" {
+            if self.runtime.is_unlocked() {
+                return BrokerLineOutcome::Immediate(rpc_success(
+                    envelope_request_id,
+                    json!({ "unlocked": true, "status": self.runtime.status() }),
+                ));
+            }
+            if let Some(waiter) =
+                self.platform
+                    .begin_browser_session_unlock(BrowserSessionUnlockRequest {
+                        vault_path: self.runtime.current_path(),
+                        source: BrowserUnlockSource::Popup,
+                        origin: None,
+                        item_title: None,
+                        item_kind: None,
+                        master_password_reprompt: false,
+                    })
+            {
+                return BrokerLineOutcome::Deferred(DeferredBrokerExecution {
+                    envelope_request_id: envelope_request_id.to_owned(),
+                    work: DeferredBrokerWork::BrowserSessionUnlock { waiter },
+                });
+            }
+            return BrokerLineOutcome::Immediate(rpc_failure(
+                envelope_request_id,
+                "unlock-required",
+                "请先在 VaultMesh 插件中单独解锁。",
+            ));
+        }
+
         if request.operation == "browser.autofill.execute" {
             match self.fill.prepare_one_shot_selection(
                 &mut self.runtime,
@@ -766,19 +1019,47 @@ impl BrowserBrokerCore {
                 now_millis,
             ) {
                 Ok(Some(prepared)) => {
+                    if prepared.requires_session_unlock {
+                        if let Some(waiter) =
+                            self.platform
+                                .begin_browser_session_unlock(BrowserSessionUnlockRequest {
+                                    vault_path: self.runtime.current_path(),
+                                    source: BrowserUnlockSource::Autofill,
+                                    origin: Some(prepared.origin),
+                                    item_title: Some(prepared.item_title),
+                                    item_kind: Some(prepared.item_kind),
+                                    master_password_reprompt: prepared.master_password_reprompt,
+                                })
+                        {
+                            return BrokerLineOutcome::Deferred(DeferredBrokerExecution {
+                                envelope_request_id: envelope_request_id.to_owned(),
+                                work: DeferredBrokerWork::AutofillSessionUnlock {
+                                    input: request.input,
+                                    waiter,
+                                },
+                            });
+                        }
+                        return BrokerLineOutcome::Immediate(rpc_failure(
+                            envelope_request_id,
+                            "unlock-required",
+                            "请先在 VaultMesh 插件中单独解锁。",
+                        ));
+                    }
                     if let Some(waiter) =
-                        self.platform.begin_one_shot_unlock_for_fill(OneShotUnlockRequest {
-                            vault_path: self.runtime.current_path(),
-                            origin: prepared.origin,
-                            item_title: prepared.item_title,
-                            item_kind: prepared.item_kind,
-                            master_password_reprompt: prepared.master_password_reprompt,
-                        })
+                        self.platform
+                            .begin_master_password_reprompt(BrowserRepromptRequest {
+                                vault_path: self.runtime.current_path(),
+                                origin: prepared.origin,
+                                item_title: prepared.item_title,
+                                item_kind: prepared.item_kind,
+                            })
                     {
                         return BrokerLineOutcome::Deferred(DeferredBrokerExecution {
                             envelope_request_id: envelope_request_id.to_owned(),
-                            input: request.input,
-                            waiter,
+                            work: DeferredBrokerWork::AutofillReprompt {
+                                input: request.input,
+                                waiter,
+                            },
                         });
                     }
                     if !self.runtime.is_unlocked() {
@@ -806,6 +1087,15 @@ impl BrowserBrokerCore {
                     ));
                 }
             }
+        }
+
+        if matches!(request.operation.as_str(), "passkeys.create" | "passkeys.get") {
+            return self.prepare_passkey_broker_outcome(
+                envelope_request_id,
+                &request.operation,
+                &request.input,
+                expires_at,
+            );
         }
 
         BrokerLineOutcome::Immediate(self.dispatch_authenticated_rpc(
@@ -993,26 +1283,99 @@ impl BrowserBrokerCore {
                         );
                     }
                 };
-                let result = match self.preauth_preview.passkey_match(
-                    self.runtime.current_path().as_path(),
+                if self.runtime.is_unlocked() {
+                    let candidates = match self.runtime.matching_passkeys(request_json) {
+                        Ok(candidates) => candidates,
+                        Err(error) => {
+                            return passkey_runtime_failure(
+                                envelope_request_id,
+                                error,
+                                &view.rp_id,
+                            );
+                        }
+                    };
+                    let has_login_candidates = self
+                        .runtime
+                        .execute("browser.autofill.candidates", json!({ "url": view.origin }))
+                        .ok()
+                        .and_then(|value| value.as_array().map(|items| !items.is_empty()))
+                        .unwrap_or(false);
+                    let candidate_payloads: Vec<Value> = candidates
+                        .iter()
+                        .map(|candidate| {
+                            json!({
+                                "itemId": candidate.item_id.to_string(),
+                                "credentialId": candidate.credential_id,
+                                "title": candidate.title,
+                                "account": candidate.account,
+                            })
+                        })
+                        .collect();
+                    let result = if let Some(first) = candidates.first() {
+                        json!({
+                            "status": "available",
+                            "rpId": view.rp_id,
+                            "origin": view.origin,
+                            "account": first.account,
+                            "candidates": candidate_payloads,
+                            "hasLoginCandidates": has_login_candidates,
+                        })
+                    } else {
+                        json!({
+                            "status": "unavailable",
+                            "rpId": view.rp_id,
+                            "origin": view.origin,
+                            "candidates": [],
+                            "hasLoginCandidates": has_login_candidates,
+                        })
+                    };
+                    return rpc_success(envelope_request_id, result);
+                }
+
+                let vault_path = self.runtime.current_path();
+                let has_login_candidates = self
+                    .preauth_preview
+                    .has_login_for_origin(vault_path.as_path(), &view.origin);
+                let result = match self.preauth_preview.passkey_matches(
+                    vault_path.as_path(),
                     &view.rp_id,
                     &view.allow_credentials,
                 ) {
-                    PasskeyPreviewMatch::Available(passkey) => json!({
-                        "status": "available",
-                        "rpId": view.rp_id,
-                        "origin": view.origin,
-                        "account": passkey.account,
-                    }),
-                    PasskeyPreviewMatch::Unavailable => json!({
+                    Some(matches) if !matches.is_empty() => {
+                        let first_account = matches[0].account.clone();
+                        let candidate_payloads: Vec<Value> = matches
+                            .into_iter()
+                            .map(|record| {
+                                json!({
+                                    "itemId": record.item_id,
+                                    "credentialId": record.credential_id,
+                                    "title": record.title,
+                                    "account": record.account,
+                                })
+                            })
+                            .collect();
+                        json!({
+                            "status": "available",
+                            "rpId": view.rp_id,
+                            "origin": view.origin,
+                            "account": first_account,
+                            "candidates": candidate_payloads,
+                            "hasLoginCandidates": has_login_candidates,
+                        })
+                    }
+                    Some(_) => json!({
                         "status": "unavailable",
                         "rpId": view.rp_id,
                         "origin": view.origin,
+                        "candidates": [],
+                        "hasLoginCandidates": has_login_candidates,
                     }),
-                    PasskeyPreviewMatch::Unknown => json!({
+                    None => json!({
                         "status": "unknown",
                         "rpId": view.rp_id,
                         "origin": view.origin,
+                        "candidates": [],
+                        "hasLoginCandidates": false,
                     }),
                 };
                 rpc_success(envelope_request_id, result)
@@ -1049,11 +1412,19 @@ impl BrowserBrokerCore {
                 now_millis,
             ) {
                 Some(Ok(result)) => {
-                    if matches!(
-                        operation,
-                        "vault.restore" | "pin.unlock" | "biometric.unlock"
-                    ) || (operation == "biometric.authentication.poll" && result.get("phase").and_then(Value::as_str) == Some("unlocked")) {
+                    let is_master_unlock = operation == "vault.restore";
+                    let is_quick_unlock = matches!(operation, "pin.unlock" | "biometric.unlock")
+                        || (operation == "biometric.authentication.poll"
+                            && result.get("phase").and_then(Value::as_str) == Some("unlocked"));
+                    if is_master_unlock {
                         if let Err(error) = self.platform.after_master_unlock(&mut self.runtime) {
+                            self.runtime.lock();
+                            return rpc_failure(envelope_request_id, error.code, &error.message);
+                        }
+                        let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
+                        self.refresh_unlock_history();
+                    } else if is_quick_unlock {
+                        if let Err(error) = self.platform.after_quick_unlock(&mut self.runtime) {
                             self.runtime.lock();
                             return rpc_failure(envelope_request_id, error.code, &error.message);
                         }
@@ -1062,11 +1433,7 @@ impl BrowserBrokerCore {
                     }
                     if matches!(
                         operation,
-                        "vault.restore"
-                            | "imports.commit"
-                            | "ssh.scan.commit"
-                            | "passkeys.create"
-                            | "passkeys.get"
+                        "vault.restore" | "imports.commit" | "ssh.scan.commit"
                     ) {
                         let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
                         self.record_event("vault-changed", now_millis);
@@ -1093,26 +1460,453 @@ impl BrowserBrokerCore {
         }
     }
 
-    fn finish_one_shot_autofill(
+    fn prepare_passkey_broker_outcome(
         &mut self,
         envelope_request_id: &str,
+        operation: &str,
         input: &Map<String, Value>,
-        unlocked: Result<OneShotUnlockedRuntime, BrowserPlatformError>,
+        expires_at_millis: i64,
+    ) -> BrokerLineOutcome {
+        let Some(request_json) = input
+            .get("requestDetailsJson")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            return BrokerLineOutcome::Immediate(rpc_failure(
+                envelope_request_id,
+                "invalid-request",
+                "Passkey 请求格式无效。",
+            ));
+        };
+        let kind = if operation == "passkeys.create" {
+            PasskeyOpKind::Create
+        } else {
+            PasskeyOpKind::Get
+        };
+        let login_id = (kind == PasskeyOpKind::Create)
+            .then(|| {
+                input
+                    .get("loginId")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+            })
+            .flatten();
+        let requested_item_id = if kind == PasskeyOpKind::Get {
+            match parse_optional_uuid(input, "itemId") {
+                Ok(id) => id,
+                Err(message) => {
+                    return BrokerLineOutcome::Immediate(rpc_failure(
+                        envelope_request_id,
+                        "invalid-request",
+                        message,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let requested_credential_id = if kind == PasskeyOpKind::Get {
+            match parse_optional_credential_id(input, "credentialId") {
+                Ok(id) => id,
+                Err(message) => {
+                    return BrokerLineOutcome::Immediate(rpc_failure(
+                        envelope_request_id,
+                        "invalid-request",
+                        message,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
+        let (rp_id, origin, top_origin, mut account, unlock_title, allow_credentials) = match kind {
+            PasskeyOpKind::Create => match describe_passkey_request("create", request_json) {
+                Ok(summary) => {
+                    let title = summary
+                        .account
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .map(|account| format!("创建 Passkey · {account}"))
+                        .unwrap_or_else(|| format!("创建 Passkey · {}", summary.rp_id));
+                    (
+                        summary.rp_id,
+                        summary.origin,
+                        summary.top_origin,
+                        summary.account,
+                        title,
+                        Vec::new(),
+                    )
+                }
+                Err(error) => {
+                    return BrokerLineOutcome::Immediate(rpc_failure(
+                        envelope_request_id,
+                        passkey_error_code(error),
+                        error.public_message(),
+                    ));
+                }
+            },
+            PasskeyOpKind::Get => match PasskeyService::get_request_view(request_json) {
+                Ok(view) => {
+                    let title = format!("Passkey · {}", view.rp_id);
+                    (
+                        view.rp_id,
+                        view.origin,
+                        view.top_origin,
+                        None,
+                        title,
+                        view.allow_credentials,
+                    )
+                }
+                Err(message) => {
+                    return BrokerLineOutcome::Immediate(rpc_failure(
+                        envelope_request_id,
+                        "invalid-request",
+                        &message,
+                    ));
+                }
+            },
+        };
+
+        if self.runtime.is_unlocked() {
+            let (selected_item_id, selected_credential_id) = if kind == PasskeyOpKind::Get {
+                let candidates = match self.runtime.matching_passkeys(request_json) {
+                    Ok(candidates) => candidates,
+                    Err(error) => {
+                        return BrokerLineOutcome::Immediate(passkey_runtime_failure(
+                            envelope_request_id,
+                            error,
+                            &rp_id,
+                        ));
+                    }
+                };
+                let Some(selected) = candidates.into_iter().find(|candidate| {
+                    requested_item_id.is_none_or(|id| candidate.item_id == id)
+                        && requested_credential_id
+                            .as_deref()
+                            .is_none_or(|cid| candidate.credential_id == cid)
+                }) else {
+                    return BrokerLineOutcome::Immediate(rpc_failure(
+                        envelope_request_id,
+                        "passkey-unavailable",
+                        "VaultMesh 没有该网站可用的 Passkey。",
+                    ));
+                };
+                account = selected.account;
+                (Some(selected.item_id), Some(selected.credential_id))
+            } else {
+                (None, None)
+            };
+
+            return BrokerLineOutcome::Deferred(DeferredBrokerExecution {
+                envelope_request_id: envelope_request_id.to_owned(),
+                work: DeferredBrokerWork::Passkey(DeferredPasskeyWork {
+                    kind,
+                    request_json: request_json.to_owned(),
+                    rp_id,
+                    origin,
+                    top_origin,
+                    account,
+                    login_id,
+                    requested_item_id,
+                    requested_credential_id,
+                    selected_item_id,
+                    selected_credential_id,
+                    expires_at_millis,
+                    unlock_waiter: None,
+                    platform: Arc::clone(&self.platform),
+                }),
+            });
+        }
+
+        let vault_path = self.runtime.current_path();
+        let mut effective_title = unlock_title;
+        if kind == PasskeyOpKind::Get {
+            if let Some(matches) = self.preauth_preview.passkey_matches(
+                vault_path.as_path(),
+                &rp_id,
+                &allow_credentials,
+            ) {
+                let Some(selected) = matches.into_iter().find(|record| {
+                    requested_item_id.is_none_or(|id| record.item_id == id.to_string())
+                        && requested_credential_id
+                            .as_deref()
+                            .is_none_or(|cid| record.credential_id == cid)
+                }) else {
+                    return BrokerLineOutcome::Immediate(rpc_failure(
+                        envelope_request_id,
+                        "passkey-unavailable",
+                        "VaultMesh 没有该网站可用的 Passkey。",
+                    ));
+                };
+                account = selected.account;
+                effective_title = selected.title;
+            }
+        }
+
+        let Some(waiter) = self.platform.begin_browser_session_unlock(
+            BrowserSessionUnlockRequest {
+                vault_path,
+                source: BrowserUnlockSource::Passkey,
+                origin: Some(origin.clone()),
+                item_title: Some(effective_title),
+                item_kind: Some("secret".to_owned()),
+                master_password_reprompt: false,
+            },
+        ) else {
+            return BrokerLineOutcome::Immediate(rpc_failure(
+                envelope_request_id,
+                "unlock-required",
+                "请先在 VaultMesh 插件中单独解锁。",
+            ));
+        };
+
+        BrokerLineOutcome::Deferred(DeferredBrokerExecution {
+            envelope_request_id: envelope_request_id.to_owned(),
+            work: DeferredBrokerWork::Passkey(DeferredPasskeyWork {
+                kind,
+                request_json: request_json.to_owned(),
+                rp_id,
+                origin,
+                top_origin,
+                account,
+                login_id,
+                requested_item_id,
+                requested_credential_id,
+                selected_item_id: None,
+                selected_credential_id: None,
+                expires_at_millis,
+                unlock_waiter: Some(waiter),
+                platform: Arc::clone(&self.platform),
+            }),
+        })
+    }
+
+    fn commit_browser_session_unlock_or_rpc(
+        &mut self,
+        envelope_request_id: &str,
+        resolution: &BrowserUnlockResolution,
+        now_millis: i64,
+    ) -> Result<(), Value> {
+        if self.revoked {
+            return Err(host_status("unpaired", None));
+        }
+        let runtime_canonical = self.runtime.current_path().canonicalize().ok();
+        let resolved_canonical = resolution.vault_path.canonicalize().ok();
+        if runtime_canonical.is_some()
+            && resolved_canonical.is_some()
+            && runtime_canonical != resolved_canonical
+        {
+            return Err(rpc_failure(
+                envelope_request_id,
+                "unlock-required",
+                "保险库路径已变更，请重新解锁。",
+            ));
+        }
+
+        if self.runtime.is_unlocked() {
+            if let Err(error) = self.runtime.refresh_from_disk() {
+                return Err(runtime_failure(envelope_request_id, error));
+            }
+            if self.runtime.is_unlocked() {
+                if self.runtime.sync_relay().merged_generation() != self.sync_merge_generation {
+                    self.sync_merge_generation = self.runtime.sync_relay().merged_generation();
+                    self.fill.clear();
+                    self.confirmations.clear();
+                }
+                let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
+                self.refresh_unlock_history();
+                return Ok(());
+            }
+        }
+
+        let unlock_result = match resolution.factor {
+            BrowserUnlockFactor::MasterPassword => self
+                .runtime
+                .unlock_for_browser_with_verified_key(
+                    resolution.vault_path.clone(),
+                    resolution.vault_key.as_slice(),
+                ),
+            BrowserUnlockFactor::Pin => self.runtime.unlock_for_browser_with_quick_key(
+                resolution.vault_path.clone(),
+                resolution.vault_key.as_slice(),
+            ),
+            BrowserUnlockFactor::Biometric => self
+                .runtime
+                .unlock_for_browser_with_biometric_key(
+                    resolution.vault_path.clone(),
+                    resolution.vault_key.as_slice(),
+                ),
+        };
+        if let Err(error) = unlock_result {
+            return Err(runtime_failure(envelope_request_id, error));
+        }
+        let hook_result = match resolution.factor {
+            BrowserUnlockFactor::MasterPassword => self.platform.after_master_unlock(&mut self.runtime),
+            BrowserUnlockFactor::Pin | BrowserUnlockFactor::Biometric => {
+                self.platform.after_quick_unlock(&mut self.runtime)
+            }
+        };
+        if let Err(error) = hook_result {
+            self.runtime.lock();
+            return Err(rpc_failure(envelope_request_id, error.code, &error.message));
+        }
+        self.sync_merge_generation = self.runtime.sync_relay().merged_generation();
+        self.fill.clear();
+        let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
+        self.refresh_unlock_history();
+        self.record_event("vault-changed", now_millis);
+        Ok(())
+    }
+
+    fn commit_browser_passkey_unlock(
+        &mut self,
+        envelope_request_id: &str,
+        work: &mut DeferredPasskeyWork,
+        resolution: Result<BrowserUnlockResolution, BrowserPlatformError>,
+        now_millis: i64,
+    ) -> Result<(), Value> {
+        if self.revoked {
+            return Err(host_status("unpaired", None));
+        }
+        let resolution = match resolution {
+            Ok(resolution) => resolution,
+            Err(error) => return Err(rpc_failure(envelope_request_id, error.code, &error.message)),
+        };
+        if now_millis >= work.expires_at_millis {
+            return Err(rpc_failure(
+                envelope_request_id,
+                "request-expired",
+                "插件请求已过期，请重试。",
+            ));
+        }
+        self.commit_browser_session_unlock_or_rpc(envelope_request_id, &resolution, now_millis)?;
+        if work.kind == PasskeyOpKind::Get {
+            let candidates = self
+                .runtime
+                .matching_passkeys(&work.request_json)
+                .map_err(|error| passkey_runtime_failure(envelope_request_id, error, &work.rp_id))?;
+            let Some(selected) = candidates.into_iter().find(|candidate| {
+                work.requested_item_id.is_none_or(|id| candidate.item_id == id)
+                    && work
+                        .requested_credential_id
+                        .as_deref()
+                        .is_none_or(|cid| candidate.credential_id == cid)
+            }) else {
+                return Err(rpc_failure(
+                    envelope_request_id,
+                    "passkey-unavailable",
+                    "VaultMesh 没有该网站可用的 Passkey。",
+                ));
+            };
+            work.account = selected.account;
+            work.selected_item_id = Some(selected.item_id);
+            work.selected_credential_id = Some(selected.credential_id);
+        }
+        Ok(())
+    }
+
+    fn finish_passkey(
+        &mut self,
+        envelope_request_id: &str,
+        prepared: PreparedPasskeyExecution,
         now_millis: i64,
     ) -> Value {
         if self.revoked {
-            if let Ok(mut session) = unlocked {
-                session.runtime.lock();
-            }
             return host_status("unpaired", None);
         }
-        let mut session = match unlocked {
-            Ok(session) => session,
+        if now_millis >= prepared.expires_at_millis {
+            return rpc_failure(
+                envelope_request_id,
+                "request-expired",
+                "插件请求已过期，请重试。",
+            );
+        }
+        let now_iso = DateTime::<Utc>::from_timestamp_millis(now_millis)
+            .unwrap_or(DateTime::UNIX_EPOCH)
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+
+        if !self.runtime.is_unlocked() {
+            return rpc_failure(
+                envelope_request_id,
+                "unlock-required",
+                "请先在 VaultMesh 插件中单独解锁。",
+            );
+        }
+        if let Err(error) = self.runtime.refresh_from_disk() {
+            return passkey_runtime_failure(envelope_request_id, error, &prepared.rp_id);
+        }
+        if !self.runtime.is_unlocked() {
+            return rpc_failure(
+                envelope_request_id,
+                "unlock-required",
+                "请先在 VaultMesh 插件中单独解锁。",
+            );
+        }
+        if self.runtime.sync_relay().merged_generation() != self.sync_merge_generation {
+            self.sync_merge_generation = self.runtime.sync_relay().merged_generation();
+            self.fill.clear();
+            self.confirmations.clear();
+            let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
+        }
+
+        let result = match prepared.kind {
+            PasskeyOpKind::Create => self.runtime.create_passkey(
+                &prepared.request_json,
+                prepared.login_id,
+                &now_iso,
+            ),
+            PasskeyOpKind::Get => self.runtime.sign_passkey_assertion(
+                &prepared.request_json,
+                prepared.selected_item_id,
+                prepared.selected_credential_id.as_deref(),
+                &now_iso,
+            ),
+        };
+        match result {
+            Ok(response_json) => {
+                let _ = self.preauth_preview.sync_from_runtime(&mut self.runtime);
+                self.record_event("vault-changed", now_millis);
+                rpc_success(envelope_request_id, json!({ "responseJson": response_json }))
+            }
+            Err(error) => passkey_runtime_failure(envelope_request_id, error, &prepared.rp_id),
+        }
+    }
+
+    fn finish_browser_session_unlock(
+        &mut self,
+        envelope_request_id: &str,
+        resolution: Result<BrowserUnlockResolution, BrowserPlatformError>,
+        now_millis: i64,
+    ) -> Value {
+        if self.revoked {
+            return host_status("unpaired", None);
+        }
+        let resolution = match resolution {
+            Ok(resolution) => resolution,
             Err(error) => return rpc_failure(envelope_request_id, error.code, &error.message),
         };
+        if let Err(response) =
+            self.commit_browser_session_unlock_or_rpc(envelope_request_id, &resolution, now_millis)
+        {
+            return response;
+        }
+        rpc_success(
+            envelope_request_id,
+            json!({ "unlocked": true, "status": self.runtime.status() }),
+        )
+    }
+
+    fn execute_autofill_with_optional_password(
+        &mut self,
+        envelope_request_id: &str,
+        input: &Map<String, Value>,
+        password: Option<Zeroizing<String>>,
+        now_millis: i64,
+    ) -> Value {
         let mut effective_input = input.clone();
         if !effective_input.contains_key("masterPassword")
-            && let Some(password) = session.master_password.take()
+            && let Some(password) = password
         {
             effective_input.insert(
                 "masterPassword".to_owned(),
@@ -1121,15 +1915,70 @@ impl BrowserBrokerCore {
         }
         let result = self
             .fill
-            .execute(&mut session.runtime, &effective_input, now_millis);
-        if let Some(Value::String(mut password)) = effective_input.remove("masterPassword") {
-            password.zeroize();
+            .execute(&mut self.runtime, &effective_input, now_millis);
+        if let Some(Value::String(mut removed)) = effective_input.remove("masterPassword") {
+            removed.zeroize();
         }
-        session.runtime.lock();
         match result {
             Ok(approved) => rpc_success(envelope_request_id, approved),
             Err(error) => rpc_failure(envelope_request_id, error.code, &error.message),
         }
+    }
+
+    fn finish_autofill_session_unlock(
+        &mut self,
+        envelope_request_id: &str,
+        input: &Map<String, Value>,
+        resolution: Result<BrowserUnlockResolution, BrowserPlatformError>,
+        now_millis: i64,
+    ) -> Value {
+        if self.revoked {
+            return host_status("unpaired", None);
+        }
+        let mut resolution = match resolution {
+            Ok(resolution) => resolution,
+            Err(error) => return rpc_failure(envelope_request_id, error.code, &error.message),
+        };
+        if let Err(response) =
+            self.commit_browser_session_unlock_or_rpc(envelope_request_id, &resolution, now_millis)
+        {
+            return response;
+        }
+        self.execute_autofill_with_optional_password(
+            envelope_request_id,
+            input,
+            resolution.master_password.take(),
+            now_millis,
+        )
+    }
+
+    fn finish_autofill_reprompt(
+        &mut self,
+        envelope_request_id: &str,
+        input: &Map<String, Value>,
+        password: Result<Zeroizing<String>, BrowserPlatformError>,
+        now_millis: i64,
+    ) -> Value {
+        if self.revoked {
+            return host_status("unpaired", None);
+        }
+        if !self.runtime.is_unlocked() {
+            return rpc_failure(
+                envelope_request_id,
+                "unlock-required",
+                "请先在 VaultMesh 插件中单独解锁。",
+            );
+        }
+        let password = match password {
+            Ok(password) => password,
+            Err(error) => return rpc_failure(envelope_request_id, error.code, &error.message),
+        };
+        self.execute_autofill_with_optional_password(
+            envelope_request_id,
+            input,
+            Some(password),
+            now_millis,
+        )
     }
 
     fn create_confirmation(
@@ -1249,5 +2098,99 @@ impl Drop for BrowserBrokerCore {
         self.confirmations.clear();
         self.fill.clear();
         self.unlock_history = json!([]);
+    }
+}
+
+fn confirm_passkey_outside_lock(
+    envelope_request_id: &str,
+    work: DeferredPasskeyWork,
+    now_millis_fn: impl FnOnce() -> i64,
+) -> Result<PreparedPasskeyExecution, Value> {
+    if now_millis_fn() >= work.expires_at_millis {
+        return Err(rpc_failure(
+            envelope_request_id,
+            "request-expired",
+            "插件请求已过期，请重试。",
+        ));
+    }
+
+    match work.platform.confirm_passkey(&PasskeyConfirmationRequest {
+        kind: work.kind,
+        rp_id: work.rp_id.clone(),
+        origin: work.origin,
+        top_origin: work.top_origin,
+        account: work.account,
+    }) {
+        Ok(true) => Ok(PreparedPasskeyExecution {
+            kind: work.kind,
+            request_json: work.request_json,
+            rp_id: work.rp_id,
+            login_id: work.login_id,
+            selected_item_id: work.selected_item_id,
+            selected_credential_id: work.selected_credential_id,
+            expires_at_millis: work.expires_at_millis,
+        }),
+        Ok(false) => Err(rpc_failure(
+            envelope_request_id,
+            "cancelled",
+            "操作已取消。",
+        )),
+        Err(error) => Err(rpc_failure(envelope_request_id, error.code, &error.message)),
+    }
+}
+
+fn parse_optional_uuid(input: &Map<String, Value>, key: &str) -> Result<Option<Uuid>, &'static str> {
+    match input.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) => Uuid::parse_str(raw)
+            .map(Some)
+            .map_err(|_| "Passkey 条目编号无效。"),
+        Some(_) => Err("Passkey 条目编号无效。"),
+    }
+}
+
+fn parse_optional_credential_id(
+    input: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<String>, &'static str> {
+    match input.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) if !raw.is_empty() && raw.len() <= 4096 => Ok(Some(raw.clone())),
+        Some(_) => Err("Passkey 凭据编号无效。"),
+    }
+}
+
+fn passkey_error_code(error: PasskeyError) -> &'static str {
+    match error {
+        PasskeyError::Locked => "unlock-required",
+        PasskeyError::NotFound => "passkey-unavailable",
+        PasskeyError::RequestTooLarge
+        | PasskeyError::InvalidRequest
+        | PasskeyError::UnsupportedAlgorithm
+        | PasskeyError::CrossPlatformNotSupported
+        | PasskeyError::LargeBlobNotSupported
+        | PasskeyError::InvalidOrigin
+        | PasskeyError::OriginMismatch => "invalid-request",
+        _ => "operation-failed",
+    }
+}
+
+fn passkey_runtime_failure(request_id: &str, error: DesktopRuntimeError, rp_id: &str) -> Value {
+    match error.status() {
+        VAULTMESH_STATUS_LOCKED => rpc_failure(
+            request_id,
+            "unlock-required",
+            "请先在 VaultMesh 插件中单独解锁。",
+        ),
+        VAULTMESH_STATUS_NOT_FOUND => rpc_failure(
+            request_id,
+            "passkey-unavailable",
+            "VaultMesh 没有该网站可用的 Passkey。",
+        ),
+        _ => rpc_failure(
+            request_id,
+            "operation-failed",
+            &format!("{} ({rp_id})", error.public_message()),
+        ),
     }
 }

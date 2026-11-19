@@ -107,6 +107,7 @@ export interface VaultMeshApi {
     layoutAuthentication(sessionId: string, bounds: DesktopAuthenticationBounds): Promise<void>;
     cancelAuthentication(sessionId: string): Promise<void>;
     onAuthentication(callback: (event: DesktopAuthenticationEvent) => void): Promise<() => void>;
+    setCompactWindowMode(compact: boolean, contentHeight?: number): Promise<void>;
     startupSettings(): Promise<DesktopStartupSettings>;
     updateStartupSettings(input: DesktopStartupSettings): Promise<DesktopStartupSettings>;
     openSystemSettings(): Promise<{ success: boolean }>;
@@ -155,8 +156,14 @@ export interface VaultMeshApi {
     revoke(pairingRef: string): Promise<{ revoked: true }>;
     rename(pairingRef: string, label: string): Promise<{ renamed: true }>;
   };
+  browser: {
+    pinStatus(): Promise<PinStatus>;
+    enablePin(input: PinSetup): Promise<PinStatus>;
+    disablePin(): Promise<PinStatus>;
+  };
   agent: {
     status(): Promise<AgentBrokerStatus>;
+    pinStatus(): Promise<PinStatus>;
     enablePin(input: PinSetup): Promise<PinStatus>;
     disablePin(): Promise<PinStatus>;
     lockAllAccess(): Promise<{ locked: true }>;

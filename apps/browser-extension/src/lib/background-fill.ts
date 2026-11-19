@@ -389,7 +389,7 @@ export function getHttpPageUrl(url: string | undefined) {
 
 export function trustedPage(sender: Browser.runtime.MessageSender) {
   if (sender.id !== browser.runtime.id || sender.tab?.id == null) return null;
-  const senderOrigin = getHttpOrigin(sender.origin) ?? getHttpOrigin(sender.url);
+  const senderOrigin = sender.origin !== undefined ? getHttpOrigin(sender.origin) : getHttpOrigin(sender.url);
   const topOrigin = getHttpOrigin(sender.tab.url);
   const pageUrl = getHttpPageUrl(sender.tab.url);
   const framePageUrl = getHttpPageUrl(sender.url) ?? senderOrigin;

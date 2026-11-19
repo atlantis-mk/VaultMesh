@@ -1,29 +1,29 @@
 [[permission]]
 identifier = "allow-agent-unlock-status"
-description = "Allows the isolated MCP unlock window to read its current safe request and factor status."
+description = "Allows the isolated unified unlock window to read its current safe request and factor status."
 commands.allow = ["agent_unlock_status"]
 
 [[permission]]
 identifier = "allow-agent-unlock-set-scope"
-description = "Allows the isolated MCP unlock window to switch only between per-connection and paired-client shared unlock scope while a request is displayed."
+description = "Allows the isolated unified unlock window to switch only between per-connection and paired-client shared unlock scope while an Agent request is displayed."
 commands.allow = ["agent_unlock_set_scope"]
 
 [[permission]]
 identifier = "allow-agent-unlock-password"
-description = "Allows the isolated MCP unlock window to unlock the Agent-only runtime with a user-entered master password."
+description = "Allows the isolated unified unlock window to verify a user-entered master password for the active unlock request."
 commands.allow = ["agent_unlock_password"]
 
 [[permission]]
 identifier = "allow-agent-unlock-pin"
-description = "Allows the isolated MCP unlock window to unlock the Agent-only runtime with an Agent-specific PIN."
+description = "Allows the isolated unified unlock window to unlock the active request with its domain-specific PIN."
 commands.allow = ["agent_unlock_pin"]
 
 [[permission]]
 identifier = "allow-agent-unlock-biometric"
-description = "Allows the isolated MCP unlock window to unlock the Agent-only runtime with its independent OS biometric credential."
+description = "Allows the isolated unified unlock window to unlock the active request with OS biometric authentication."
 commands.allow = ["agent_unlock_biometric"]
 
 [[permission]]
 identifier = "allow-agent-unlock-cancel"
-description = "Allows the isolated MCP unlock window to cancel only its displayed unlock request."
+description = "Allows the isolated unified unlock window to cancel only its displayed unlock request."
 commands.allow = ["agent_unlock_cancel"]

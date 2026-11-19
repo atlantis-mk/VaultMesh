@@ -24,6 +24,8 @@ export function createTauriVaultMeshApi(): VaultMeshApi {
       layoutAuthentication: (sessionId, bounds) => invoke('desktop_authentication_layout', { sessionId, bounds }),
       cancelAuthentication: (sessionId) => invoke('desktop_authentication_cancel', { sessionId }),
       onAuthentication: (callback) => listen<DesktopAuthenticationEvent>('desktop-authentication', ({ payload }) => callback(payload)),
+      setCompactWindowMode: (compact, contentHeight) =>
+        invoke('desktop_window_set_compact_mode', { compact, contentHeight: contentHeight ?? null }),
       startupSettings: () => call('desktop.startup.get'),
       updateStartupSettings: (input) => call('desktop.startup.update', input),
       openSystemSettings: () => call('desktop.startup.open-system-settings'),
@@ -87,8 +89,14 @@ export function createTauriVaultMeshApi(): VaultMeshApi {
       revoke: (pairingRef) => call('lan.pairing.revoke', { pairingRef }),
       rename: (pairingRef, label) => call('lan.pairing.rename', { pairingRef, label }),
     },
+    browser: {
+      pinStatus: () => call('browser.pin.status'),
+      enablePin: (input) => call('browser.pin.enable', input),
+      disablePin: () => call('browser.pin.disable'),
+    },
     agent: {
       status: () => call('agent.status'),
+      pinStatus: () => call('agent.pin.status'),
       enablePin: (input) => call('agent.pin.enable', input),
       disablePin: () => call('agent.pin.disable'),
       lockAllAccess: () => call('agent.access.lock-all'),

@@ -7,8 +7,8 @@ use uuid::Uuid;
 use vaultmesh_core::{
     AgentAuditEvent, AgentConnectorDefinition, AgentConnectorDefinitionSummary,
     ApiRequestExecutionPlan, ApiRequestInput, ApiRequestPlanSummary, NewAgentAuditEvent,
-    NewAgentConnectorDefinition, SecretItemKind, SshCredentialRecordKind, UnlockEventSource,
-    VaultError, VaultSession,
+    NewAgentConnectorDefinition, PasskeyCandidate, PasskeyError, SecretItemKind,
+    SshCredentialRecordKind, UnlockEventSource, VaultError, VaultSession,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -74,5 +74,32 @@ impl DesktopRuntimeError {
 impl From<VaultmeshStatus> for DesktopRuntimeError {
     fn from(status: VaultmeshStatus) -> Self {
         Self { status, message: None }
+    }
+}
+
+impl From<PasskeyError> for DesktopRuntimeError {
+    fn from(error: PasskeyError) -> Self {
+        let status = match error {
+            PasskeyError::Locked => VAULTMESH_STATUS_LOCKED,
+            PasskeyError::MasterPasswordRequired => VAULTMESH_STATUS_REAUTH_REQUIRED,
+            PasskeyError::NotFound => VAULTMESH_STATUS_NOT_FOUND,
+            PasskeyError::RequestTooLarge
+            | PasskeyError::InvalidRequest
+            | PasskeyError::UnsupportedAlgorithm
+            | PasskeyError::CrossPlatformNotSupported
+            | PasskeyError::LargeBlobNotSupported
+            | PasskeyError::InvalidOrigin
+            | PasskeyError::OriginMismatch
+            | PasskeyError::CredentialAlreadyExists => VAULTMESH_STATUS_INVALID_ARGUMENT,
+            PasskeyError::InvalidStoredPasskey
+            | PasskeyError::InvalidPrivateKey
+            | PasskeyError::Crypto
+            | PasskeyError::Serialization
+            | PasskeyError::Core => VAULTMESH_STATUS_CORE_ERROR,
+        };
+        Self {
+            status,
+            message: Some(error.public_message()),
+        }
     }
 }

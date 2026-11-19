@@ -17,7 +17,7 @@ export type BrowserExtensionWorkflow = {
 export const BROWSER_EXTENSION_WORKFLOWS: readonly BrowserExtensionWorkflow[] = [
   // login-management import-file includes prepare/finish in the independent editor;
   // finish is reachable only after a confirmed successful Login save.
-  { id: 'vault-session', route: 'popup:vault', commands: ['vault.status', 'vault.workspace', 'vault.create', 'vault.unlock', 'vault.unlock-history', 'vault.lock'], requiresConfirmation: false },
+  { id: 'vault-session', route: 'popup:vault', commands: ['vault.status', 'vault.workspace', 'vault.create', 'vault.unlock', 'vault.unlock-history', 'vault.lock', 'browser.unlock.request'], requiresConfirmation: false },
   { id: 'login-management', route: 'popup:vault', commands: ['items.list', 'items.detail', 'items.add', 'items.update', 'items.delete', 'items.copy-username', 'items.copy-password', 'items.copy-totp', 'items.recovery-codes', 'items.copy-recovery-code', 'items.recovery-codes.import-file'], requiresConfirmation: true },
   { id: 'card-management', route: 'popup:vault', commands: ['cards.list', 'cards.detail', 'cards.add', 'cards.update', 'cards.delete', 'cards.copy-number', 'cards.copy-security-code', 'cards.copy-pin'], requiresConfirmation: true },
   { id: 'identity-management', route: 'popup:vault', commands: ['identities.list', 'identities.detail', 'identities.add', 'identities.update', 'identities.delete'], requiresConfirmation: true },

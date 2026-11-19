@@ -243,20 +243,18 @@ impl BrowserPreAuthPreviewStore {
         Some(snapshot)
     }
 
-    pub fn passkey_match(
+    pub fn passkey_matches(
         &self,
         vault_path: &Path,
         rp_id: &str,
         allow_credentials: &[String],
-    ) -> PasskeyPreviewMatch {
-        let Some(snapshot) = self.load_verified_snapshot(vault_path) else {
-            return PasskeyPreviewMatch::Unknown;
-        };
-        snapshot
+    ) -> Option<Vec<PreAuthPasskeyRecord>> {
+        let snapshot = self.load_verified_snapshot(vault_path)?;
+        let matches = snapshot
             .passkeys
             .iter()
             .rev()
-            .find(|passkey| {
+            .filter(|passkey| {
                 passkey.rp_id == rp_id
                     && (allow_credentials.is_empty()
                         || allow_credentials
@@ -264,8 +262,40 @@ impl BrowserPreAuthPreviewStore {
                             .any(|credential| credential == &passkey.credential_id))
             })
             .cloned()
+            .collect();
+        Some(matches)
+    }
+
+    pub fn passkey_match(
+        &self,
+        vault_path: &Path,
+        rp_id: &str,
+        allow_credentials: &[String],
+    ) -> PasskeyPreviewMatch {
+        let Some(matches) = self.passkey_matches(vault_path, rp_id, allow_credentials) else {
+            return PasskeyPreviewMatch::Unknown;
+        };
+        matches
+            .into_iter()
+            .next()
             .map(PasskeyPreviewMatch::Available)
             .unwrap_or(PasskeyPreviewMatch::Unavailable)
+    }
+
+    pub fn has_login_for_origin(&self, vault_path: &Path, origin: &str) -> bool {
+        let Some(target_host) = normalized_http_host(origin) else {
+            return false;
+        };
+        let Some(snapshot) = self.load_verified_snapshot(vault_path) else {
+            return false;
+        };
+        snapshot.logins.iter().any(|login| {
+            login
+                .url
+                .iter()
+                .chain(login.additional_urls.iter())
+                .any(|url| normalized_http_host(url).as_deref() == Some(target_host.as_str()))
+        })
     }
 
     pub fn summaries_for_kind(&self, vault_path: &Path, field_kind: &str) -> Option<Value> {
@@ -399,6 +429,22 @@ impl BrowserPreAuthPreviewStore {
             }
             StorageBackend::Unavailable => Ok(()),
         }
+    }
+}
+
+fn normalized_http_host(value: &str) -> Option<String> {
+    let url = url::Url::parse(value.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url
+        .host_str()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.strip_prefix("www.").unwrap_or(&host).to_owned())
     }
 }
 
@@ -808,6 +854,105 @@ mod tests {
             preview.passkey_match(&vault_path, "example.test", &[]),
             PasskeyPreviewMatch::Unknown
         );
+        assert!(preview.passkey_matches(&vault_path, "example.test", &[]).is_none());
+        assert!(!preview.has_login_for_origin(&vault_path, "https://github.com"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn passkey_matches_orders_newest_first_and_has_login_for_origin_normalizes_http_hosts() {
+        let dir = std::env::temp_dir().join(format!(
+            "vaultmesh-preauth-multi-passkey-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("tempdir");
+        let vault_path = dir.join("vault.enc");
+        let mut runtime = DesktopRuntime::new(vault_path.clone()).expect("runtime");
+        runtime
+            .create("correct horse battery staple".to_owned())
+            .expect("create vault");
+        runtime
+            .execute(
+                "items.add",
+                json!({
+                    "title": "Portal",
+                    "username": "ada@example.test",
+                    "password": "synthetic-login-password",
+                    "url": "https://www.Example.Test:8443/login",
+                    "additionalUrls": ["https://auth.partner.test/oauth"],
+                    "totpSecret": null,
+                    "notes": null,
+                    "folder": null,
+                    "favorite": false,
+                    "autofillOnPageLoad": false,
+                    "masterPasswordReprompt": false,
+                    "customFields": []
+                }),
+            )
+            .expect("add login");
+        for (account, cred) in [
+            ("ada@example.test", "cred-first"),
+            ("grace@example.test", "cred-second"),
+        ] {
+            runtime
+                .execute(
+                    "secrets.add",
+                    json!({
+                        "title": format!("Passkey {account}"),
+                        "kind": "authenticator-key",
+                        "secret": "synthetic-private-key-material",
+                        "provider": "VaultMesh Passkey",
+                        "account": account,
+                        "environment": "Passkey",
+                        "scopes": [
+                            "vaultmesh:passkey:v1",
+                            "rp:example.test",
+                            format!("credential:{cred}")
+                        ],
+                        "expiresAt": null,
+                        "website": "https://example.test",
+                        "notes": null,
+                        "folder": "Passkeys",
+                        "favorite": false,
+                        "masterPasswordReprompt": false
+                    }),
+                )
+                .expect("add passkey");
+        }
+
+        let preview = BrowserPreAuthPreviewStore::in_memory();
+        assert!(preview.passkey_matches(&vault_path, "example.test", &[]).is_none());
+        assert!(!preview.has_login_for_origin(&vault_path, "https://example.test"));
+
+        preview.sync_from_runtime(&mut runtime).expect("sync preview");
+        runtime.lock();
+
+        let all = preview
+            .passkey_matches(&vault_path, "example.test", &[])
+            .expect("verified matches");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].credential_id, "cred-second");
+        assert_eq!(all[0].account.as_deref(), Some("grace@example.test"));
+        assert_eq!(all[1].credential_id, "cred-first");
+        assert_eq!(all[1].account.as_deref(), Some("ada@example.test"));
+
+        let filtered = preview
+            .passkey_matches(&vault_path, "example.test", &["cred-first".to_owned()])
+            .expect("filtered matches");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].credential_id, "cred-first");
+
+        let empty = preview
+            .passkey_matches(&vault_path, "example.test", &["missing".to_owned()])
+            .expect("empty verified matches");
+        assert!(empty.is_empty());
+
+        assert!(preview.has_login_for_origin(&vault_path, "https://example.test"));
+        assert!(preview.has_login_for_origin(&vault_path, "http://WWW.example.test"));
+        assert!(preview.has_login_for_origin(&vault_path, "https://auth.partner.test"));
+        assert!(!preview.has_login_for_origin(&vault_path, "https://other.test"));
+        assert!(!preview.has_login_for_origin(&vault_path, "not-a-url"));
+
         let _ = fs::remove_dir_all(dir);
     }
 }

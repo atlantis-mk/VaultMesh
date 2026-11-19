@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArchiveRestoreIcon, ArrowLeftIcon, ChevronRightIcon, HistoryIcon, LockKeyholeIcon, RefreshCwIcon, SettingsIcon, ShieldCheckIcon, type LucideIcon } from "lucide-react";
 
 import { ToastMessage, type ToastVariant } from "@/components/ToastMessage";
@@ -9,9 +9,11 @@ import { confirmedDesktopRpc, desktopRpc, getPasswordHealth, getUnlockHistory, t
 import {
   loadPluginSecurityPolicy,
   savePluginSecurityPolicy,
+  type PasskeyDefaultMode,
   type PluginSecurityPolicy,
 } from "@/lib/plugin-security-policy";
-import { clearPasskeyChoices } from "@/lib/passkey-preferences";
+import { PasskeyBrowserFactory } from "@/lib/passkey-browser-adapter";
+import { clearPasskeyChoices, getSitePasskeyMode, setSitePasskeyMode, type SitePasskeyMode } from "@/lib/passkey-preferences";
 import { PasskeyDiagnosticsPanel } from "./passkey-diagnostics-panel";
 import { RecoveryPanel, type RecoveryTarget } from "./recovery-panel";
 
@@ -51,9 +53,24 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
   const [health, setHealth] = useState<PasswordHealth | null>(null);
   const [unlockHistory, setUnlockHistory] = useState<UnlockEvent[]>([]);
   const [auditBusy, setAuditBusy] = useState(false);
+  const passkeySupported = useMemo(() => PasskeyBrowserFactory.create().isSupported, []);
+  const [siteOrigin, setSiteOrigin] = useState<string | null>(null);
+  const [sitePasskeyMode, setSitePasskeyModeState] = useState<SitePasskeyMode>("default");
+  const [sitePasskeyBusy, setSitePasskeyBusy] = useState(false);
 
   async function load() {
     setPluginPolicy(await loadPluginSecurityPolicy());
+    if (passkeySupported) {
+      try {
+        const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        const origin = httpOrigin(tab?.url);
+        setSiteOrigin(origin);
+        setSitePasskeyModeState(origin ? await getSitePasskeyMode(origin) : "default");
+      } catch {
+        setSiteOrigin(null);
+        setSitePasskeyModeState("default");
+      }
+    }
     const results = await Promise.allSettled([
       desktopRpc("pin.status").then((nextPin) => {
         const parsedPin = nextPin as PinStatus;
@@ -146,6 +163,28 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
     }
   }
 
+  async function updateSitePasskeyMode(mode: SitePasskeyMode) {
+    if (!siteOrigin || sitePasskeyBusy || mode === sitePasskeyMode) return;
+    setSitePasskeyBusy(true);
+    try {
+      await setSitePasskeyMode(siteOrigin, mode);
+      setSitePasskeyModeState(mode);
+      await browser.runtime.sendMessage({
+        kind: "vaultmesh.passkey-site-mode.updated",
+        origin: siteOrigin,
+        mode,
+      }).catch(() => undefined);
+    } finally {
+      setSitePasskeyBusy(false);
+    }
+  }
+
+  async function clearSitePasskeyChoices() {
+    if (await run(() => clearPasskeyChoices(), "已清除各网站记住的通行密钥选择。", false)) {
+      setSitePasskeyModeState("default");
+    }
+  }
+
   if (section === "recovery") {
     return <RecoveryPanel targets={recoveryTargets} onBack={() => setSection("menu")} onChanged={onRecoveryChanged} />;
   }
@@ -166,7 +205,8 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
       <Card>
         <CardContent className="flex flex-col gap-3">
           <div className="flex items-center gap-2"><ShieldCheckIcon size={18} /><h2 className="text-sm font-semibold">插件 PIN 解锁</h2></div>
-          <p className="text-xs text-muted-foreground">{pinStatus?.enabled ? pinStatus.locked ? `已锁定（${pinStatus.failureLimit} 次失败上限），请使用主密码解锁插件。` : `已启用；输入固定 6 位 PIN 后自动解锁，失败上限 ${pinStatus.failureLimit} 次。` : "默认关闭，与桌面端 PIN 独立。启用后插件优先使用 PIN。"}</p>
+          <p className="text-xs text-muted-foreground">{pinStatus?.enabled ? pinStatus.locked ? `已锁定（${pinStatus.failureLimit} 次失败上限），请使用主密码解锁插件。` : `已启用；输入固定 6 位 PIN 后自动解锁，失败上限 ${pinStatus.failureLimit} 次。` : "默认关闭。启用后插件优先使用 PIN。"}</p>
+          <p className="text-xs text-muted-foreground">插件 PIN 与桌面端、Agent PIN 相互独立；也可在 VaultMesh 桌面端「安全中心 → PIN 快速解锁」中统一管理三端 PIN。</p>
           <input className={fieldClass} type="password" inputMode="numeric" minLength={6} maxLength={6} autoComplete="new-password" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder={pinStatus?.enabled ? "新 6 位 PIN" : "6 位 PIN"} />
           <input className={fieldClass} type="password" inputMode="numeric" minLength={6} maxLength={6} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="确认 6 位 PIN" />
           <div className="flex flex-col gap-1 text-xs"><span id="pin-failure-limit-label">连续失败次数上限</span><div className="grid grid-cols-4 gap-1.5" role="group" aria-labelledby="pin-failure-limit-label">{[3, 4, 5, 6, 7, 8, 9, 10].map((value) => <Button key={value} type="button" size="sm" className="w-full px-1 text-xs" variant={failureLimit === value ? "default" : "outline"} aria-pressed={failureLimit === value} onClick={() => setFailureLimit(value)}>{value} 次{value === 5 ? "（默认）" : ""}</Button>)}</div></div>
@@ -186,9 +226,50 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
             <p className="text-xs text-muted-foreground">浏览器锁定规则只影响插件；剪贴板设置由桌面端管理。</p>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.lockOnBrowserRestart} onChange={(event) => setPluginPolicy({ ...pluginPolicy, lockOnBrowserRestart: event.target.checked })} />浏览器启动或重启时锁定插件</label>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.lockOnSystemLock} onChange={(event) => setPluginPolicy({ ...pluginPolicy, lockOnSystemLock: event.target.checked })} />系统锁屏时锁定插件</label>
-            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.passkeyProxyEnabled !== false} onChange={(event) => setPluginPolicy({ ...pluginPolicy, passkeyProxyEnabled: event.target.checked })} />接管网页通行密钥请求 (Passkey)</label>
-            <Button type="button" size="sm" variant="outline" className="self-start text-xs" disabled={busy} onClick={() => void run(() => clearPasskeyChoices(), "已清除各网站记住的通行密钥选择。", false)}>清除网站通行密钥选择</Button>
-            <PasskeyDiagnosticsPanel />
+            {passkeySupported ? (
+              <div className="flex flex-col gap-2.5 rounded-lg border border-input p-2.5">
+                <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={pluginPolicy.passkeyProxyEnabled !== false} onChange={(event) => setPluginPolicy({ ...pluginPolicy, passkeyProxyEnabled: event.target.checked })} />接管网页通行密钥请求 (Passkey)</label>
+                <div className="flex flex-col gap-1 text-xs">
+                  <span id="passkey-get-default-label">登录匹配到通行密钥时</span>
+                  <div className="grid grid-cols-2 gap-1.5" role="group" aria-labelledby="passkey-get-default-label">
+                    {([
+                      { value: "vaultmesh", label: "VaultMesh（默认）" },
+                      { value: "ask", label: "每次询问" },
+                    ] as ReadonlyArray<{ value: PasskeyDefaultMode; label: string }>).map(({ value, label }) => (
+                      <Button key={value} type="button" size="sm" className="w-full px-1 text-xs" variant={pluginPolicy.passkeyGetDefault === value ? "default" : "outline"} aria-pressed={pluginPolicy.passkeyGetDefault === value} disabled={busy || pluginPolicy.passkeyProxyEnabled === false} onClick={() => setPluginPolicy({ ...pluginPolicy, passkeyGetDefault: value })}>{label}</Button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1 text-xs">
+                  <span id="passkey-create-default-label">创建通行密钥时</span>
+                  <div className="grid grid-cols-2 gap-1.5" role="group" aria-labelledby="passkey-create-default-label">
+                    {([
+                      { value: "ask", label: "每次询问（默认）" },
+                      { value: "vaultmesh", label: "VaultMesh" },
+                    ] as ReadonlyArray<{ value: PasskeyDefaultMode; label: string }>).map(({ value, label }) => (
+                      <Button key={value} type="button" size="sm" className="w-full px-1 text-xs" variant={pluginPolicy.passkeyCreateDefault === value ? "default" : "outline"} aria-pressed={pluginPolicy.passkeyCreateDefault === value} disabled={busy || pluginPolicy.passkeyProxyEnabled === false} onClick={() => setPluginPolicy({ ...pluginPolicy, passkeyCreateDefault: value })}>{label}</Button>
+                    ))}
+                  </div>
+                </div>
+                {siteOrigin ? (
+                  <div className="flex flex-col gap-1 text-xs">
+                    <span id="passkey-site-mode-label" className="truncate" title={siteOrigin}>当前网站规则 · {safeHostname(siteOrigin) ?? siteOrigin}</span>
+                    <div className="grid grid-cols-4 gap-1" role="group" aria-labelledby="passkey-site-mode-label">
+                      {([
+                        { value: "default", label: "跟随默认" },
+                        { value: "ask", label: "询问" },
+                        { value: "vaultmesh", label: "VaultMesh" },
+                        { value: "native", label: "系统" },
+                      ] as const).map((option) => (
+                        <Button key={option.value} type="button" size="sm" className="w-full px-1 text-[11px]" variant={sitePasskeyMode === option.value ? "default" : "outline"} aria-pressed={sitePasskeyMode === option.value} disabled={busy || sitePasskeyBusy || pluginPolicy.passkeyProxyEnabled === false} onClick={() => void updateSitePasskeyMode(option.value)}>{option.label}</Button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                <Button type="button" size="sm" variant="outline" className="self-start text-xs" disabled={busy} onClick={() => void clearSitePasskeyChoices()}>清除网站通行密钥选择</Button>
+                <PasskeyDiagnosticsPanel />
+              </div>
+            ) : null}
             <div className="flex flex-col gap-1 text-xs"><span id="plugin-idle-timeout-label">浏览器空闲后锁定插件</span><div className="grid grid-cols-3 gap-1.5" role="group" aria-labelledby="plugin-idle-timeout-label">{idleTimeoutOptions.map(({ value, label }) => <Button key={value} type="button" size="sm" className="w-full px-1 text-xs" variant={pluginPolicy.idleTimeoutMinutes === value ? "default" : "outline"} aria-pressed={pluginPolicy.idleTimeoutMinutes === value} onClick={() => setPluginPolicy({ ...pluginPolicy, idleTimeoutMinutes: value })}>{label}</Button>)}</div></div>
             {desktopSettings ? <div className="flex flex-col gap-1 text-xs"><span id="clipboard-timeout-label">剪贴板自动清除</span><div className="grid grid-cols-2 gap-1.5" role="group" aria-labelledby="clipboard-timeout-label">{clipboardTimeoutOptions.map(({ value, label }) => <Button key={value} type="button" size="sm" className="w-full text-xs" variant={desktopSettings.clipboardClearTimeoutMs === value ? "default" : "outline"} aria-pressed={desktopSettings.clipboardClearTimeoutMs === value} onClick={() => setDesktopSettings({ ...desktopSettings, clipboardClearTimeoutMs: value })}>{label}</Button>)}</div></div> : <p className="text-xs text-muted-foreground">桌面端剪贴板设置暂不可用，不影响插件锁定策略。</p>}
             <div className="flex flex-wrap gap-2">
@@ -246,4 +327,19 @@ function formatTime(occurredAt: number): string {
 
 function unlockSourceLabel(source: UnlockEvent["source"]): string {
   return ({ desktop: "桌面主密码", "desktop-pin": "桌面 PIN", "extension-master-password": "插件主密码", "extension-biometric": "插件生物识别", "extension-pin": "插件 PIN" } as const)[source];
+}
+
+function httpOrigin(value?: string): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeHostname(value: string | null): string | null {
+  if (!value) return null;
+  try { return new URL(value).hostname; } catch { return null; }
 }

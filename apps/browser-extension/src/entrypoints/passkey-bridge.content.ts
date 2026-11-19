@@ -1,4 +1,5 @@
 import { createContentScriptMessageSender } from "@/lib/content-script-messaging";
+import { PasskeyBrowserFactory } from "@/lib/passkey-browser-adapter";
 import { createPasskeyDialog, type PasskeyPromptView } from "@/lib/passkey-dialog";
 import { PASSKEY_CHANNEL } from "@/lib/passkey-shim";
 
@@ -7,11 +8,42 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Hand-rolled validation keeps this document_start script free of heavy dependencies.
 function parsePrompt(value: unknown): PasskeyPromptView | null {
   if (!value || typeof value !== "object") return null;
-  const prompt = value as { token?: unknown; operation?: unknown; origin?: unknown; stage?: unknown };
+  const prompt = value as {
+    token?: unknown;
+    operation?: unknown;
+    origin?: unknown;
+    topOrigin?: unknown;
+    sameOriginWithAncestors?: unknown;
+    stage?: unknown;
+    candidates?: unknown;
+  };
   if (typeof prompt.token !== "string" || !UUID.test(prompt.token)) return null;
   if (prompt.operation !== "create" && prompt.operation !== "get") return null;
-  if (prompt.stage !== "choose" && prompt.stage !== "unlock") return null;
-  return { token: prompt.token, operation: prompt.operation, origin: typeof prompt.origin === "string" ? prompt.origin.slice(0, 256) : null, stage: prompt.stage };
+  if (prompt.stage !== "choose" && prompt.stage !== "unlock" && prompt.stage !== "no-match") return null;
+  const candidates = Array.isArray(prompt.candidates)
+    ? prompt.candidates.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const c = entry as { itemId?: unknown; credentialId?: unknown; title?: unknown; account?: unknown };
+        if (typeof c.itemId !== "string" || !UUID.test(c.itemId) || typeof c.credentialId !== "string" || typeof c.title !== "string") {
+          return [];
+        }
+        return [{
+          itemId: c.itemId,
+          credentialId: c.credentialId.slice(0, 4096),
+          title: c.title.slice(0, 256),
+          account: typeof c.account === "string" ? c.account.slice(0, 256) : null,
+        }];
+      })
+    : undefined;
+  return {
+    token: prompt.token,
+    operation: prompt.operation,
+    origin: typeof prompt.origin === "string" ? prompt.origin.slice(0, 256) : null,
+    topOrigin: typeof prompt.topOrigin === "string" ? prompt.topOrigin.slice(0, 256) : null,
+    sameOriginWithAncestors: typeof prompt.sameOriginWithAncestors === "boolean" ? prompt.sameOriginWithAncestors : undefined,
+    stage: prompt.stage,
+    ...(candidates ? { candidates } : {}),
+  };
 }
 
 function parseMessage(data: unknown): { direction: "request" | "abort" | "note"; id: string; reason?: string; operation?: "create" | "get" | "availability"; options?: Record<string, unknown> } | null {
@@ -40,6 +72,8 @@ export default defineContentScript({
   matchOriginAsFallback: true,
   runAt: "document_start",
   main(ctx) {
+    const adapter = PasskeyBrowserFactory.create();
+    if (!adapter.isSupported) return;
     const targetOrigin = window.location.origin && window.location.origin !== "null" ? window.location.origin : "*";
     const send = createContentScriptMessageSender(
       (message) => browser.runtime.sendMessage(message),
@@ -47,17 +81,17 @@ export default defineContentScript({
     );
     const post = (message: Record<string, unknown>) => window.postMessage({ channel: PASSKEY_CHANNEL, ...message }, targetOrigin);
 
-    // Only the top frame hosts the dialog; the background targets frame 0, and
-    // only same-origin request chains are ever served, so it never crosses origins.
+    // Only the top frame hosts the dialog; the background targets frame 0 and
+    // checks full frame ancestry before serving cross-origin or same-origin requests.
     if (window === window.top) {
       const dialog = createPasskeyDialog(document, {
-        choose: (token, choice, remember) => {
+        choose: (token, choice, remember, itemId) => {
           dialog.hide(token);
-          void send({ kind: "vaultmesh.passkey-choice", token, choice, remember });
+          void send({ kind: "vaultmesh.passkey-choice", token, choice, remember, ...(itemId ? { itemId } : {}) });
         },
         openUnlock: () => { void send({ kind: "vaultmesh.open-unlock" }); },
       });
-      browser.runtime.onMessage.addListener((message: unknown, sender: { id?: string; tab?: unknown }) => {
+      const onRuntimeMessage = (message: unknown, sender: { id?: string; tab?: unknown }) => {
         if (sender.id !== browser.runtime.id || sender.tab !== undefined || !message || typeof message !== "object") return undefined;
         const command = message as { kind?: unknown; prompt?: unknown; token?: unknown };
         if (command.kind === "vaultmesh.passkey-prompt.show") {
@@ -71,10 +105,15 @@ export default defineContentScript({
           return Promise.resolve({ status: "hidden" as const });
         }
         return undefined;
+      };
+      browser.runtime.onMessage.addListener(onRuntimeMessage);
+      ctx.onInvalidated?.(() => {
+        dialog.hide();
+        try { browser.runtime.onMessage.removeListener(onRuntimeMessage); } catch { /* runtime gone */ }
       });
     }
 
-    window.addEventListener("message", (event) => {
+    const onWindowMessage = (event: MessageEvent) => {
       if (event.source !== window) return;
       const message = parseMessage(event.data);
       if (!message) return;
@@ -86,10 +125,19 @@ export default defineContentScript({
         void send({ kind: "vaultmesh.passkey.note", reason: message.reason });
         return;
       }
+      if (window.top !== window && message.operation && !adapter.allowsFrameWebAuthn(document, message.operation)) {
+        if (message.operation === "create" || message.operation === "get") {
+          void send({ kind: "vaultmesh.passkey.note", reason: "permissions-policy-denied" });
+        }
+        post({ direction: "response", id: message.id, result: { status: "fallback" } });
+        return;
+      }
       post({ direction: "ack", id: message.id });
       const optionsJson = JSON.stringify(message.options);
       void send({ kind: "vaultmesh.passkey.request", id: message.id, operation: message.operation, optionsJson })
         .then((result) => post({ direction: "response", id: message.id, result: result ?? { status: "fallback" } }));
-    });
+    };
+    window.addEventListener("message", onWindowMessage);
+    ctx.onInvalidated?.(() => window.removeEventListener("message", onWindowMessage));
   },
 });

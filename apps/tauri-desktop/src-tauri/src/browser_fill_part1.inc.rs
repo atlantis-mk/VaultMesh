@@ -37,6 +37,7 @@ pub struct PreparedOneShotSelection {
     pub item_title: String,
     pub item_kind: String,
     pub origin: String,
+    pub requires_session_unlock: bool,
     pub master_password_reprompt: bool,
 }
 
@@ -250,6 +251,7 @@ impl BrowserFillService {
                 item_title: selected.title.clone(),
                 item_kind: selected.kind.clone(),
                 origin: request.discovery.top_origin.clone(),
+                requires_session_unlock: true,
                 master_password_reprompt: selected.kind == "card"
                     || reprompt_from_request
                     || reprompt_from_preview,
@@ -281,6 +283,7 @@ impl BrowserFillService {
                         item_title: actual_title,
                         item_kind: selected.kind.clone(),
                         origin: request.discovery.top_origin.clone(),
+                        requires_session_unlock: false,
                         master_password_reprompt: true,
                     }));
                 }
@@ -344,7 +347,12 @@ impl BrowserFillService {
         if selected.kind == "secret" && detail.get("isPasskey").and_then(Value::as_bool).unwrap_or(false) {
             return Err(invalid("Passkey 不能通过普通 Secret 填充。"));
         }
-        if selected.kind == "card" || request.native_item_plan.is_some() && detail.get("masterPasswordReprompt").and_then(Value::as_bool).unwrap_or(false) {
+        if selected.kind == "card"
+            || detail
+                .get("masterPasswordReprompt")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
             let password = request
                 .master_password
                 .as_deref()

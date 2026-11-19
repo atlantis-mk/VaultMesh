@@ -34,6 +34,7 @@ export const BrowserRpcOperationSchema = z.enum([
   'events.poll',
   'browser.pairing.status',
   'browser.pairing.revoke',
+  'browser.unlock.request',
   'browser.autofill.candidates',
   'browser.autofill.profile',
   'browser.autofill.execute',

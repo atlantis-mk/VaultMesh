@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyApprovedFill, getAutofillCandidates, startAutomaticFillForTab, startFillForTab } from "./background-fill";
+import { applyApprovedFill, getAutofillCandidates, startAutomaticFillForTab, startFillForTab, trustedPage } from "./background-fill";
 import { backgroundDesktopRpc } from "./desktop-rpc";
 
 vi.mock("./desktop-rpc", () => ({ backgroundDesktopRpc: vi.fn(), DesktopRpcError: class extends Error {} }));
@@ -75,5 +75,34 @@ describe("AT-AUTOFILL-001 locked pre-auth candidate search & automatic fill supp
       requiresUnlock: true,
     });
     expect(backgroundDesktopRpc).not.toHaveBeenCalledWith("browser.autofill.execute", expect.anything());
+  });
+});
+
+describe("trustedPage sender validation", () => {
+  it("fails closed when sender.origin is opaque null even if sender.url is HTTPS", () => {
+    expect(trustedPage({
+      id: browser.runtime.id,
+      origin: "null",
+      url: "https://auth.example.test/frame",
+      frameId: 2,
+      tab: { id: 7, url: "https://shop.example.test/login" } as Browser.tabs.Tab,
+    } as Browser.runtime.MessageSender)).toBeNull();
+  });
+
+  it("resolves cross-origin sender with verified origin and topOrigin", () => {
+    expect(trustedPage({
+      id: browser.runtime.id,
+      origin: "https://auth.example.test",
+      url: "https://auth.example.test/frame",
+      frameId: 2,
+      tab: { id: 7, url: "https://shop.example.test/login" } as Browser.tabs.Tab,
+    } as Browser.runtime.MessageSender)).toEqual({
+      tabId: 7,
+      frameId: 2,
+      topOrigin: "https://shop.example.test",
+      fillOrigin: "https://auth.example.test",
+      pageUrl: "https://shop.example.test/login",
+      framePageUrl: "https://auth.example.test/frame",
+    });
   });
 });

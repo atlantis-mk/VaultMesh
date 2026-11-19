@@ -1,5 +1,8 @@
 use super::*;
-use crate::agent_broker::capability_registry;
+use crate::{
+    agent_broker::capability_registry,
+    pin_domain_adapter::{PinDomainAction, PinDomainFactory, PinDomainKind, execute_pin_domain_action},
+};
 
 pub(super) fn handle_agent_admin(
     state: &RuntimeState,
@@ -51,10 +54,11 @@ pub(super) fn handle_agent_admin(
             let access = state
                 .agent_vault_access
                 .status(None, &selected_vault_path)?;
-            let pin = state
-                .agent_pin
+            let agent_pin_adapter = PinDomainFactory::create_for(PinDomainKind::Agent);
+            let pin = agent_pin_adapter
+                .service(state)
                 .lock()
-                .map_err(|_| "Agent PIN 状态暂时不可用。".to_owned())?
+                .map_err(|_| agent_pin_adapter.unavailable_error().to_owned())?
                 .status();
             Ok(json!({
                 "protocolVersion": registry.protocol_version,
@@ -70,36 +74,32 @@ pub(super) fn handle_agent_admin(
                 "tools": registry.tools
             }))
         }
+        "agent.pin.status" => {
+            drop(broker);
+            execute_pin_domain_action(
+                state,
+                PinDomainFactory::create_for(PinDomainKind::Agent),
+                PinDomainAction::Status,
+                input,
+            )
+        }
         "agent.pin.enable" => {
-            let setup: PinSetupInput =
-                serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
-            let pin_value = Zeroizing::new(setup.pin);
-            let (vault_path, vault_key) = state
-                .runtime
-                .lock()
-                .map_err(|_| "保险库运行时暂时不可用。".to_owned())?
-                .quick_unlock_material()
-                .map_err(|_| "请先在桌面端使用主密码解锁保险库。".to_owned())?;
-            state
-                .agent_pin
-                .lock()
-                .map_err(|_| "Agent PIN 状态暂时不可用。".to_owned())?
-                .enable(
-                    vault_path,
-                    vault_key.as_ref(),
-                    pin_value.as_str(),
-                    setup.failure_limit,
-                )
-                .map(|status| json!(status))
+            drop(broker);
+            execute_pin_domain_action(
+                state,
+                PinDomainFactory::create_for(PinDomainKind::Agent),
+                PinDomainAction::Enable,
+                input,
+            )
         }
         "agent.pin.disable" => {
-            require_empty_object(&input)?;
-            state
-                .agent_pin
-                .lock()
-                .map_err(|_| "Agent PIN 状态暂时不可用。".to_owned())?
-                .disable()
-                .map(|status| json!(status))
+            drop(broker);
+            execute_pin_domain_action(
+                state,
+                PinDomainFactory::create_for(PinDomainKind::Agent),
+                PinDomainAction::Disable,
+                input,
+            )
         }
         "agent.access.lock-all" => {
             require_empty_object(&input)?;

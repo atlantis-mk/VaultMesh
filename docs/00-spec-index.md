@@ -103,6 +103,7 @@
 - `../adr/0054-desktop-ssh-agent-session.md`
 - `../adr/0055-browser-preauth-autofill-and-oneshot-fill.md`
 - `../adr/0056-browser-loopback-api-and-doctor.md`
+- `../adr/0058-unified-compact-unlock-and-browser-session.md`
 
 ## Change 与 Release 入口
 

@@ -5,28 +5,56 @@
  * here: the page can see the DOM around a closed shadow root, so unlocking stays
  * in the extension's own window. */
 
-export type PasskeyPromptView = { token: string; operation: 'create' | 'get'; origin: string | null; stage: 'choose' | 'unlock' };
+export type PasskeyPromptCandidate = {
+  itemId: string;
+  credentialId: string;
+  title: string;
+  account?: string | null;
+};
+
+export type PasskeyPromptView = {
+  token: string;
+  operation: 'create' | 'get';
+  origin: string | null;
+  topOrigin?: string | null;
+  sameOriginWithAncestors?: boolean;
+  stage: 'choose' | 'unlock' | 'no-match';
+  candidates?: PasskeyPromptCandidate[];
+};
+
 export type PasskeyDialogChoice = 'vaultmesh' | 'native' | 'cancel';
 
 export type PasskeyDialogHandlers = {
-  choose(token: string, choice: PasskeyDialogChoice, remember: boolean): void;
+  choose(token: string, choice: PasskeyDialogChoice, remember: boolean, itemId?: string): void;
   openUnlock(token: string): void;
 };
 
 export function passkeyPromptText(prompt: PasskeyPromptView): string {
   const site = prompt.origin ?? '当前网站';
+  const target = prompt.sameOriginWithAncestors === false && prompt.topOrigin
+    ? `${prompt.topOrigin} 中的请求方 ${site}`
+    : site;
+  if (prompt.stage === 'no-match') {
+    return `${target} 正在请求通行密钥登录，但 VaultMesh 中没有匹配的通行密钥。`;
+  }
   if (prompt.stage === 'unlock') {
     return prompt.operation === 'create'
-      ? `${site} 正在创建通行密钥。VaultMesh 已锁定，解锁后将继续保存。`
-      : `${site} 正在请求通行密钥登录。VaultMesh 已锁定，解锁后将继续。`;
+      ? `${target} 正在创建通行密钥。VaultMesh 已锁定，解锁后将继续保存。`
+      : `${target} 正在请求通行密钥登录。VaultMesh 已锁定，解锁后将继续。`;
   }
   return prompt.operation === 'create'
-    ? `${site} 正在创建通行密钥。要保存到 VaultMesh，还是使用浏览器/系统？`
-    : `${site} 正在请求通行密钥登录。要使用 VaultMesh，还是使用浏览器/系统？`;
+    ? `${target} 正在创建通行密钥。要保存到 VaultMesh，还是使用浏览器/系统？`
+    : `${target} 正在请求通行密钥登录。要使用 VaultMesh，还是使用浏览器/系统？`;
 }
 
 /** Dialog wording: the site is shown on its own row, so the sentences stay short. */
 export function passkeyDialogCopy(prompt: PasskeyPromptView): { title: string; description: string } {
+  if (prompt.stage === 'no-match') {
+    return {
+      title: '未找到可用的通行密钥',
+      description: 'VaultMesh 中没有当前网站的通行密钥。你可以改用浏览器/系统处理本次请求。',
+    };
+  }
   const title = prompt.operation === 'create' ? '创建通行密钥' : '使用通行密钥登录';
   if (prompt.stage === 'unlock') {
     return { title, description: 'VaultMesh 已锁定。请在插件窗口解锁后继续，或改用浏览器/系统。' };
@@ -57,8 +85,16 @@ const STYLE = `
 .mark{flex:none;display:grid;place-items:center;width:22px;height:22px;border-radius:6px;background:#6d5dfc;color:#fff;font-weight:800}
 .title{font-size:13px;font-weight:650;line-height:1.25}
 .brand{font-size:11px;color:var(--muted-foreground);line-height:1.25}
-.site{margin:12px 0 8px;padding:6px 8px;border-radius:8px;background:var(--muted);font-size:12px;word-break:break-all}
+.site{margin:12px 0 8px;padding:6px 8px;border-radius:8px;background:var(--muted);font-size:12px;word-break:break-all;display:flex;flex-direction:column;gap:2px}
 .desc{margin:0 0 12px;color:var(--muted-foreground)}
+.candidates{margin:0 0 10px;padding:0;border:0;display:flex;flex-direction:column;gap:6px}
+.candidates-label{margin:0 0 2px;padding:0;font-size:11px;font-weight:600;color:var(--muted-foreground)}
+.candidate{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;cursor:pointer}
+.candidate:hover{background:var(--muted)}
+.candidate input{width:14px;height:14px;margin:0;accent-color:var(--primary)}
+.candidate-text{min-width:0;display:flex;flex-direction:column}
+.candidate-name{font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.candidate-sub{font-size:11px;color:var(--muted-foreground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .remember{display:flex;align-items:center;gap:6px;margin:0 0 12px;font-size:12px;cursor:pointer}
 .remember input{width:14px;height:14px;margin:0;accent-color:var(--primary)}
 .row{display:flex;gap:8px;justify-content:flex-end}
@@ -125,7 +161,15 @@ export function createPasskeyDialog(
 
     const site = doc.createElement('div');
     site.className = 'site';
-    site.textContent = prompt.origin ?? '当前网站';
+    if (prompt.sameOriginWithAncestors === false && prompt.topOrigin) {
+      const requester = doc.createElement('span');
+      requester.textContent = `请求方：${prompt.origin ?? '未知来源'}`;
+      const top = doc.createElement('span');
+      top.textContent = `当前网站：${prompt.topOrigin}`;
+      site.append(requester, top);
+    } else {
+      site.textContent = prompt.origin ?? '当前网站';
+    }
     const description = doc.createElement('p');
     description.className = 'desc';
     description.id = 'description';
@@ -134,8 +178,47 @@ export function createPasskeyDialog(
     card.setAttribute('aria-describedby', 'description');
     card.append(head, site, description);
 
+    let selectedItemId: string | undefined;
+    if (prompt.stage === 'choose' && prompt.operation === 'get' && prompt.candidates && prompt.candidates.length > 1) {
+      selectedItemId = prompt.candidates[0]!.itemId;
+      const fieldset = doc.createElement('fieldset');
+      fieldset.className = 'candidates';
+      const legend = doc.createElement('legend');
+      legend.className = 'candidates-label';
+      legend.textContent = '选择要使用的通行密钥';
+      fieldset.append(legend);
+      prompt.candidates.forEach((candidate, index) => {
+        const optionLabel = doc.createElement('label');
+        optionLabel.className = 'candidate';
+        const radio = doc.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'vaultmesh-passkey-candidate';
+        radio.value = candidate.itemId;
+        radio.checked = index === 0;
+        radio.addEventListener('change', (event) => {
+          if (requireTrusted && !event.isTrusted) return;
+          if (radio.checked) selectedItemId = candidate.itemId;
+        });
+        const textBox = doc.createElement('span');
+        textBox.className = 'candidate-text';
+        const name = doc.createElement('span');
+        name.className = 'candidate-name';
+        name.textContent = candidate.account || candidate.title;
+        const sub = doc.createElement('span');
+        sub.className = 'candidate-sub';
+        sub.textContent = candidate.account && candidate.title !== candidate.account ? candidate.title : 'VaultMesh 通行密钥';
+        textBox.append(name, sub);
+        optionLabel.append(radio, textBox);
+        fieldset.append(optionLabel);
+      });
+      card.append(fieldset);
+    }
+
     let remember: HTMLInputElement | null = null;
-    if (prompt.stage === 'choose') {
+    const canRemember =
+      prompt.stage === 'no-match'
+      || (prompt.stage === 'choose' && !(prompt.operation === 'create' && prompt.sameOriginWithAncestors === false));
+    if (canRemember) {
       const label = doc.createElement('label');
       label.className = 'remember';
       remember = doc.createElement('input');
@@ -165,8 +248,13 @@ export function createPasskeyDialog(
     if (prompt.stage === 'choose') {
       row.append(
         button('使用浏览器/系统', () => handlers.choose(token, 'native', rememberValue()), 'outline'),
-        button('使用 VaultMesh', () => handlers.choose(token, 'vaultmesh', rememberValue()), 'primary'),
+        button('使用 VaultMesh', () => {
+          if (selectedItemId !== undefined) handlers.choose(token, 'vaultmesh', rememberValue(), selectedItemId);
+          else handlers.choose(token, 'vaultmesh', rememberValue());
+        }, 'primary'),
       );
+    } else if (prompt.stage === 'no-match') {
+      row.append(button('使用浏览器/系统', () => handlers.choose(token, 'native', rememberValue()), 'primary'));
     } else {
       row.append(
         button('改用浏览器/系统', () => handlers.choose(token, 'native', false), 'outline'),

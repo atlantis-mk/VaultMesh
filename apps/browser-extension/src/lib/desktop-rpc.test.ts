@@ -1,8 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { copyRecoveryCode, DesktopRpcError, getEmailOtpCandidates, getLoginDetail, getPasskeysForLogin, getRecoveryCodes, getUnlockHistory, getWorkspaceSnapshot, importRecoveryCodesFile, pollDesktopEvents } from "./desktop-rpc";
+import { backgroundDesktopRpc, copyRecoveryCode, DesktopRpcError, getEmailOtpCandidates, getLoginDetail, getPasskeysForLogin, getRecoveryCodes, getUnlockHistory, getWorkspaceSnapshot, importRecoveryCodesFile, pollDesktopEvents, setPossibleUnlockObserver } from "./desktop-rpc";
+import { persistentNativeConnection } from "./native-connection";
 
 describe("desktop RPC client", () => {
+  it("binds browser.unlock.request to a user gesture and observes page-triggered unlock operations only", async () => {
+    const requests: Array<{ operation: string; input: Record<string, unknown> }> = [];
+    const request = vi.spyOn(persistentNativeConnection, "request").mockImplementation(async (message) => {
+      requests.push({ operation: message.operation, input: message.input });
+      return { kind: "vaultmesh.rpc-result", version: 2, requestId: message.requestId, ok: true, result: { unlocked: true } };
+    });
+    const observed: string[] = [];
+    setPossibleUnlockObserver((operation) => { observed.push(operation); });
+
+    await backgroundDesktopRpc("browser.unlock.request");
+    await backgroundDesktopRpc("browser.autofill.execute", { id: "x" });
+    await backgroundDesktopRpc("passkeys.get", {});
+    await backgroundDesktopRpc("vault.status");
+
+    expect(requests[0]?.input.userGestureId).toEqual(expect.any(String));
+    expect(observed).toEqual(["browser.autofill.execute", "passkeys.get"]);
+    setPossibleUnlockObserver(null);
+    request.mockRestore();
+  });
+
   it("accepts lock and vault-change events retained across an idle lock and PIN unlock", async () => {
     const events = [
       { sequence: 6, type: "vault-locked", occurredAt: "2026-09-18T00:00:00.000Z" },

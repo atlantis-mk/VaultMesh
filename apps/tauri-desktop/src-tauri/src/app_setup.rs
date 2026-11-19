@@ -46,6 +46,11 @@ pub fn run() {
             {
                 api.prevent_close();
                 if let Some(state) = window.app_handle().try_state::<RuntimeState>() {
+                    desktop_authentication::invalidate_window(
+                        window.app_handle(),
+                        &state,
+                        agent_unlock_window::AGENT_UNLOCK_WINDOW_LABEL,
+                    );
                     agent_unlock_window::reject_displayed_unlock(&state);
                 }
                 let _ = window.hide();
@@ -97,6 +102,9 @@ pub fn run() {
                 && let WindowEvent::CloseRequested { .. } = event
             {
                 if let Some(state) = window.app_handle().try_state::<RuntimeState>() {
+                    if let Some(webview) = window.app_handle().get_webview_window("main") {
+                        window_layout_adapter::record_main_window_closing(&webview, &state);
+                    }
                     if let Ok(mut requests) = state.api_requests.lock() {
                         requests.clear();
                     }
@@ -587,7 +595,11 @@ pub fn run() {
             let browser_preauth_preview = BrowserPreAuthPreviewStore::new(
                 credentials_store.scoped(browser_preauth_preview::PREAUTH_PREVIEW_SERVICE),
             );
-            let browser_autofill_unlocks = Arc::new(Mutex::new(BrowserAutofillUnlockQueue::default()));
+            let browser_pin = Arc::new(Mutex::new(PinQuickUnlockService::new_browser_with_credentials(
+                app_data.join("browser-pin-unlock.json"),
+                &credentials_store,
+            )));
+            let browser_unlocks = Arc::new(Mutex::new(BrowserUnlockQueue::default()));
             #[cfg(unix)]
             let (browser_listener, browser_http_listener) =
                 BrowserPairingService::new(app_data.join("browser-pairing.json"), &credentials_store)
@@ -603,8 +615,9 @@ pub fn run() {
                             Arc::clone(&native_dialog_focus),
                             Arc::clone(&email_otp),
                             Arc::clone(&desktop_biometric),
+                            Arc::clone(&browser_pin),
                             browser_preauth_preview.clone(),
-                            Arc::clone(&browser_autofill_unlocks),
+                            Arc::clone(&browser_unlocks),
                         ));
                         BrowserBrokerCore::new_with_platform(vault_path.clone(), secret, platform).ok()
                     })
@@ -635,8 +648,9 @@ pub fn run() {
                 let browser_native_dialog_focus = Arc::clone(&native_dialog_focus);
                 let browser_email_otp = Arc::clone(&email_otp);
                 let browser_biometric = Arc::clone(&desktop_biometric);
+                let win_browser_pin = Arc::clone(&browser_pin);
                 let browser_preview = browser_preauth_preview.clone();
-                let browser_unlocks = Arc::clone(&browser_autofill_unlocks);
+                let win_browser_unlocks = Arc::clone(&browser_unlocks);
                 let browser_credentials_store = Arc::clone(&credentials_store);
                 let broker_factory = Arc::new(move || {
                     let secret =
@@ -655,8 +669,9 @@ pub fn run() {
                         Arc::clone(&browser_native_dialog_focus),
                         Arc::clone(&browser_email_otp),
                         Arc::clone(&browser_biometric),
+                        Arc::clone(&win_browser_pin),
                         browser_preview.clone(),
-                        Arc::clone(&browser_unlocks),
+                        Arc::clone(&win_browser_unlocks),
                     ));
                     BrowserBrokerCore::new_with_platform(
                         browser_vault_path.clone(),
@@ -683,8 +698,8 @@ pub fn run() {
                         app.handle().clone(), app_data.clone(), Arc::clone(&settings),
                         settings_path.clone(), Arc::clone(&clipboard_value),
                         Arc::clone(&native_dialog_focus), Arc::clone(&email_otp),
-                        Arc::clone(&desktop_biometric), browser_preauth_preview.clone(),
-                        Arc::clone(&browser_autofill_unlocks),
+                        Arc::clone(&desktop_biometric), Arc::clone(&browser_pin),
+                        browser_preauth_preview.clone(), Arc::clone(&browser_unlocks),
                     ).into_bitwarden_development(&app_data);
                     BrowserBrokerCore::new_with_platform(vault_path.clone(), secret, Arc::new(platform)).ok()
                 }).and_then(|broker| {
@@ -714,7 +729,7 @@ pub fn run() {
                 agent_broker,
                 agent_pairing_window_request: Arc::new(Mutex::new(None)),
                 agent_unlock_window_request: Arc::new(Mutex::new(None)),
-                browser_autofill_unlocks,
+                browser_unlocks,
                 agent_authorization_window_request: Arc::new(Mutex::new(None)),
                 agent_authorization_window_deadline: Arc::new(AtomicU64::new(0)),
                 agent_resources,
@@ -751,6 +766,10 @@ pub fn run() {
                     pin_path,
                     &credentials_store,
                 ))),
+                browser_pin,
+                main_window_layout: Arc::new(Mutex::new(
+                    window_layout_adapter::MainWindowLayoutState::default(),
+                )),
                 browser_preauth_preview,
                 lan_pairing: Arc::new(Mutex::new(LanPairingService::new_with_credentials(
                     lan_peer_trust_path,
@@ -790,6 +809,7 @@ pub fn run() {
             desktop_authentication_begin,
             desktop_authentication_layout,
             desktop_authentication_cancel,
+            window_layout_adapter::desktop_window_set_compact_mode,
             desktop_activity,
             agent_pairing_status,
             agent_pairing_resolve,

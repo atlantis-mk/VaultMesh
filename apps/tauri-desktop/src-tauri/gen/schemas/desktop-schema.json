@@ -207,40 +207,40 @@
           "markdownDescription": "Allows the isolated pairing window to read its pending-client status."
         },
         {
-          "description": "Allows the isolated MCP unlock window to unlock the Agent-only runtime with its independent OS biometric credential.",
+          "description": "Allows the isolated unified unlock window to unlock the active request with OS biometric authentication.",
           "type": "string",
           "const": "allow-agent-unlock-biometric",
-          "markdownDescription": "Allows the isolated MCP unlock window to unlock the Agent-only runtime with its independent OS biometric credential."
+          "markdownDescription": "Allows the isolated unified unlock window to unlock the active request with OS biometric authentication."
         },
         {
-          "description": "Allows the isolated MCP unlock window to cancel only its displayed unlock request.",
+          "description": "Allows the isolated unified unlock window to cancel only its displayed unlock request.",
           "type": "string",
           "const": "allow-agent-unlock-cancel",
-          "markdownDescription": "Allows the isolated MCP unlock window to cancel only its displayed unlock request."
+          "markdownDescription": "Allows the isolated unified unlock window to cancel only its displayed unlock request."
         },
         {
-          "description": "Allows the isolated MCP unlock window to unlock the Agent-only runtime with a user-entered master password.",
+          "description": "Allows the isolated unified unlock window to verify a user-entered master password for the active unlock request.",
           "type": "string",
           "const": "allow-agent-unlock-password",
-          "markdownDescription": "Allows the isolated MCP unlock window to unlock the Agent-only runtime with a user-entered master password."
+          "markdownDescription": "Allows the isolated unified unlock window to verify a user-entered master password for the active unlock request."
         },
         {
-          "description": "Allows the isolated MCP unlock window to unlock the Agent-only runtime with an Agent-specific PIN.",
+          "description": "Allows the isolated unified unlock window to unlock the active request with its domain-specific PIN.",
           "type": "string",
           "const": "allow-agent-unlock-pin",
-          "markdownDescription": "Allows the isolated MCP unlock window to unlock the Agent-only runtime with an Agent-specific PIN."
+          "markdownDescription": "Allows the isolated unified unlock window to unlock the active request with its domain-specific PIN."
         },
         {
-          "description": "Allows the isolated MCP unlock window to switch only between per-connection and paired-client shared unlock scope while a request is displayed.",
+          "description": "Allows the isolated unified unlock window to switch only between per-connection and paired-client shared unlock scope while an Agent request is displayed.",
           "type": "string",
           "const": "allow-agent-unlock-set-scope",
-          "markdownDescription": "Allows the isolated MCP unlock window to switch only between per-connection and paired-client shared unlock scope while a request is displayed."
+          "markdownDescription": "Allows the isolated unified unlock window to switch only between per-connection and paired-client shared unlock scope while an Agent request is displayed."
         },
         {
-          "description": "Allows the isolated MCP unlock window to read its current safe request and factor status.",
+          "description": "Allows the isolated unified unlock window to read its current safe request and factor status.",
           "type": "string",
           "const": "allow-agent-unlock-status",
-          "markdownDescription": "Allows the isolated MCP unlock window to read its current safe request and factor status."
+          "markdownDescription": "Allows the isolated unified unlock window to read its current safe request and factor status."
         },
         {
           "description": "Allows the bundled main window to refresh the idle-lock deadline.",
@@ -249,16 +249,22 @@
           "markdownDescription": "Allows the bundled main window to refresh the idle-lock deadline."
         },
         {
-          "description": "Allows only the main window to manage its non-secret native authentication presentation.",
+          "description": "Allows authorized unlock windows to manage their non-secret native authentication presentation.",
           "type": "string",
           "const": "allow-desktop-authentication",
-          "markdownDescription": "Allows only the main window to manage its non-secret native authentication presentation."
+          "markdownDescription": "Allows authorized unlock windows to manage their non-secret native authentication presentation."
         },
         {
           "description": "Allows the bundled main window to invoke the validated VaultMesh dispatcher.",
           "type": "string",
           "const": "allow-desktop-invoke",
           "markdownDescription": "Allows the bundled main window to invoke the validated VaultMesh dispatcher."
+        },
+        {
+          "description": "Allows authorized unlock windows to synchronize compact card layout dimensions.",
+          "type": "string",
+          "const": "allow-desktop-window-layout",
+          "markdownDescription": "Allows authorized unlock windows to synchronize compact card layout dimensions."
         },
         {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",

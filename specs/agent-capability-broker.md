@@ -234,7 +234,7 @@ quick-unlock record 与 OS credential namespace 必须独立于 desktop/browser�
 privileged runtime 必须在同一次本地确认后同步 provision 独立 Agent biometric record；禁用、改密、Vault switch/restore
 或 factor drift 必须同时失效。每个新 unlock request 检测到有效 Agent biometric record 后必须自动尝试一次 Touch ID，
 不得因状态刷新或失败重复弹出；失败或取消后窗口必须显示明确错误并保留主密码 fallback，主密码表单必须支持 Enter
-和按钮提交。
+和按钮提交。该窗口自 ADR-0058 起与桌面主窗口、浏览器插件解锁共用同一紧凑解锁卡片（标题 `解锁 VaultMesh Agent工具`）与嵌入式 `LAAuthenticationView`，经 `UnlockSurfaceFactory` 分发到 `AgentMcpUnlockAdapter`，PIN 仅使用 `state.agent_pin`（桌面端安全中心“PIN 快速解锁”可统一管理，`agent.pin.status/enable/disable`，存储与失败计数仍独立）；Agent 窗口只允许 `main` 与 `agent-unlock` 窗口调用嵌入式认证命令，`agent-pairing` 与 `agent-authorization` 不得获得该权限，窗口切换时按 generation 使旧认证失效。浏览器会话解锁请求复用同一窗口但属于独立的 `BrowserSessionUnlockAdapter`，不得满足 Agent access gate。
 
 锁定状态下，`initialize`、`tools/list` 与 `vaultmesh_request_local_ui` 可以工作；账号
 目录及全部 Vault action 必须返回 typed `mcp-locked` 并唤起 Agent unlock window。MCP 不提供 session 状态查询、

@@ -293,12 +293,15 @@ fn is_broker_operation(operation: &str) -> bool {
             | "vault.lock"
             | "events.poll"
             | "browser.pairing.status"
+            | "browser.unlock.request"
             | "confirmation.request"
             | "browser.autofill.candidates"
             | "browser.autofill.profile"
             | "browser.autofill.execute"
             | "browser.fill.request"
+            | "passkeys.create"
             | "passkeys.probe"
+            | "passkeys.get"
     )
 }
 
