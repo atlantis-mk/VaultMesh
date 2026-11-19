@@ -1,0 +1,33 @@
+name: PR 26 Windows validation
+
+on:
+  push:
+    branches:
+      - codex/pr26-windows-validation
+
+permissions:
+  contents: read
+
+jobs:
+  windows-browser:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr26-windows-browser
+          cache-on-failure: true
+      - name: Compile the Windows desktop runtime
+        run: cargo check --locked -p vaultmesh-tauri-desktop
+      - name: Verify Windows broker lifecycle, registration, and HTTP discovery
+        run: |
+          cargo test --locked -p vaultmesh-tauri-desktop --lib ct_native_browser_001_windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p vaultmesh-tauri-desktop --lib test_browser_broker_http_listener_discover_and_security_and_rpc
