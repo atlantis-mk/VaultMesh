@@ -28,8 +28,33 @@ jobs:
         run: cargo check --locked -p vaultmesh-tauri-desktop
       - name: Verify Windows broker lifecycle, registration, and HTTP discovery
         run: |
-          cargo test --locked -p vaultmesh-tauri-desktop --lib ct_native_browser_001_windows
+          $build = cargo test --locked -p vaultmesh-tauri-desktop --lib --no-run --message-format=json
+          if ($LASTEXITCODE -ne 0) { $build | Write-Output; exit $LASTEXITCODE }
+          $testExe = $build | ForEach-Object { $_ | ConvertFrom-Json } |
+            Where-Object { $_.reason -eq "compiler-artifact" -and $_.target.name -eq "vaultmesh_tauri_desktop" -and $_.profile.test } |
+            Select-Object -ExpandProperty executable
+          if (-not $testExe -or -not (Test-Path -LiteralPath $testExe)) { throw "Rust unit test binary missing" }
+          $sdk = Join-Path ${env:ProgramFiles(x86)} "Windows Kits/10/bin"
+          $mt = Get-ChildItem -Path "$sdk/*/x64/mt.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $mt) { throw "Windows SDK manifest tool missing" }
+          $manifest = Join-Path $env:RUNNER_TEMP "vaultmesh-tests.manifest"
+          @'
+          <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+            <dependency>
+              <dependentAssembly>
+                <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+                  version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+              </dependentAssembly>
+            </dependency>
+          </assembly>
+          '@ | Set-Content -LiteralPath $manifest -Encoding utf8
+          # Tauri adds Common Controls v6 to the app executable, but not the lib test harness.
+          & $mt.FullName -nologo "-manifest" "$manifest" "-outputresource:$testExe;#1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p vaultmesh-tauri-desktop --lib test_browser_broker_http_listener_discover_and_security_and_rpc
+          & $testExe ct_native_browser_001_windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p vaultmesh-tauri-desktop --lib windows_named_pipe_round_trip_reaches_browser_broker
+          & $testExe test_browser_broker_http_listener_discover_and_security_and_rpc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $testExe windows_named_pipe_round_trip_reaches_browser_broker
+          exit $LASTEXITCODE
