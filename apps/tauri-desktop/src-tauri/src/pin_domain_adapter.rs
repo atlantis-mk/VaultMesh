@@ -332,6 +332,7 @@ pub(crate) fn test_runtime_state(root: &Path) -> RuntimeState {
         _agent_pipe_listener: None,
         #[cfg(unix)]
         _browser_listener: None,
+        #[cfg(unix)]
         _browser_http_listener: None,
         _bitwarden_development_listener: None,
         #[cfg(target_os = "windows")]

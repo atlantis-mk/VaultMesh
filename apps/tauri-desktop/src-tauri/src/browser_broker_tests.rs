@@ -1605,6 +1605,82 @@ fn ct_browser_002_one_shot_fill_enforces_master_password_reprompt_and_lock_free_
     fs::remove_dir_all(root).expect("cleanup");
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn ct_native_browser_001_windows_http_and_pipe_share_lock_and_revoke() {
+    use crate::browser_broker_windows::{BrowserBrokerWindowsListener, test_pipe_round_trip};
+
+    struct RevokePlatform;
+    impl BrowserBrokerPlatform for RevokePlatform {
+        fn dispatch(
+            &self,
+            _runtime: &mut DesktopRuntime,
+            operation: &str,
+            _input: &Map<String, Value>,
+            _now_millis: i64,
+        ) -> Option<Result<Value, BrowserPlatformError>> {
+            (operation == "browser.pairing.revoke").then(|| Ok(json!({ "paired": false })))
+        }
+    }
+
+    let (root, path, _, secret) = setup("windows-shared-browser-broker");
+    let broker = Arc::new(Mutex::new(BrowserBrokerCore::new_with_platform(
+        path, Zeroizing::new(secret), Arc::new(RevokePlatform),
+    ).unwrap()));
+    let pipe_name = format!(r"\\.\pipe\VaultMesh.BrowserBroker.test.{}", Uuid::new_v4());
+    let pipe = BrowserBrokerWindowsListener::start_with_pipe_name(
+        pipe_name.clone(), Arc::clone(&broker),
+    ).unwrap();
+    let http = BrowserBrokerHttpListener::start_with_port(Arc::clone(&broker), 0).unwrap();
+    let make_request = |operation: &str, input: Value| {
+        let now = Utc::now();
+        envelope(&json!({
+            "kind": "vaultmesh.rpc", "version": RPC_VERSION, "requestId": Uuid::new_v4(),
+            "issuedAt": now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "expiresAt": (now + chrono::Duration::seconds(30)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            "operation": operation, "input": input,
+        }), &secret)
+    };
+
+    let through_pipe = |operation, input| test_pipe_round_trip(&pipe_name, &make_request(operation, input));
+    let through_http = |operation, input| -> Value {
+        let body = make_request(operation, input);
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", http.port())).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let origin = crate::browser_host_registration::allowed_origin(
+            crate::browser_host_registration::configured_extension_id().unwrap(),
+        ).unwrap();
+        write!(stream, "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nX-VaultMesh-Browser-Origin: {origin}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+        stream.write_all(&body).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+    };
+
+    let gesture = Uuid::new_v4();
+    let unlocked = through_http("vault.unlock", json!({ "masterPassword": PASSWORD, "userGestureId": gesture }));
+    assert_eq!(unlocked["ok"], true, "{unlocked}");
+    assert_eq!(through_pipe("vault.status", json!({}))["result"]["unlocked"], true);
+    assert_eq!(through_pipe("vault.lock", json!({ "userGestureId": gesture }))["ok"], true);
+    assert_eq!(through_http("vault.status", json!({}))["result"]["unlocked"], false);
+
+    let confirmation = through_http("confirmation.request", json!({
+        "operation": "browser.pairing.revoke", "userGestureId": gesture,
+    }));
+    assert_eq!(confirmation["ok"], true, "{confirmation}");
+    let revoke = through_http("browser.pairing.revoke", json!({
+        "confirmationToken": confirmation["result"]["confirmationToken"], "userGestureId": gesture,
+    }));
+    assert_eq!(revoke["ok"], true, "{revoke}");
+    assert_eq!(through_pipe("vault.status", json!({}))["status"], "unpaired");
+    assert_eq!(through_http("vault.status", json!({}))["status"], "unpaired");
+
+    http.stop();
+    pipe.stop();
+    drop(broker);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn test_browser_broker_http_listener_discover_and_security_and_rpc() {
     let (root, _path, broker, secret) = setup("http-broker-test");

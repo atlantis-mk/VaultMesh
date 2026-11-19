@@ -635,8 +635,6 @@ pub fn run() {
                         (unix, http)
                     })
                     .unwrap_or((None, None));
-            #[cfg(not(unix))]
-            let browser_http_listener = None;
             #[cfg(target_os = "windows")]
             let browser_integration = {
                 let browser_app_handle = app.handle().clone();
@@ -742,6 +740,7 @@ pub fn run() {
                 _agent_pipe_listener: agent_pipe_listener,
                 #[cfg(unix)]
                 _browser_listener: browser_listener,
+                #[cfg(unix)]
                 _browser_http_listener: browser_http_listener,
                 _bitwarden_development_listener: bitwarden_development_listener,
                 #[cfg(target_os = "windows")]
@@ -885,6 +884,7 @@ fn lock_system_authorizations(app: &AppHandle, state: &RuntimeState) {
     if let Some(listener) = &state._browser_listener {
         listener.lock_vault();
     }
+    #[cfg(unix)]
     if let Some(listener) = &state._browser_http_listener {
         listener.lock_vault();
     }
@@ -1112,6 +1112,7 @@ pub(super) fn cleanup_app_state(handle: &AppHandle) {
     if let Some(listener) = &state._browser_listener {
         listener.stop();
     }
+    #[cfg(unix)]
     if let Some(listener) = &state._browser_http_listener {
         listener.stop();
     }

@@ -3,8 +3,8 @@
 
 use std::io;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::AtomicUsize;
 use std::sync::Weak;
+use std::sync::atomic::AtomicUsize;
 
 pub const HTTP_PORT_RANGE_START: u16 = 42800;
 pub const HTTP_PORT_RANGE_END: u16 = 42850;
@@ -137,6 +137,7 @@ impl BrowserBrokerHttpListener {
 
     pub fn is_healthy(&self) -> bool {
         !self.stopping.load(Ordering::Acquire)
+            && self.thread.lock().is_ok_and(|thread| thread.as_ref().is_some_and(|thread| !thread.is_finished()))
     }
 
     pub fn active_deferred_count(&self) -> usize {
@@ -144,10 +145,10 @@ impl BrowserBrokerHttpListener {
     }
 
     pub fn lock_vault(&self) {
-        if let Some(broker) = self.broker.upgrade() {
-            if let Ok(mut broker) = broker.lock() {
-                broker.lock_for_system();
-            }
+        if let Some(broker) = self.broker.upgrade()
+            && let Ok(mut broker) = broker.lock()
+        {
+            broker.lock_for_system();
         }
     }
 

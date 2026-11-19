@@ -252,6 +252,7 @@ struct RuntimeState {
     _agent_pipe_listener: Option<Arc<AgentBrokerWindowsListener>>,
     #[cfg(unix)]
     _browser_listener: Option<Arc<BrowserBrokerUnixListener>>,
+    #[cfg(unix)]
     _browser_http_listener: Option<Arc<BrowserBrokerHttpListener>>,
     #[cfg(unix)]
     _bitwarden_development_listener: Option<Arc<BrowserBrokerUnixListener>>,

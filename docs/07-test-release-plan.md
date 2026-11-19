@@ -215,6 +215,8 @@ pnpm typecheck
 
 #### 浏览器 Gate 检查
 
+- CT-NATIVE-BROWSER-001 必须验证 Windows 回环 HTTP 可提供发现和 Browser RPC，回环 HTTP 与旧命名管道共享锁定与撤销，Doctor 对 Chrome、Edge、Firefox 分别检查实际注册表项，并拒绝未登记、目标文件不匹配、旧 Host 路径和错误扩展身份。
+
 - 当前 WXT 原插件的 `CT-BROWSER-001/003` 必须覆盖至少 500 条摘要的 25 条分页、跨页搜索与页码收敛，Broker 权威 Login/Secret/SSH 建议及无字段上下文时 card/identity 不误标，桌面锁定/撤销/停止后的 popup 全量瞬态清理，以及生成结果/历史 60 秒与隐藏清理和桌面受控复制。`CT-ITEM-001/002/003/004/005` 与 `CT-RECOVERY-001` 必须覆盖按实际存在值生成复制菜单、单条删除的可恢复/永久语义、四类安全恢复摘要和类型/目标绑定；编辑草稿必须覆盖隐藏、5 分钟期限、迟到详情及恢复码文件框 45 秒例外。
 - `CT-AUTOFILL-001` 必须验证多字段表单按 scope 单次自动目标采集、已尝试 scope 不重新采集、mutation 不触发整页 discovery、图标 100 毫秒有界重验与失格撤下、mutation 相关性过滤与单次 discovery 的 DOM 工作计数上界、新插入子树只观察 shadow root、按键不重跑 discovery、collector 忙与销毁、并发 focus/capture、重复候选点击以及 profile/DOM 并行后的失效拒绝；`CT-BROWSER-002` 同时验证 Rust 轻量授权检查前后锁定语义不变。
 - `CT-BROWSER-001` / `CT-SEC-002` 必须验证无变化轮询只读状态且复用当前摘要，版本/连接/数量变化、旧协议、手动刷新、锁定与销毁后重新读取；验证两项解锁状态并发、在途事件检查合并、写操作互斥、防重放、过期及迟到清理。构建页面必须验证加载反馈即时显示且不存在人为延迟样式；性能对比仅记录耗时、请求数、产物大小，不记录真实条目或秘密。

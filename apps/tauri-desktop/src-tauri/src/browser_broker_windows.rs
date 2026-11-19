@@ -470,67 +470,74 @@ mod tests {
         )
         .expect("listener");
         assert!(listener.is_healthy());
-        let handle = connect_for_test(&pipe_name).expect("connect");
-        let request = b"{}\n";
-        let mut written = 0_u32;
-        assert_ne!(
-            unsafe {
-                WriteFile(
-                    handle.0,
-                    request.as_ptr(),
-                    request.len() as u32,
-                    &mut written,
-                    null_mut(),
-                )
-            },
-            0
-        );
-        let mut response = [0_u8; 1024];
-        let mut read = 0_u32;
-        assert_ne!(
-            unsafe {
-                ReadFile(
-                    handle.0,
-                    response.as_mut_ptr(),
-                    response.len() as u32,
-                    &mut read,
-                    null_mut(),
-                )
-            },
-            0
-        );
-        let newline = response[..read as usize]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .expect("newline");
-        let value: Value = serde_json::from_slice(&response[..newline]).expect("response");
+        let value = test_pipe_round_trip(&pipe_name, b"{}");
         assert_eq!(value["kind"], "vaultmesh.host-status");
         assert_eq!(value["status"], "invalid-message");
         listener.stop();
         assert!(!listener.is_healthy());
     }
 
-    fn connect_for_test(pipe_name: &str) -> io::Result<OwnedHandle> {
-        use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
-        let wide_name = wide(pipe_name);
-        if unsafe { WaitNamedPipeW(wide_name.as_ptr(), 2_000) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let handle = unsafe {
-            CreateFileW(
-                wide_name.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                null(),
-                OPEN_EXISTING,
-                0,
+}
+
+#[cfg(test)]
+pub(crate) fn test_pipe_round_trip(pipe_name: &str, request: &[u8]) -> Value {
+    let handle = connect_for_test(pipe_name).expect("connect");
+    let line = [request, b"\n"].concat();
+    let mut written = 0u32;
+    assert_ne!(
+        unsafe { WriteFile(handle.0, line.as_ptr(), line.len() as u32, &mut written, null_mut()) },
+        0,
+    );
+    assert_eq!(written as usize, line.len());
+    // Read directly: peeking can report a disconnect before delivering a
+    // response the server already wrote.
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        let mut read = 0u32;
+        let result = unsafe {
+            ReadFile(
+                handle.0,
+                chunk.as_mut_ptr(),
+                chunk.len() as u32,
+                &mut read,
                 null_mut(),
             )
         };
-        if handle == INVALID_HANDLE_VALUE {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(OwnedHandle(handle))
+        assert_ne!(result, 0, "read response: {}", io::Error::last_os_error());
+        assert_ne!(read, 0, "pipe closed before completing the response");
+        let chunk = &chunk[..read as usize];
+        if let Some(end) = chunk.iter().position(|&byte| byte == b'\n') {
+            response.extend_from_slice(&chunk[..end]);
+            assert!(response.len() <= MAX_RESPONSE_BYTES);
+            return serde_json::from_slice(&response).expect("parse response");
         }
+        response.extend_from_slice(chunk);
+        assert!(response.len() <= MAX_RESPONSE_BYTES);
+    }
+}
+
+#[cfg(test)]
+fn connect_for_test(pipe_name: &str) -> io::Result<OwnedHandle> {
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+    let wide_name = wide(pipe_name);
+    if unsafe { WaitNamedPipeW(wide_name.as_ptr(), 2_000) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let handle = unsafe {
+        CreateFileW(
+            wide_name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            null(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(OwnedHandle(handle))
     }
 }
