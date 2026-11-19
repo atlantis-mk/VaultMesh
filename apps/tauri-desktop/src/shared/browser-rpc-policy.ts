@@ -23,7 +23,7 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   'vault.create': mutationWhileLocked(true),
   'vault.unlock': mutationWhileLocked(),
   'vault.unlock-history': metadata(false),
-  'vault.lock': mutation(),
+  'vault.lock': { ...mutation(), requiresUnlock: false },
   'vault.backup': systemDialog(true, true),
   'vault.restore': systemDialog(true, true),
   'vault.change-password': mutation(true),
@@ -43,6 +43,7 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   'events.poll': metadata(false),
   'browser.pairing.status': metadata(false),
   'browser.pairing.revoke': systemDialog(false, true),
+  'browser.unlock.request': systemDialog(false),
   'browser.autofill.candidates': metadata(false),
   'browser.autofill.profile': metadata(),
   'browser.autofill.execute': { capability: 'page-disclosure', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false },
@@ -65,9 +66,10 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   // user-activation checks before raising a proxy event. These routes are only
   // callable through the authenticated native channel and never disclose key
   // material to the extension.
-  'passkeys.create': automaticAudit,
+  'passkeys.create': { capability: 'mutation', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false },
   'passkeys.probe': metadata(false),
-  'passkeys.get': automaticPageDisclosure,
+  'passkeys.cancel': { capability: 'mutation', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false },
+  'passkeys.get': { capability: 'page-disclosure', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false },
   // The target policy is checked when the token is created. This helper must
   // remain callable while locked so `vault.create` can obtain its required
   // confirmation without opening unrelated locked operations.

@@ -1,133 +1,7 @@
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use p256::{
-    ecdsa::{Signature, SigningKey, signature::Signer},
-    pkcs8::EncodePublicKey,
-};
-use rand_core::{OsRng, RngCore};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use url::Url;
 use uuid::Uuid;
-use vaultmesh_ffi::{
-    DesktopRuntime, VAULTMESH_ITEM_KIND_SECRET, VAULTMESH_PROTECTED_FIELD_SECRET_VALUE,
-};
-use zeroize::{Zeroize, Zeroizing};
-
-const PASSKEY_SCOPE: &str = "vaultmesh:passkey:v1";
-const PASSKEY_PROVIDER: &str = "VaultMesh Passkey";
-const ES256: i64 = -7;
-const MAX_CHALLENGE_BYTES: usize = 16 * 1024;
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Override {
-    origin: String,
-    same_origin_with_ancestors: bool,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Extensions {
-    remote_desktop_client_override: Override,
-    #[serde(default)]
-    cred_props: bool,
-    appid: Option<String>,
-    large_blob: Option<LargeBlob>,
-}
-#[derive(Deserialize)]
-struct LargeBlob {
-    support: String,
-}
-#[derive(Deserialize)]
-struct Rp {
-    id: String,
-    name: String,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct User {
-    id: String,
-    name: String,
-    display_name: Option<String>,
-}
-#[derive(Deserialize)]
-struct Parameter {
-    #[serde(rename = "type")]
-    credential_type: String,
-    alg: i64,
-}
-#[derive(Deserialize)]
-struct Descriptor {
-    #[serde(rename = "type")]
-    credential_type: String,
-    id: String,
-    #[serde(default)]
-    transports: Vec<String>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Selection {
-    authenticator_attachment: Option<String>,
-    resident_key: Option<String>,
-    user_verification: Option<String>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateRequest {
-    rp: Rp,
-    user: User,
-    challenge: String,
-    pub_key_cred_params: Vec<Parameter>,
-    #[serde(default)]
-    exclude_credentials: Vec<Descriptor>,
-    authenticator_selection: Option<Selection>,
-    extensions: Extensions,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GetRequest {
-    challenge: String,
-    rp_id: String,
-    #[serde(default)]
-    allow_credentials: Vec<Descriptor>,
-    #[serde(default = "preferred")]
-    user_verification: String,
-    extensions: Extensions,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PrivateJwk {
-    kty: String,
-    crv: String,
-    x: String,
-    y: String,
-    d: String,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredPasskey {
-    version: u8,
-    credential_id: String,
-    rp_id: String,
-    user_handle: String,
-    user_name: String,
-    user_display_name: String,
-    login_id: Option<Uuid>,
-    private_key_jwk: PrivateJwk,
-    sign_count: u32,
-    #[serde(default)]
-    backup_eligible: bool,
-    #[serde(default)]
-    backup_state: bool,
-    created_at: String,
-    last_used_at: Option<String>,
-}
-
-pub struct PasskeyGetRequestView {
-    pub rp_id: String,
-    pub origin: String,
-    pub allow_credentials: Vec<String>,
-}
+pub use vaultmesh_core::PasskeyGetRequestView;
+use vaultmesh_core::{describe_passkey_request, get_passkey_request_view};
+use vaultmesh_ffi::DesktopRuntime;
 
 pub struct PasskeyGetSelection {
     pub item_id: Uuid,
@@ -143,56 +17,32 @@ impl PasskeyService {
         kind: &str,
         request_json: &str,
     ) -> Result<(String, String, Option<String>), String> {
-        if kind == "create" {
-            let request: CreateRequest = parse(request_json)?;
-            validate_common(&request.rp.id, &request.challenge, &request.extensions)?;
-            let (origin, _) = validated_origin(
-                &request.rp.id,
-                &request.extensions.remote_desktop_client_override,
-            )?;
-            return Ok((
-                request.rp.id,
-                origin,
-                Some(request.user.display_name.unwrap_or(request.user.name)),
-            ));
-        }
-        let (request, origin, _) = parse_get_request(request_json)?;
-        Ok((request.rp_id, origin, None))
+        let summary = describe_passkey_request(kind, request_json)
+            .map_err(|error| error.public_message().to_owned())?;
+        Ok((summary.rp_id, summary.origin, summary.account))
     }
 
     pub fn get_request_view(request_json: &str) -> Result<PasskeyGetRequestView, String> {
-        let (request, origin, _) = parse_get_request(request_json)?;
-        Ok(PasskeyGetRequestView {
-            rp_id: request.rp_id,
-            origin,
-            allow_credentials: request
-                .allow_credentials
-                .into_iter()
-                .map(|credential| credential.id)
-                .collect(),
-        })
+        get_passkey_request_view(request_json)
+            .map_err(|error| error.public_message().to_owned())
     }
 
     pub fn prepare_get(
         runtime: &mut DesktopRuntime,
         request_json: &str,
     ) -> Result<Option<PasskeyGetSelection>, String> {
-        let (request, origin, _) = parse_get_request(request_json)?;
-        let Some(selected) = select_passkey(runtime, &request, None)? else {
+        let mut candidates = runtime
+            .matching_passkeys(request_json)
+            .map_err(|error| error.public_message().to_owned())?;
+        if candidates.is_empty() {
             return Ok(None);
-        };
-        let item_id = selected["id"]
-            .as_str()
-            .and_then(|id| Uuid::parse_str(id).ok())
-            .ok_or("Passkey 数据无效。")?;
+        }
+        let selected = candidates.swap_remove(0);
         Ok(Some(PasskeyGetSelection {
-            item_id,
-            rp_id: request.rp_id,
-            origin,
-            account: selected["account"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned),
+            item_id: selected.item_id,
+            rp_id: selected.rp_id,
+            origin: selected.origin,
+            account: selected.account,
         }))
     }
 
@@ -202,131 +52,9 @@ impl PasskeyService {
         default_login_id: Option<Uuid>,
         now: &str,
     ) -> Result<String, String> {
-        let request: CreateRequest = parse(request_json)?;
-        validate_common(&request.rp.id, &request.challenge, &request.extensions)?;
-        if request.rp.name.len() > 256
-            || request.user.name.len() > 256
-            || request
-                .user
-                .display_name
-                .as_deref()
-                .is_some_and(|v| v.len() > 256)
-            || request.exclude_credentials.len() > 200
-            || request.pub_key_cred_params.is_empty()
-            || request.pub_key_cred_params.len() > 64
-            || request
-                .pub_key_cred_params
-                .iter()
-                .any(|parameter| parameter.credential_type != "public-key")
-            || !request.pub_key_cred_params.iter().any(|p| p.alg == ES256)
-            || request
-                .authenticator_selection
-                .as_ref()
-                .is_some_and(|selection| !valid_selection(selection))
-        {
-            return Err("Passkey 请求格式无效。".into());
-        }
-        if request
-            .authenticator_selection
-            .as_ref()
-            .and_then(|s| s.authenticator_attachment.as_deref())
-            == Some("cross-platform")
-        {
-            return Err("该网站仅允许外接安全密钥。".into());
-        }
-        if request
-            .extensions
-            .large_blob
-            .as_ref()
-            .is_some_and(|v| v.support == "required")
-        {
-            return Err("该网站要求当前版本尚不支持的 largeBlob 扩展。".into());
-        }
-        for descriptor in &request.exclude_credentials {
-            validate_descriptor(descriptor)?;
-            validate_b64(&descriptor.id)?;
-        }
-        let (origin, cross_origin) = validated_origin(
-            &request.rp.id,
-            &request.extensions.remote_desktop_client_override,
-        )?;
-        let summaries = passkey_summaries(runtime, &request.rp.id)?;
-        if summaries.iter().any(|v| {
-            request
-                .exclude_credentials
-                .iter()
-                .any(|d| scope(v, "credential:").as_deref() == Some(&d.id))
-        }) {
-            return Err("该账户已存在 Passkey。".into());
-        }
-        validate_b64(&request.user.id)?;
-        let signing = SigningKey::random(&mut OsRng);
-        let point = signing.verifying_key().to_encoded_point(false);
-        let x = point.x().ok_or("无法创建 Passkey。")?;
-        let y = point.y().ok_or("无法创建 Passkey。")?;
-        let mut credential = [0_u8; 32];
-        OsRng.fill_bytes(&mut credential);
-        let credential_id = URL_SAFE_NO_PAD.encode(credential);
-        let display = request
-            .user
-            .display_name
-            .clone()
-            .unwrap_or_else(|| request.user.name.clone());
-        let login_id = matching_login(runtime, &origin, &request.user.name, default_login_id)?;
-        let stored = StoredPasskey {
-            version: 1,
-            credential_id: credential_id.clone(),
-            rp_id: request.rp.id.clone(),
-            user_handle: request.user.id.clone(),
-            user_name: request.user.name.clone(),
-            user_display_name: display.clone(),
-            login_id,
-            private_key_jwk: PrivateJwk {
-                kty: "EC".into(),
-                crv: "P-256".into(),
-                x: URL_SAFE_NO_PAD.encode(x),
-                y: URL_SAFE_NO_PAD.encode(y),
-                d: URL_SAFE_NO_PAD.encode(signing.to_bytes()),
-            },
-            sign_count: 0,
-            backup_eligible: true,
-            backup_state: false,
-            created_at: now.into(),
-            last_used_at: None,
-        };
-        let stored_json =
-            Zeroizing::new(serde_json::to_string(&stored).map_err(|_| "无法保存 Passkey。")?);
-        let mut scopes = vec![
-            PASSKEY_SCOPE.to_owned(),
-            format!("rp:{}", request.rp.id),
-            format!("credential:{credential_id}"),
-        ];
-        if let Some(login_id) = login_id {
-            scopes.push(format!("login:{login_id}"));
-        }
-        runtime.execute("secrets.add", json!({
-            "title": format!("{} · {}", display, if request.rp.name.is_empty() { &request.rp.id } else { &request.rp.name }),
-            "kind": "authenticator-key", "secret": stored_json.as_str(), "provider": PASSKEY_PROVIDER,
-            "account": request.user.name, "environment": "Passkey",
-            "scopes": scopes,
-            "expiresAt": null, "website": origin, "notes": "由 WebAuthn 注册自动创建。私钥仅在桌面端加密保险库内用于签名。",
-            "folder": "Passkeys", "favorite": false, "masterPasswordReprompt": false
-        })).map_err(|e| e.public_message().to_owned())?;
-        let auth_data = registration_data(&request.rp.id, &credential, x, y)?;
-        let client = client_data("webauthn.create", &request.challenge, &origin, cross_origin)?;
-        let attestation = cbor_map(vec![
-            (Cbor::Text("fmt".into()), Cbor::Text("none".into())),
-            (Cbor::Text("attStmt".into()), Cbor::Map(vec![])),
-            (
-                Cbor::Text("authData".into()),
-                Cbor::Bytes(auth_data.clone()),
-            ),
-        ]);
-        let der = signing
-            .verifying_key()
-            .to_public_key_der()
-            .map_err(|_| "无法创建 Passkey。")?;
-        Ok(json!({"id":credential_id,"rawId":credential_id,"type":"public-key","authenticatorAttachment":"platform","response":{"clientDataJSON":URL_SAFE_NO_PAD.encode(client),"attestationObject":URL_SAFE_NO_PAD.encode(attestation),"authenticatorData":URL_SAFE_NO_PAD.encode(auth_data),"publicKey":URL_SAFE_NO_PAD.encode(der.as_bytes()),"publicKeyAlgorithm":ES256,"transports":["internal"]},"clientExtensionResults": if request.extensions.cred_props { json!({"credProps":{"rk":true}}) } else { json!({}) }}).to_string())
+        runtime
+            .create_passkey(request_json, default_login_id, now)
+            .map_err(|error| error.public_message().to_owned())
     }
 
     pub fn get_for_item(
@@ -335,392 +63,43 @@ impl PasskeyService {
         now: &str,
         allowed_item_id: Option<Uuid>,
     ) -> Result<String, String> {
-        let (request, origin, cross_origin) = parse_get_request(request_json)?;
-        let selected = select_passkey(runtime, &request, allowed_item_id)?
-            .ok_or("没有找到该网站可用的 Passkey。")?;
-        let id = selected["id"].as_str().ok_or("Passkey 数据无效。")?;
-        let secret = runtime
-            .protected_value(
-                VAULTMESH_ITEM_KIND_SECRET,
-                VAULTMESH_PROTECTED_FIELD_SECRET_VALUE,
-                id,
-                None,
-            )
-            .map_err(|e| e.public_message().to_owned())?;
-        let mut stored: StoredPasskey =
-            serde_json::from_str(secret.as_str()).map_err(|_| "Passkey 数据无效。")?;
-        if stored.version != 1
-            || stored.rp_id != request.rp_id
-            || scope(&selected, "credential:").as_deref() != Some(&stored.credential_id)
-            || stored.private_key_jwk.kty != "EC"
-            || stored.private_key_jwk.crv != "P-256"
-            || validate_b64(&stored.credential_id).is_err()
-            || validate_b64(&stored.user_handle).is_err()
-        {
-            return Err("Passkey 数据无效。".into());
-        }
-        let d = decode32(&stored.private_key_jwk.d)?;
-        let signing = SigningKey::from_slice(d.as_ref()).map_err(|_| "Passkey 私钥无效。")?;
-        let point = signing.verifying_key().to_encoded_point(false);
-        if point
-            .x()
-            .map(|value| URL_SAFE_NO_PAD.encode(value))
-            .as_deref()
-            != Some(stored.private_key_jwk.x.as_str())
-            || point
-                .y()
-                .map(|value| URL_SAFE_NO_PAD.encode(value))
-                .as_deref()
-                != Some(stored.private_key_jwk.y.as_str())
-        {
-            return Err("Passkey 私钥无效。".into());
-        }
-        let next = if stored.backup_eligible {
-            0
-        } else {
-            stored.sign_count.saturating_add(1)
-        };
-        let mut auth_data = assertion_data(&request.rp_id, next);
-        if stored.backup_eligible {
-            auth_data[32] |= 0x08;
-            if stored.backup_state {
-                auth_data[32] |= 0x10;
-            }
-        }
-        let client = client_data("webauthn.get", &request.challenge, &origin, cross_origin)?;
-        let mut signed = auth_data.clone();
-        signed.extend_from_slice(&Sha256::digest(&client));
-        let signature: Signature = signing.sign(&signed);
-        stored.sign_count = next;
-        stored.last_used_at = Some(now.into());
-        let stored_json =
-            Zeroizing::new(serde_json::to_string(&stored).map_err(|_| "无法更新 Passkey。")?);
-        runtime.execute("secrets.update", json!({
-            "id":id,"title":selected["title"],"kind":"authenticator-key","secret":stored_json.as_str(),
-            "provider":selected["provider"],"account":selected["account"],"environment":selected["environment"],
-            "scopes":selected["scopes"],"expiresAt":selected["expiresAt"],"website":selected["website"],
-            "notes":selected["notes"],"folder":selected["folder"],"favorite":selected["favorite"],"masterPasswordReprompt":false
-        })).map_err(|e| e.public_message().to_owned())?;
-        let client_extension_results = if request.extensions.appid.is_some() {
-            json!({"appid": false})
-        } else {
-            json!({})
-        };
-        Ok(json!({"id":stored.credential_id,"rawId":stored.credential_id,"type":"public-key","authenticatorAttachment":"platform","response":{"clientDataJSON":URL_SAFE_NO_PAD.encode(client),"authenticatorData":URL_SAFE_NO_PAD.encode(auth_data),"signature":URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes()),"userHandle":stored.user_handle},"clientExtensionResults":client_extension_results}).to_string())
-    }
-}
-
-fn parse_get_request(request_json: &str) -> Result<(GetRequest, String, bool), String> {
-    let request: GetRequest = parse(request_json)?;
-    validate_common(&request.rp_id, &request.challenge, &request.extensions)?;
-    if request.allow_credentials.len() > 200
-        || !matches!(
-            request.user_verification.as_str(),
-            "discouraged" | "preferred" | "required"
-        )
-    {
-        return Err("Passkey 请求格式无效。".into());
-    }
-    for descriptor in &request.allow_credentials {
-        validate_descriptor(descriptor)?;
-        validate_b64(&descriptor.id)?;
-    }
-    let (origin, cross_origin) = validated_origin(
-        &request.rp_id,
-        &request.extensions.remote_desktop_client_override,
-    )?;
-    Ok((request, origin, cross_origin))
-}
-
-fn select_passkey(
-    runtime: &mut DesktopRuntime,
-    request: &GetRequest,
-    allowed_item_id: Option<Uuid>,
-) -> Result<Option<Value>, String> {
-    let summaries = passkey_summaries(runtime, &request.rp_id)?;
-    Ok(summaries.into_iter().rev().find(|value| {
-        let item_allowed = allowed_item_id.is_none_or(|allowed| {
-            value["id"].as_str().and_then(|id| Uuid::parse_str(id).ok()) == Some(allowed)
-        });
-        item_allowed
-            && (request.allow_credentials.is_empty()
-                || request.allow_credentials.iter().any(|descriptor| {
-                    scope(value, "credential:").as_deref() == Some(&descriptor.id)
-                }))
-    }))
-}
-
-fn passkey_summaries(runtime: &mut DesktopRuntime, rp: &str) -> Result<Vec<Value>, String> {
-    let list = runtime
-        .execute("secrets.list", json!({}))
-        .map_err(|e| e.public_message().to_owned())?;
-    let mut out = vec![];
-    for item in list.as_array().ok_or("Passkey 数据无效。")? {
-        if item["kind"] == "authenticator-key" && item["provider"] == PASSKEY_PROVIDER {
-            let detail = runtime
-                .execute("secrets.detail", json!({"id":item["id"]}))
-                .map_err(|e| e.public_message().to_owned())?;
-            if detail["scopes"].as_array().is_some_and(|s| {
-                s.iter().any(|v| v == PASSKEY_SCOPE) && s.iter().any(|v| v == &format!("rp:{rp}"))
-            }) {
-                out.push(detail);
-            }
-        }
-    }
-    Ok(out)
-}
-fn scope(v: &Value, prefix: &str) -> Option<String> {
-    v["scopes"]
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .find_map(|s| s.strip_prefix(prefix).map(str::to_owned))
-}
-fn matching_login(
-    runtime: &mut DesktopRuntime,
-    origin: &str,
-    user: &str,
-    default_login_id: Option<Uuid>,
-) -> Result<Option<Uuid>, String> {
-    let v = runtime
-        .execute("browser.autofill.candidates", json!({"url":origin}))
-        .map_err(|e| e.public_message().to_owned())?;
-    let candidates = v.as_array().into_iter().flatten().collect::<Vec<_>>();
-    if let Some(default_login_id) = default_login_id {
-        let validated_default = candidates.iter().find_map(|candidate| {
-            candidate["id"]
-                .as_str()
-                .and_then(|id| Uuid::parse_str(id).ok())
-                .filter(|id| *id == default_login_id)
-        });
-        if validated_default.is_some() {
-            return Ok(validated_default);
-        }
-    }
-    let m = candidates
-        .into_iter()
-        .filter(|x| {
-            x["username"]
-                .as_str()
-                .is_some_and(|u| u.trim().eq_ignore_ascii_case(user.trim()))
-        })
-        .collect::<Vec<_>>();
-    Ok((m.len() == 1)
-        .then(|| m[0]["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()))
-        .flatten())
-}
-fn parse<T: for<'a> Deserialize<'a>>(s: &str) -> Result<T, String> {
-    if s.len() > 128 * 1024 {
-        return Err("Passkey 请求过大。".into());
-    }
-    serde_json::from_str(s).map_err(|_| "Passkey 请求格式无效。".into())
-}
-fn validate_common(rp: &str, challenge: &str, e: &Extensions) -> Result<(), String> {
-    if rp.is_empty() || rp.len() > 253 {
-        return Err("Passkey 请求格式无效。".into());
-    }
-    validate_challenge(challenge)?;
-    if let Some(appid) = &e.appid {
-        validate_appid(appid)?;
-    }
-    validated_origin(rp, &e.remote_desktop_client_override).map(|_| ())
-}
-fn validate_appid(appid: &str) -> Result<(), String> {
-    if appid.len() > 4096 {
-        return Err("Passkey 请求格式无效。".into());
-    }
-    let url = Url::parse(appid).map_err(|_| "Passkey 请求格式无效。")?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
-        return Err("Passkey 请求格式无效。".into());
-    }
-    Ok(())
-}
-fn validate_b64(v: &str) -> Result<(), String> {
-    let decoded = URL_SAFE_NO_PAD.decode(v);
-    let canonical = decoded
-        .as_ref()
-        .is_ok_and(|bytes| URL_SAFE_NO_PAD.encode(bytes) == v);
-    if v.is_empty() || v.len() > 4096 || !canonical {
-        Err("Passkey 请求格式无效。".into())
-    } else {
-        Ok(())
-    }
-}
-fn validate_challenge(v: &str) -> Result<(), String> {
-    let decoded = URL_SAFE_NO_PAD.decode(v);
-    let canonical = decoded
-        .as_ref()
-        .is_ok_and(|bytes| URL_SAFE_NO_PAD.encode(bytes) == v);
-    let bounded = decoded
-        .as_ref()
-        .is_ok_and(|bytes| !bytes.is_empty() && bytes.len() <= MAX_CHALLENGE_BYTES);
-    if !bounded || !canonical {
-        Err("Passkey 请求格式无效。".into())
-    } else {
-        Ok(())
-    }
-}
-fn validate_descriptor(descriptor: &Descriptor) -> Result<(), String> {
-    if descriptor.credential_type != "public-key"
-        || descriptor.transports.len() > 16
-        || descriptor
-            .transports
-            .iter()
-            .any(|transport| transport.len() > 32)
-    {
-        return Err("Passkey 请求格式无效。".into());
-    }
-    Ok(())
-}
-fn valid_selection(selection: &Selection) -> bool {
-    selection
-        .authenticator_attachment
-        .as_deref()
-        .is_none_or(|value| matches!(value, "platform" | "cross-platform"))
-        && selection
-            .resident_key
-            .as_deref()
-            .is_none_or(|value| matches!(value, "discouraged" | "preferred" | "required"))
-        && selection
-            .user_verification
-            .as_deref()
-            .is_none_or(|value| matches!(value, "discouraged" | "preferred" | "required"))
-}
-fn preferred() -> String {
-    "preferred".into()
-}
-
-impl Drop for PrivateJwk {
-    fn drop(&mut self) {
-        self.d.zeroize();
-    }
-}
-fn decode32(v: &str) -> Result<Zeroizing<[u8; 32]>, String> {
-    let b = URL_SAFE_NO_PAD
-        .decode(v)
-        .map_err(|_| "Passkey 私钥无效。")?;
-    let a: [u8; 32] = b.try_into().map_err(|_| "Passkey 私钥无效。")?;
-    Ok(Zeroizing::new(a))
-}
-fn validated_origin(rp: &str, o: &Override) -> Result<(String, bool), String> {
-    let u = Url::parse(&o.origin).map_err(|_| "Passkey 来源无效。")?;
-    if !matches!(u.scheme(), "http" | "https") || u.origin().ascii_serialization() != o.origin {
-        return Err("Passkey 来源无效。".into());
-    }
-    let h = u
-        .host_str()
-        .ok_or("Passkey 来源无效。")?
-        .to_ascii_lowercase();
-    let r = rp.to_ascii_lowercase();
-    if h != r && !h.ends_with(&format!(".{r}")) {
-        return Err("Passkey 来源与网站不匹配。".into());
-    }
-    Ok((o.origin.clone(), !o.same_origin_with_ancestors))
-}
-fn client_data(kind: &str, c: &str, o: &str, x: bool) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(&json!({"type":kind,"challenge":c,"origin":o,"crossOrigin":x}))
-        .map_err(|_| "Passkey 请求格式无效。".into())
-}
-fn registration_data(rp: &str, id: &[u8], x: &[u8], y: &[u8]) -> Result<Vec<u8>, String> {
-    if id.len() > u16::MAX as usize {
-        return Err("Passkey 请求格式无效。".into());
-    }
-    let key = cbor_map(vec![
-        (Cbor::Int(1), Cbor::Int(2)),
-        (Cbor::Int(3), Cbor::Int(ES256)),
-        (Cbor::Int(-1), Cbor::Int(1)),
-        (Cbor::Int(-2), Cbor::Bytes(x.to_vec())),
-        (Cbor::Int(-3), Cbor::Bytes(y.to_vec())),
-    ]);
-    let mut v = Sha256::digest(rp.as_bytes()).to_vec();
-    v.push(0x4d);
-    v.extend_from_slice(&[0; 4]);
-    v.extend_from_slice(&[0; 16]);
-    v.extend_from_slice(&(id.len() as u16).to_be_bytes());
-    v.extend_from_slice(id);
-    v.extend_from_slice(&key);
-    Ok(v)
-}
-fn assertion_data(rp: &str, n: u32) -> Vec<u8> {
-    let mut v = Sha256::digest(rp.as_bytes()).to_vec();
-    v.push(0x05);
-    v.extend_from_slice(&n.to_be_bytes());
-    v
-}
-enum Cbor {
-    Int(i64),
-    Text(String),
-    Bytes(Vec<u8>),
-    Map(Vec<(Cbor, Cbor)>),
-}
-fn cbor_map(v: Vec<(Cbor, Cbor)>) -> Vec<u8> {
-    cbor(Cbor::Map(v))
-}
-fn cbor(v: Cbor) -> Vec<u8> {
-    match v {
-        Cbor::Int(n) => len(
-            if n >= 0 { 0 } else { 1 },
-            if n >= 0 { n as u64 } else { (-1 - n) as u64 },
-        ),
-        Cbor::Text(s) => {
-            let mut v = len(3, s.len() as u64);
-            v.extend_from_slice(s.as_bytes());
-            v
-        }
-        Cbor::Bytes(b) => {
-            let mut v = len(2, b.len() as u64);
-            v.extend(b);
-            v
-        }
-        Cbor::Map(m) => {
-            let mut v = len(5, m.len() as u64);
-            for (k, x) in m {
-                v.extend(cbor(k));
-                v.extend(cbor(x));
-            }
-            v
-        }
-    }
-}
-fn len(m: u8, n: u64) -> Vec<u8> {
-    if n < 24 {
-        vec![(m << 5) | n as u8]
-    } else if n <= 255 {
-        vec![m << 5 | 24, n as u8]
-    } else if n <= 65535 {
-        let mut v = vec![m << 5 | 25];
-        v.extend_from_slice(&(n as u16).to_be_bytes());
-        v
-    } else {
-        let mut v = vec![m << 5 | 26];
-        v.extend_from_slice(&(n as u32).to_be_bytes());
-        v
+        runtime
+            .sign_passkey_assertion(request_json, allowed_item_id, None, now)
+            .map_err(|error| error.public_message().to_owned())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use p256::{
-        ecdsa::{VerifyingKey, signature::Verifier},
+        ecdsa::{Signature, VerifyingKey, signature::Verifier},
         pkcs8::DecodePublicKey,
     };
+    use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
     use std::fs;
 
     #[test]
-    fn origin_and_cbor_are_bounded() {
-        let o = Override {
-            origin: "https://login.example.com".into(),
-            same_origin_with_ancestors: true,
+    fn origin_and_rp_matching_are_bounded() {
+        let request = |rp_id: &str| {
+            json!({
+                "challenge": URL_SAFE_NO_PAD.encode(b"assertion challenge"),
+                "rpId": rp_id,
+                "allowCredentials": [],
+                "userVerification": "preferred",
+                "extensions": {
+                    "remoteDesktopClientOverride": {
+                        "origin": "https://login.example.com",
+                        "sameOriginWithAncestors": true
+                    }
+                }
+            })
+            .to_string()
         };
-        assert!(validated_origin("example.com", &o).is_ok());
-        assert!(validated_origin("evil.com", &o).is_err());
-        assert_eq!(cbor(Cbor::Int(-7)), vec![0x26]);
+        assert!(PasskeyService::describe("get", &request("example.com")).is_ok());
+        assert!(PasskeyService::describe("get", &request("evil.com")).is_err());
     }
 
     #[test]
@@ -768,11 +147,11 @@ mod tests {
 
     #[test]
     fn google_sized_challenge_has_a_separate_bounded_limit() {
-        let request = |challenge: String| {
+        let request = |challenge: String, allow: Value| {
             json!({
                 "challenge": challenge,
                 "rpId": "google.com",
-                "allowCredentials": [],
+                "allowCredentials": allow,
                 "userVerification": "preferred",
                 "extensions": {
                     "remoteDesktopClientOverride": {
@@ -785,13 +164,23 @@ mod tests {
         };
 
         let google_sized = URL_SAFE_NO_PAD.encode(vec![0x5a; 5_212]);
-        assert!(PasskeyService::describe("get", &request(google_sized)).is_ok());
+        assert!(PasskeyService::describe("get", &request(google_sized, json!([]))).is_ok());
 
+        let valid_challenge = URL_SAFE_NO_PAD.encode(b"challenge");
         let oversized = URL_SAFE_NO_PAD.encode(vec![0x5a; 16 * 1024 + 1]);
-        assert!(PasskeyService::describe("get", &request(oversized)).is_err());
+        assert!(PasskeyService::describe("get", &request(oversized, json!([]))).is_err());
 
         let oversized_identifier = URL_SAFE_NO_PAD.encode(vec![0x5a; 3_073]);
-        assert!(validate_b64(&oversized_identifier).is_err());
+        assert!(
+            PasskeyService::describe(
+                "get",
+                &request(
+                    valid_challenge,
+                    json!([{ "type": "public-key", "id": oversized_identifier }])
+                )
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -835,26 +224,36 @@ mod tests {
             "https://unrelated.test/login",
         );
 
-        assert_eq!(
-            matching_login(
-                &mut runtime,
-                "https://example.test",
-                "ada@example.test",
-                Some(default_login)
-            )
-            .expect("validated default"),
-            Some(default_login)
-        );
-        assert_eq!(
-            matching_login(
-                &mut runtime,
-                "https://example.test",
-                "ada@example.test",
-                Some(cross_origin)
-            )
-            .expect("username fallback"),
-            Some(username_match)
-        );
+        let make_create = |user_id: &[u8]| {
+            json!({
+                "rp": { "id": "example.test", "name": "Example" },
+                "user": { "id": URL_SAFE_NO_PAD.encode(user_id), "name": "ada@example.test", "displayName": "Ada" },
+                "challenge": URL_SAFE_NO_PAD.encode(b"registration challenge"),
+                "pubKeyCredParams": [{ "type": "public-key", "alg": -7 }],
+                "excludeCredentials": [],
+                "extensions": { "remoteDesktopClientOverride": { "origin": "https://example.test", "sameOriginWithAncestors": true } }
+            })
+            .to_string()
+        };
+
+        PasskeyService::create(
+            &mut runtime,
+            &make_create(b"u-default"),
+            Some(default_login),
+            "2027-01-15T08:00:00.000Z",
+        )
+        .expect("create with validated default");
+        PasskeyService::create(
+            &mut runtime,
+            &make_create(b"u-fallback"),
+            Some(cross_origin),
+            "2027-01-15T08:00:01.000Z",
+        )
+        .expect("create with username fallback");
+
+        let secrets = runtime.execute("secrets.list", json!({})).expect("secrets");
+        assert_eq!(secrets[0]["loginId"], default_login.to_string());
+        assert_eq!(secrets[1]["loginId"], username_match.to_string());
 
         runtime.lock();
         drop(runtime);
@@ -1100,6 +499,243 @@ mod tests {
         assert!(!persisted.to_string().contains("privateKeyJwk"));
         reopened.lock();
         drop(reopened);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn cross_origin_requires_top_origin_and_emits_it_in_client_data_json() {
+        let root =
+            std::env::temp_dir().join(format!("vaultmesh-passkey-cross-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("root");
+        let mut runtime = DesktopRuntime::new(root.join("cross.vault")).expect("runtime");
+        runtime
+            .create("passkey cross origin master password".into())
+            .expect("create vault");
+
+        let create_with_override = |override_value: Value| {
+            json!({
+                "rp": { "id": "example.test", "name": "Example" },
+                "user": { "id": URL_SAFE_NO_PAD.encode(b"user-cross"), "name": "ada@example.test", "displayName": "Ada" },
+                "challenge": URL_SAFE_NO_PAD.encode(b"reg-challenge"),
+                "pubKeyCredParams": [{ "type": "public-key", "alg": -7 }],
+                "excludeCredentials": [],
+                "extensions": { "remoteDesktopClientOverride": override_value }
+            })
+            .to_string()
+        };
+
+        assert!(
+            PasskeyService::describe(
+                "create",
+                &create_with_override(json!({
+                    "origin": "https://auth.example.test",
+                    "sameOriginWithAncestors": false
+                }))
+            )
+            .is_err()
+        );
+        assert!(
+            PasskeyService::describe(
+                "create",
+                &create_with_override(json!({
+                    "origin": "https://auth.example.test",
+                    "sameOriginWithAncestors": false,
+                    "topOrigin": "https://top.partner.test/path"
+                }))
+            )
+            .is_err()
+        );
+
+        let created = PasskeyService::create(
+            &mut runtime,
+            &create_with_override(json!({
+                "origin": "https://auth.example.test",
+                "sameOriginWithAncestors": false,
+                "topOrigin": "https://top.partner.test"
+            })),
+            None,
+            "2027-01-15T08:00:00.000Z",
+        )
+        .expect("cross-origin create");
+        let created: Value = serde_json::from_str(&created).expect("created json");
+        let create_client_data: Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(created["response"]["clientDataJSON"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(create_client_data["crossOrigin"], true);
+        assert_eq!(create_client_data["topOrigin"], "https://top.partner.test");
+        let verifying_key = VerifyingKey::from_public_key_der(
+            &URL_SAFE_NO_PAD
+                .decode(created["response"]["publicKey"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+
+        let cross_get = json!({
+            "challenge": URL_SAFE_NO_PAD.encode(b"get-challenge"),
+            "rpId": "example.test",
+            "allowCredentials": [],
+            "userVerification": "preferred",
+            "extensions": {
+                "remoteDesktopClientOverride": {
+                    "origin": "https://auth.example.test",
+                    "sameOriginWithAncestors": false,
+                    "topOrigin": "https://top.partner.test"
+                }
+            }
+        })
+        .to_string();
+        let view = PasskeyService::get_request_view(&cross_get).expect("cross get view");
+        assert!(view.cross_origin);
+        assert_eq!(view.top_origin.as_deref(), Some("https://top.partner.test"));
+
+        let assertion = PasskeyService::get_for_item(
+            &mut runtime,
+            &cross_get,
+            "2027-01-15T08:00:01.000Z",
+            None,
+        )
+        .expect("cross-origin get");
+        let assertion: Value = serde_json::from_str(&assertion).expect("assertion json");
+        let client_bytes = URL_SAFE_NO_PAD
+            .decode(assertion["response"]["clientDataJSON"].as_str().unwrap())
+            .unwrap();
+        let get_client_data: Value = serde_json::from_slice(&client_bytes).unwrap();
+        assert_eq!(get_client_data["crossOrigin"], true);
+        assert_eq!(get_client_data["topOrigin"], "https://top.partner.test");
+
+        let auth = URL_SAFE_NO_PAD
+            .decode(assertion["response"]["authenticatorData"].as_str().unwrap())
+            .unwrap();
+        let signature = Signature::from_der(
+            &URL_SAFE_NO_PAD
+                .decode(assertion["response"]["signature"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut signed = auth;
+        signed.extend_from_slice(&Sha256::digest(&client_bytes));
+        verifying_key.verify(&signed, &signature).expect("verify");
+
+        runtime.lock();
+        drop(runtime);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn multi_passkey_selects_and_signs_by_item_id() {
+        let root =
+            std::env::temp_dir().join(format!("vaultmesh-passkey-multi-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("root");
+        let mut runtime = DesktopRuntime::new(root.join("multi.vault")).expect("runtime");
+        runtime
+            .create("passkey multi account master password".into())
+            .expect("create vault");
+
+        let make_create = |user_id: &[u8], user_name: &str| {
+            json!({
+                "rp": { "id": "example.test", "name": "Example" },
+                "user": { "id": URL_SAFE_NO_PAD.encode(user_id), "name": user_name, "displayName": user_name },
+                "challenge": URL_SAFE_NO_PAD.encode(b"reg-challenge"),
+                "pubKeyCredParams": [{ "type": "public-key", "alg": -7 }],
+                "excludeCredentials": [],
+                "extensions": { "remoteDesktopClientOverride": { "origin": "https://example.test", "sameOriginWithAncestors": true } }
+            })
+            .to_string()
+        };
+
+        let first_raw = PasskeyService::create(
+            &mut runtime,
+            &make_create(b"u-ada", "ada@example.test"),
+            None,
+            "2027-01-15T08:00:00.000Z",
+        )
+        .expect("create first");
+        let first: Value = serde_json::from_str(&first_raw).unwrap();
+        let first_cred = first["id"].as_str().unwrap().to_owned();
+        let first_key = VerifyingKey::from_public_key_der(
+            &URL_SAFE_NO_PAD
+                .decode(first["response"]["publicKey"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+
+        let second_raw = PasskeyService::create(
+            &mut runtime,
+            &make_create(b"u-grace", "grace@example.test"),
+            None,
+            "2027-01-15T08:00:02.000Z",
+        )
+        .expect("create second");
+        let second: Value = serde_json::from_str(&second_raw).unwrap();
+        let second_cred = second["id"].as_str().unwrap().to_owned();
+
+        let get_request = json!({
+            "challenge": URL_SAFE_NO_PAD.encode(b"assertion challenge"),
+            "rpId": "example.test",
+            "allowCredentials": [],
+            "userVerification": "required",
+            "extensions": { "remoteDesktopClientOverride": { "origin": "https://example.test", "sameOriginWithAncestors": true } }
+        })
+        .to_string();
+
+        let candidates = runtime
+            .matching_passkeys(&get_request)
+            .expect("matching candidates");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].credential_id, second_cred);
+        assert_eq!(candidates[1].credential_id, first_cred);
+
+        let prepared = PasskeyService::prepare_get(&mut runtime, &get_request)
+            .expect("prepare")
+            .expect("some");
+        assert_eq!(prepared.item_id, candidates[0].item_id);
+        assert_eq!(prepared.account.as_deref(), Some("grace@example.test"));
+
+        let signed_first_raw = PasskeyService::get_for_item(
+            &mut runtime,
+            &get_request,
+            "2027-01-15T08:00:03.000Z",
+            Some(candidates[1].item_id),
+        )
+        .expect("sign selected older item_id");
+        let signed_first: Value = serde_json::from_str(&signed_first_raw).unwrap();
+        assert_eq!(signed_first["id"], first_cred);
+        let auth = URL_SAFE_NO_PAD
+            .decode(signed_first["response"]["authenticatorData"].as_str().unwrap())
+            .unwrap();
+        let client = URL_SAFE_NO_PAD
+            .decode(signed_first["response"]["clientDataJSON"].as_str().unwrap())
+            .unwrap();
+        let sig = Signature::from_der(
+            &URL_SAFE_NO_PAD
+                .decode(signed_first["response"]["signature"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut signed = auth;
+        signed.extend_from_slice(&Sha256::digest(client));
+        first_key.verify(&signed, &sig).expect("verify first key");
+
+        // Error messages preserve exact extension domException patterns across DesktopRuntime.
+        let cross_platform_req = json!({
+            "rp": { "id": "example.test", "name": "Example" },
+            "user": { "id": "AQ", "name": "a" },
+            "challenge": URL_SAFE_NO_PAD.encode(b"challenge"),
+            "pubKeyCredParams": [{ "type": "public-key", "alg": -7 }],
+            "authenticatorSelection": { "authenticatorAttachment": "cross-platform" },
+            "extensions": { "remoteDesktopClientOverride": { "origin": "https://example.test", "sameOriginWithAncestors": true } }
+        })
+        .to_string();
+        let err = runtime
+            .create_passkey(&cross_platform_req, None, "2027-01-15T08:00:04.000Z")
+            .unwrap_err();
+        assert!(err.public_message().contains("安全密钥"));
+
+        runtime.lock();
+        drop(runtime);
         fs::remove_dir_all(root).expect("cleanup");
     }
 }

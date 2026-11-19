@@ -3,6 +3,7 @@
 pub struct DesktopRuntime {
     path: PathBuf,
     vault: Option<VaultmeshVault>,
+    desktop_master_password_verified: bool,
     relay: std::sync::Arc<crate::sync_relay::RelayHub>,
 }
 
@@ -18,6 +19,7 @@ impl DesktopRuntime {
             relay: crate::sync_relay::RelayHub::for_path(&path),
             path,
             vault: None,
+            desktop_master_password_verified: false,
         })
     }
 
@@ -75,6 +77,7 @@ impl DesktopRuntime {
         let session = VaultSession::create(&master_password).map_err(map_runtime_core_error);
         master_password.zeroize();
         let mut session = session?;
+        let master_password_verified = matches!(unlock_source, UnlockEventSource::Desktop);
         session
             .record_unlock_event(unlock_source)
             .map_err(map_runtime_core_error)?;
@@ -83,6 +86,7 @@ impl DesktopRuntime {
         write_vault(&self.path, encrypted.as_slice())
             .map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
         self.replace(session, encrypted.as_slice());
+        self.desktop_master_password_verified = master_password_verified;
         Ok(self.status())
     }
 
@@ -106,6 +110,21 @@ impl DesktopRuntime {
         self.unlock_from_with_source(
             self.path.clone(),
             master_password,
+            UnlockEventSource::ExtensionMasterPassword,
+        )
+    }
+
+    /// Unlocks an independent browser-owned runtime using a verified 32-byte
+    /// Vault Key (without re-running Argon2 KDF) and records the browser
+    /// master-password authorization source.
+    pub fn unlock_for_browser_with_verified_key(
+        &mut self,
+        path: PathBuf,
+        vault_key: &[u8],
+    ) -> Result<DesktopRuntimeStatus, DesktopRuntimeError> {
+        self.unlock_with_quick_key_from_source(
+            path,
+            vault_key,
             UnlockEventSource::ExtensionMasterPassword,
         )
     }
@@ -160,11 +179,13 @@ impl DesktopRuntime {
         let unlocked = unlock_current_format(&path, &master_password, matches!(source, UnlockEventSource::Desktop));
         master_password.zeroize();
         let (mut session, encrypted) = unlocked?;
+        let master_password_verified = matches!(source, UnlockEventSource::Desktop);
         session
             .record_unlock_event(source)
             .map_err(map_runtime_core_error)?;
         self.path = path;
         self.replace(session, encrypted.as_slice());
+        self.desktop_master_password_verified = master_password_verified;
         Ok(self.status())
     }
 
@@ -183,6 +204,18 @@ impl DesktopRuntime {
             .quick_unlock_key()
             .map_err(map_runtime_core_error)?;
         Ok((self.path.clone(), key))
+    }
+
+    /// Preparing a new PIN in desktop settings requires this desktop session
+    /// to have authenticated with the master password.
+    pub fn desktop_pin_setup_material(
+        &mut self,
+    ) -> Result<(PathBuf, Zeroizing<[u8; 32]>), DesktopRuntimeError> {
+        self.refresh_from_disk()?;
+        if !self.desktop_master_password_verified {
+            return Err(VAULTMESH_STATUS_REAUTH_REQUIRED.into());
+        }
+        self.quick_unlock_material()
     }
 
     /// Unlocks with a Vault Key released by a privileged platform adapter and
@@ -260,6 +293,7 @@ impl DesktopRuntime {
     }
 
     pub fn lock(&mut self) -> DesktopRuntimeStatus {
+        self.desktop_master_password_verified = false;
         if let Some(mut vault) = self.vault.take() {
             vault.session.lock();
         }
@@ -659,5 +693,48 @@ fn unlock_current_format(
             Ok((session, upgraded))
         },
         Err(error) => Err(map_runtime_core_error(error)),
+    }
+}
+
+#[cfg(test)]
+mod verified_key_tests {
+    use super::*;
+
+    #[test]
+    fn browser_unlock_with_verified_key_unlocks_and_records_extension_master_password_source() {
+        let dir = std::env::temp_dir().join(format!("vaultmesh-verified-key-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("test.vault");
+        let mut creator = DesktopRuntime::new(path.clone()).expect("creator");
+        creator.create("correct horse battery staple".into()).expect("create");
+        let (_, key) = creator.quick_unlock_material().expect("key");
+        creator.lock();
+
+        let mut browser = DesktopRuntime::new(path.clone()).expect("browser");
+        let wrong_len = browser
+            .unlock_for_browser_with_verified_key(path.clone(), &[0_u8; 31])
+            .expect_err("short key must fail");
+        assert_eq!(wrong_len.status(), crate::VAULTMESH_STATUS_AUTH_FAILED);
+
+        let wrong_key = browser
+            .unlock_for_browser_with_verified_key(path.clone(), &[0_u8; 32])
+            .expect_err("wrong key must fail");
+        assert_eq!(wrong_key.status(), crate::VAULTMESH_STATUS_AUTH_FAILED);
+        assert!(!browser.is_unlocked());
+
+        let status = browser
+            .unlock_for_browser_with_verified_key(path.clone(), key.as_slice())
+            .expect("verified key unlock");
+        assert!(status.unlocked);
+        assert!(browser.is_unlocked());
+
+        let history = browser
+            .execute("vault.unlock-history", json!({}))
+            .expect("unlock history");
+        let events = history.as_array().expect("history array");
+        assert_eq!(events[0]["source"], "extension-master-password");
+
+        browser.lock();
+        std::fs::remove_dir_all(dir).expect("cleanup");
     }
 }

@@ -26,8 +26,8 @@ export function filterCandidatesByTypedUsername<
 >(candidates: readonly T[], typedQuery: string): T[] {
   const query = typedQuery.trim().toLocaleLowerCase();
   if (!query) return [...candidates];
-  return candidates.filter((candidate) => {
-    if (candidate.kind !== "login") return false;
+  const matched = candidates.filter((candidate) => {
+    if (candidate.kind !== "login" && candidate.kind !== "passkey") return false;
     const subtitle = candidate.subtitle.trim().toLocaleLowerCase();
     const atIndex = subtitle.indexOf("@");
     const localPart = atIndex > 0 ? subtitle.slice(0, atIndex) : "";
@@ -38,6 +38,17 @@ export function filterCandidatesByTypedUsername<
       || title.includes(query)
     );
   });
+  const hasMatchedPasskey = matched.some((candidate) => candidate.kind === "passkey");
+  if (!hasMatchedPasskey) return matched;
+  const nativeOptions = candidates.filter((candidate) => candidate.kind === "passkey-native");
+  if (nativeOptions.length === 0) return matched;
+  const firstNonPasskeyIndex = matched.findIndex((candidate) => candidate.kind !== "passkey");
+  if (firstNonPasskeyIndex < 0) return [...matched, ...nativeOptions];
+  return [
+    ...matched.slice(0, firstNonPasskeyIndex),
+    ...nativeOptions,
+    ...matched.slice(firstNonPasskeyIndex),
+  ];
 }
 
 export function fillResultStatus(response: unknown): string | null {

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { isOtpRequestAction, startAutofillPage } from "./autofill-page";
 import { discoverFields } from "./form-discovery";
 import { InlineAutofillMenu } from "./inline-autofill";
+import { PasskeyBrowserFactory } from "./passkey-browser-adapter";
 import {
   DEFAULT_PASSWORD_GENERATOR_OPTIONS,
   DEFAULT_USERNAME_GENERATOR_OPTIONS,
@@ -478,10 +479,20 @@ describe("startAutofillPage", () => {
     });
 
     returnEmpty = true;
-    triggerHost.click();
+    password.blur();
+    document.body.focus();
+    password.focus();
     await Promise.resolve();
     await Promise.resolve();
     expect(controller.menu.visible).toBe(false);
+    expect(sendMessage).not.toHaveBeenCalledWith({ kind: "vaultmesh.open-unlock" });
+
+    triggerHost.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(controller.menu.visible).toBe(true);
+    expect(controller.menu.locked).toBe(true);
+    expect(controller.menu.candidates).toEqual([]);
     expect(sendMessage).not.toHaveBeenCalledWith({ kind: "vaultmesh.open-unlock" });
     controller.dispose();
   });
@@ -1118,5 +1129,353 @@ describe("startAutofillPage", () => {
     expect(controller.trigger.visible).toBe(true);
     expect(controller.trigger.target).toBe(passwordField);
     controller.dispose();
+  });
+
+  it("shows conditional passkey candidates in locked state, filters in real time, preserves pending request on cancel, and allows native fallback", async () => {
+    document.body.innerHTML = `<form><input id="username" autocomplete="username webauthn"></form>`;
+    const username = document.querySelector<HTMLInputElement>("#username")!;
+    makeVisible(username);
+    const itemId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const inputListeners: EventListener[] = [];
+    const addEventListener = document.addEventListener.bind(document);
+    const registration = vi.spyOn(document, "addEventListener").mockImplementation((type, listener, options) => {
+      if (type === "input") inputListeners.push(listener as EventListener);
+      addEventListener(type, listener, options as AddEventListenerOptions);
+    });
+    let pendingPasskey = true;
+    let resolveStatus: "cancelled" | "ok" = "cancelled";
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const msg = message as { kind?: string };
+      if (msg.kind === "vaultmesh.autofill-state") return { status: "locked" };
+      if (msg.kind === "vaultmesh.autofill-candidates") {
+        return {
+          status: "locked",
+          requiresUnlock: true,
+          candidates: [],
+          passkeyCandidates: pendingPasskey
+            ? [{ requestId, itemId, credentialId: "cred-1", title: "Example", account: "alice@example.test" }]
+            : [],
+        };
+      }
+      if (msg.kind === "vaultmesh.passkey-conditional.select") {
+        if (resolveStatus === "cancelled") return { status: "cancelled", message: "已取消确认" };
+        pendingPasskey = false;
+        return { status: "ok" };
+      }
+      if (msg.kind === "vaultmesh.passkey-conditional.native") {
+        pendingPasskey = false;
+        return { status: "fallback" };
+      }
+      return {};
+    });
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    registration.mockRestore();
+    const dispatchTrustedInput = (target: Element) => {
+      for (const listener of inputListeners) {
+        listener({ isTrusted: true, composedPath: () => [target] } as unknown as Event);
+      }
+    };
+
+    username.focus();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(controller.menu.visible).toBe(true);
+    expect(controller.menu.candidates).toEqual([
+      expect.objectContaining({ kind: "passkey", id: itemId, requestId, credentialId: "cred-1", subtitle: "alice@example.test" }),
+      expect.objectContaining({ kind: "passkey-native", requestId, title: "使用浏览器/系统通行密钥" }),
+    ]);
+
+    username.value = "ali";
+    dispatchTrustedInput(username);
+    expect(controller.menu.visible).toBe(true);
+    expect(controller.menu.candidates).toHaveLength(2);
+
+    username.value = "other";
+    dispatchTrustedInput(username);
+    expect(controller.menu.visible).toBe(false);
+
+    username.value = "";
+    dispatchTrustedInput(username);
+    expect(controller.menu.visible).toBe(true);
+
+    // Selecting passkey triggers vaultmesh.passkey-conditional.select; desktop cancel preserves request for retry or native fallback.
+    const menuHost = document.querySelector<HTMLElement>("[data-vaultmesh-autofill]")!;
+    expect(menuHost).not.toBeNull();
+    // Re-open via trigger and simulate clicking passkey via menu callback isn't exposed directly; test via focus + trigger click + keyboard Enter on first option.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sendMessage).toHaveBeenCalledWith({
+      kind: "vaultmesh.passkey-conditional.select",
+      requestId,
+      itemId,
+      credentialId: "cred-1",
+    });
+    expect(controller.menu.visible).toBe(true);
+    expect(controller.menu.statusMessage).toContain("取消");
+
+    // Re-opening via trigger still offers the preserved conditional passkey & native option.
+    document.querySelector<HTMLElement>("[data-vaultmesh-autofill-trigger]")!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(controller.menu.candidates).toHaveLength(2);
+
+    // ArrowDown twice selects "使用浏览器/系统通行密钥".
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await Promise.resolve();
+    expect(sendMessage).toHaveBeenCalledWith({
+      kind: "vaultmesh.passkey-conditional.native",
+      requestId,
+    });
+    controller.dispose();
+  });
+
+  it("toggles the inline menu closed on real pointerdown + click ordering without immediately reopening", async () => {
+    document.body.innerHTML = `<form><input id="password" type="password"></form>`;
+    const password = document.querySelector<HTMLInputElement>("#password")!;
+    makeVisible(password);
+    const candidateId = crypto.randomUUID();
+    const shadows = new Map<Element, ShadowRoot>();
+    const originalAttachShadow = Element.prototype.attachShadow;
+    const attachSpy = vi.spyOn(Element.prototype, "attachShadow").mockImplementation(function (this: Element, init) {
+      const root = originalAttachShadow.call(this, init);
+      shadows.set(this, root);
+      return root;
+    });
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const kind = (message as { kind?: string }).kind;
+      if (kind === "vaultmesh.autofill-state") return { status: "ready" };
+      if (kind === "vaultmesh.autofill-candidates") {
+        return {
+          status: "ready",
+          candidates: [{ id: candidateId, kind: "login", title: "Example", subtitle: "ada@example.test", matchScope: "origin" }],
+        };
+      }
+      return { status: "ready" };
+    });
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    attachSpy.mockRestore();
+
+    try {
+      password.focus();
+      await Promise.resolve();
+      const triggerHost = document.querySelector<HTMLElement>("[data-vaultmesh-autofill-trigger]")!;
+      const menuHost = document.querySelector<HTMLElement>("[data-vaultmesh-autofill]")!;
+      const menuShadow = shadows.get(menuHost)!;
+
+      // First click (pointerdown + click) opens menu
+      triggerHost.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true }));
+      triggerHost.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(controller.menu.visible).toBe(true);
+      expect(controller.menu.target).toBe(password);
+
+      // Footer button must not hijack ArrowDown candidate indexing
+      expect(menuShadow.querySelector('[data-vaultmesh-footer-action="open-popup"]')).not.toBeNull();
+      expect(menuShadow.querySelectorAll('button[role="option"]')).toHaveLength(1);
+
+      // Second click (pointerdown + click) must NOT hide on pointerdown and immediately reopen on click
+      const callsBeforeToggle = sendMessage.mock.calls.filter(([msg]) => (msg as { kind?: string }).kind === "vaultmesh.autofill-candidates").length;
+      triggerHost.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true }));
+      expect(controller.menu.visible).toBe(true);
+      triggerHost.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(controller.menu.visible).toBe(false);
+      expect(sendMessage.mock.calls.filter(([msg]) => (msg as { kind?: string }).kind === "vaultmesh.autofill-candidates")).toHaveLength(callsBeforeToggle);
+
+      // Third click reopens, and clicking outside hides
+      triggerHost.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true }));
+      triggerHost.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(controller.menu.visible).toBe(true);
+      document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true }));
+      expect(controller.menu.visible).toBe(false);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  it("shows locked unlock card on click, unlocks via desktop, and refreshes candidates automatically", async () => {
+    document.body.innerHTML = `<form><input id="password" type="password"></form>`;
+    const password = document.querySelector<HTMLInputElement>("#password")!;
+    makeVisible(password);
+    let unlocked = false;
+    let unlockOutcome: { status: string; errorMessage?: string } = { status: "unlocked" };
+    const candidateId = crypto.randomUUID();
+    const shadows = new Map<Element, ShadowRoot>();
+    const originalAttachShadow = Element.prototype.attachShadow;
+    const attachSpy = vi.spyOn(Element.prototype, "attachShadow").mockImplementation(function (this: Element, init) {
+      const root = originalAttachShadow.call(this, init);
+      shadows.set(this, root);
+      return root;
+    });
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const kind = (message as { kind?: string }).kind;
+      if (kind === "vaultmesh.autofill-state") return { status: unlocked ? "ready" : "locked" };
+      if (kind === "vaultmesh.autofill-candidates") {
+        return unlocked
+          ? { status: "ready", candidates: [{ id: candidateId, kind: "login", title: "Unlocked Item", subtitle: "ada@example.test", matchScope: "origin" }] }
+          : { status: "locked", requiresUnlock: true, candidates: [] };
+      }
+      if (kind === "vaultmesh.open-unlock") {
+        if (unlockOutcome.status === "unlocked") unlocked = true;
+        return unlockOutcome;
+      }
+      return { status: "ready" };
+    });
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    attachSpy.mockRestore();
+
+    try {
+      password.focus();
+      await Promise.resolve();
+      const triggerHost = document.querySelector<HTMLElement>("[data-vaultmesh-autofill-trigger]")!;
+      const menuHost = document.querySelector<HTMLElement>("[data-vaultmesh-autofill]")!;
+      const menuShadow = shadows.get(menuHost)!;
+
+      triggerHost.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(controller.menu.visible).toBe(true);
+      expect(controller.menu.locked).toBe(true);
+      expect(menuShadow.textContent).toContain("VaultMesh 已锁定");
+
+      const unlockButton = menuShadow.querySelector<HTMLButtonElement>('[data-vaultmesh-footer-action="unlock"]')!;
+      expect(unlockButton).not.toBeNull();
+      unlockButton.click();
+      await vi.waitFor(() => {
+        expect(controller.trigger.locked).toBe(false);
+        expect(controller.menu.locked).toBe(false);
+        expect(controller.menu.candidates).toEqual([expect.objectContaining({ id: candidateId, title: "Unlocked Item" })]);
+      });
+      expect(sendMessage).toHaveBeenCalledWith({ kind: "vaultmesh.open-unlock" });
+
+      // Test unavailable unlock outcome
+      unlocked = false;
+      unlockOutcome = { status: "unavailable", errorMessage: "未连接 VaultMesh 桌面端，请先启动桌面端。" };
+      controller.menu.hide();
+      triggerHost.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      menuShadow.querySelector<HTMLButtonElement>('[data-vaultmesh-footer-action="unlock"]')!.click();
+      await vi.waitFor(() => {
+        expect(controller.menu.visible).toBe(true);
+        expect(controller.menu.statusMessage).toContain("未连接 VaultMesh 桌面端");
+      });
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  it("stays silent on passive focus when desktop is unavailable, but shows status on trigger click", async () => {
+    document.body.innerHTML = `<form><input id="username" autocomplete="username"><input id="password" type="password"></form>`;
+    const username = document.querySelector<HTMLInputElement>("#username")!;
+    makeVisible(username);
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const kind = (message as { kind?: string }).kind;
+      if (kind === "vaultmesh.autofill-state") return { status: "unavailable" };
+      if (kind === "vaultmesh.autofill-candidates") return { status: "unavailable", candidates: [] };
+      return {};
+    });
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+
+    try {
+      username.focus();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(controller.menu.visible).toBe(false);
+
+      document.querySelector<HTMLElement>("[data-vaultmesh-autofill-trigger]")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(controller.menu.visible).toBe(true);
+      expect(controller.menu.statusMessage).toContain("未连接 VaultMesh 桌面端");
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  it("renders open-popup footer action on Chromium (with fallback hint) and static hint on Firefox", async () => {
+    document.body.innerHTML = `<form><input id="password" type="password"></form>`;
+    const password = document.querySelector<HTMLInputElement>("#password")!;
+    makeVisible(password);
+    const shadows = new Map<Element, ShadowRoot>();
+    const originalAttachShadow = Element.prototype.attachShadow;
+    const attachSpy = vi.spyOn(Element.prototype, "attachShadow").mockImplementation(function (this: Element, init) {
+      const root = originalAttachShadow.call(this, init);
+      shadows.set(this, root);
+      return root;
+    });
+    let openPopupResponse: { status: string } = { status: "opened" };
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const kind = (message as { kind?: string }).kind;
+      if (kind === "vaultmesh.autofill-state") return { status: "ready" };
+      if (kind === "vaultmesh.autofill-candidates") {
+        return {
+          status: "ready",
+          candidates: [{ id: crypto.randomUUID(), kind: "login", title: "Example", subtitle: "ada@example.test", matchScope: "origin" }],
+        };
+      }
+      if (kind === "vaultmesh.open-popup") return openPopupResponse;
+      return { status: "ready" };
+    });
+    const targetSpy = vi.spyOn(PasskeyBrowserFactory, "currentTarget").mockReturnValue("chromium");
+    const controller = startAutofillPage(document, crypto.randomUUID(), sendMessage);
+    attachSpy.mockRestore();
+
+    try {
+      password.focus();
+      await Promise.resolve();
+      const triggerHost = document.querySelector<HTMLElement>("[data-vaultmesh-autofill-trigger]")!;
+      const menuHost = document.querySelector<HTMLElement>("[data-vaultmesh-autofill]")!;
+      const menuShadow = shadows.get(menuHost)!;
+
+      triggerHost.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      menuShadow.querySelector<HTMLButtonElement>('[data-vaultmesh-footer-action="open-popup"]')!.click();
+      await vi.waitFor(() => {
+        expect(sendMessage).toHaveBeenCalledWith({ kind: "vaultmesh.open-popup" });
+        expect(controller.menu.visible).toBe(false);
+      });
+
+      openPopupResponse = { status: "unavailable" };
+      triggerHost.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      menuShadow.querySelector<HTMLButtonElement>('[data-vaultmesh-footer-action="open-popup"]')!.click();
+      await vi.waitFor(() => {
+        expect(controller.menu.visible).toBe(true);
+        expect(controller.menu.statusMessage).toContain("请点击浏览器工具栏的 VaultMesh 图标");
+      });
+
+      // Clicking trigger while showing statusMessage reopens candidates instead of toggling closed
+      triggerHost.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(controller.menu.visible).toBe(true);
+      expect(controller.menu.statusMessage).toBeNull();
+
+      // Firefox shows static hint without open-popup button
+      targetSpy.mockReturnValue("firefox");
+      controller.menu.hide();
+      triggerHost.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(menuShadow.querySelector('[data-vaultmesh-footer-action="open-popup"]')).toBeNull();
+      expect(menuShadow.querySelector(".footer")?.textContent).toContain("点击工具栏 VaultMesh 图标可搜索或添加项目");
+    } finally {
+      targetSpy.mockRestore();
+      controller.dispose();
+    }
   });
 });

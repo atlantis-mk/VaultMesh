@@ -1,6 +1,6 @@
 import { Outlet, useLocation, useNavigate } from '@tanstack/react-router';
 import { ArrowLeftIcon, FingerprintIcon, LockKeyholeIcon, MailCheckIcon, ShieldCheckIcon, UploadIcon, SettingsIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
 import {
@@ -105,10 +105,17 @@ export function AppShell() {
   const isSecuritySubpage = pathname === '/vault/security/agent' || pathname === '/nearby';
   const isEmailOtp = pathname === '/vault/email-otp';
   const isItemEditor = isFocusedItemEditor(pathname);
+  const isCompactUnlock = pathname === '/unlock';
   const isViewportShell = usesViewportShell(pathname);
   const pageHeader = getVaultPageHeader(pathname);
   const [selectingImport, setSelectingImport] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+
+  useEffect(() => {
+    if (!isCompactUnlock) {
+      void window.vaultMesh?.desktop?.setCompactWindowMode?.(false).catch(() => {});
+    }
+  }, [isCompactUnlock]);
 
   const lock = async (): Promise<void> => {
     if (await lockVault()) {
@@ -151,7 +158,11 @@ export function AppShell() {
 
   return (
     <main
-      className={cn('bg-background text-foreground', isViewportShell ? 'flex h-svh w-full flex-col overflow-hidden' : 'min-h-svh', isItemEditor && 'mx-auto max-w-6xl')}
+      className={cn(
+        'bg-background text-foreground',
+        isViewportShell ? 'flex h-svh w-full flex-col overflow-hidden' : isCompactUnlock ? 'mx-auto w-full max-w-[460px] overflow-x-hidden' : 'min-h-svh',
+        isItemEditor && 'mx-auto max-w-6xl',
+      )}
       data-viewport-shell={isViewportShell ? 'true' : undefined}
     >
       {status?.unlocked ? (

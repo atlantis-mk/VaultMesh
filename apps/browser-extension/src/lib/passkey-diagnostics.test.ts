@@ -53,6 +53,15 @@ describe('explaining diagnostic lines', () => {
     ['[VaultMesh Passkey] create https://github.com -> cancelled (unlock-timed-out)', '5 分钟内没有解锁'],
     ['[VaultMesh Passkey] create https://github.com -> cancelled (desktop-confirmation-declined)', '原生确认框里点了取消'],
     ['[VaultMesh Passkey] https://github.com -> browser (unsupported-extension:prf, decided in page)', '不支持的扩展（prf）'],
+    ['[VaultMesh Passkey] get https://github.com -> browser (permissions-policy-denied, decided in page)', 'Permissions Policy'],
+    ['[VaultMesh Passkey] get https://github.com -> browser (site-mode-native)', '系统'],
+    ['[VaultMesh Passkey] get https://github.com -> browser (firefox-unsupported)', 'Firefox'],
+    ['[VaultMesh Passkey] get https://github.com -> browser (frame-ancestry-untrusted)', '框架来源链'],
+    ['[VaultMesh Passkey] get https://github.com -> pending (conditional-pending)', '条件式通行密钥'],
+    ['[VaultMesh Passkey] get https://github.com -> VaultMesh (default-vaultmesh)', '默认'],
+    ['[VaultMesh Passkey] get https://github.com -> VaultMesh (site-mode-vaultmesh)', 'VaultMesh'],
+    ['[VaultMesh Passkey] get https://github.com -> prompt (site-mode-ask)', '询问'],
+    ['[VaultMesh Passkey] get https://github.com -> prompt (no-match, in-page)', 'VaultMesh 对话框'],
     ['[VaultMesh Passkey] create https://github.com -> error (NotAllowedError, desktop-invalid-input: Passkey 请求格式无效。)', '桌面端未能完成：Passkey 请求格式无效。'],
   ])('explains %s', (message, expected) => {
     expect(explainPasskeyDiagnostic(message)).toContain(expected);

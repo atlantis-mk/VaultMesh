@@ -27,7 +27,7 @@ mailparse = "0.16.1"
 mdns-sd = { version = "0.21.3", default-features = false }
 rcgen = "0.14.8"
 open = "5.4.0"
-p256 = { version = "0.13.2", features = ["ecdsa", "pkcs8"] }
+p256.workspace = true
 rand_core.workspace = true
 regex = "1.13.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "form", "json", "query", "rustls"] }
@@ -46,6 +46,7 @@ tauri-plugin-dialog = "2.7.2"
 tauri-plugin-updater = { version = "2.10.1", default-features = false, features = ["native-tls", "zip"] }
 uuid.workspace = true
 url = "2.5.8"
+vaultmesh-core = { path = "../../../crates/vault-core" }
 vaultmesh-ffi = { path = "../../../crates/vault-ffi" }
 vaultmesh-lan-pairing = { path = "../../../crates/vault-lan-pairing", features = ["desktop-sync"] }
 zeroize.workspace = true
@@ -82,6 +83,3 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_Registry",
   "Win32_System_Threading",
 ] }
-
-[dev-dependencies]
-vaultmesh-core = { path = "../../../crates/vault-core" }

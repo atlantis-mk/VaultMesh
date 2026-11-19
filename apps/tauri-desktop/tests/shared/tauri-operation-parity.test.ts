@@ -40,4 +40,17 @@ describe('Tauri typed desktop operation parity', () => {
     expect(dispatcherSource).not.toContain('尚未迁移');
     expect(dispatcherSource).toContain('该桌面操作不被允许。');
   });
+
+  it('exposes explicit literal routes for browser and agent PIN management before test blocks', () => {
+    for (const operation of [
+      'browser.pin.status',
+      'browser.pin.enable',
+      'browser.pin.disable',
+      'agent.pin.status',
+      'agent.pin.enable',
+      'agent.pin.disable',
+    ]) {
+      expect(dispatcherSource).toContain(`"${operation}"`);
+    }
+  });
 });

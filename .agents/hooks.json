@@ -1,0 +1,40 @@
+{
+  "harness-contract-approval-gate": {
+    "PreToolUse": [
+      {
+        "matcher": "invoke_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../scripts/harness-approval-gate.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "swarm",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../scripts/harness-approval-gate.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "harness-parent-source-edit-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../scripts/harness-source-edit-guard.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

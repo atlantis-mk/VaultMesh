@@ -8,6 +8,7 @@
     "core:event:default",
     "allow-desktop-invoke",
     "allow-desktop-authentication",
+    "allow-desktop-window-layout",
     "allow-desktop-activity"
   ]
 }

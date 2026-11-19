@@ -184,6 +184,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：quick unlock 只包装随机 Vault Key，不保存主密码；锁定撤销授权；剪贴板值按配置过期。
 - 必须：macOS 主窗口的 UnlockPage 在已启用 Touch ID、可见且激活时通过平台适配器挂载原生嵌入式认证视图，持续等待指纹而不设应用固定超时；等待期间主密码/PIN 始终可提交，不占用全局 busy；指纹通过后到安全摘要就绪前必须显示打开进度。
 - 必须：失焦、隐藏、系统锁定、页面卸载、切换保险库或提交密码/PIN 时取消当前认证；恢复激活可重新等待。取消、凭据变化和旧会话的迟到回调不得解锁；重渲染和重复激活不得创建重复认证。失败保留显式重试和密码/PIN 回退。Windows 适配器首版明确暂不支持，不能隐式调用 macOS 逻辑；MCP 独立认证和超时不变。
+- 必须（ADR-0058）：桌面主窗口、浏览器插件与 Agent MCP 解锁复用同一紧凑解锁卡片，统一提供嵌入式 Touch ID、本域独立 PIN 与主密码；锁定态主窗口和统一解锁浮窗必须收缩到与卡片等大的紧凑尺寸（宽 460、默认视口高 440、前端实测卡片固有高度叠加 8px 防滚动条安全余量并将视口高度限制在 280–760 逻辑像素），并通过 `WindowChromeFactory`/`WindowChromeAdapter` 与 `plan_resize_steps` 执行三端顶栏补偿、缩放顺序与无竞态居中（macOS 动态补偿 `FullSizeContentView` 顶栏高度、冷启高 472，Windows/Linux 顶栏补偿 0、`agent-unlock` 冷启高 440，macOS/Windows 先 `SetMinSize` 再按需 `SetResizable(false)` 后 `SetSize`，Linux 临时启用 `SetResizable(true)` 后锁定；`main` 初始 `"center": true` 且进入 `/vault` 或 `/setup` 后立即恢复常规尺寸且不叠加顶栏补偿；在 `compact <-> normal` 跨模式切换后按当前显示器 `work_area`、`scale_factor`、目标尺寸与 `outer - inner` 外框差值计算 `SetPosition` 居中，macOS/Linux 使用 `Logical`、Windows 使用 `Physical` 并钳制于工作区边界；`agent-unlock` 与 `agent-authorization` 从隐藏态重新显示或隐藏态更新高度时同样按当前显示器重算居中）。嵌入式认证只允许 `main` 与 `agent-unlock` 窗口调用，`agent-pairing`、`agent-authorization` 一律拒绝；同一时刻仅在聚焦可见的解锁窗口挂载一个原生认证视图，窗口切换、失焦、隐藏、过期、切换请求或提交凭据按窗口 generation 使迟到回调失效。
+- 必须（ADR-0058）：桌面（`state.pin`）、浏览器（`state.browser_pin`）与 Agent（`state.agent_pin`）三端 PIN 保持独立存储、独立失败计数与锁定；桌面安全中心必须提供统一的“PIN 快速解锁”入口管理三端各自 PIN（桌面 operation `browser.pin.status/enable/disable`、`agent.pin.status` 与既有 `pin.*`、`agent.pin.enable/disable`）；启用需桌面已用主密码解锁，关闭需桌面已解锁；`vault.create`、`vault.change-password`、`vault.restore` 必须同步关闭三端全部 PIN，桌面主密码解锁只重置桌面 PIN 失败计数。
 - 必须：PIN/生物识别两项无凭据状态查询作为同一轮并发读取并共用在途事件检查；后台最多接纳两项此类只读查询，仍逐项验证来源、会话、版本、期限和防重放，不能与受控工具写操作并行。解锁、设置及其他特权操作不得借此绕过串行保护。
 - 必须：桌面设备凭据只保留一把操作系统钥匙串根条目（服务 `com.vaultmesh.desktop`、账户 `root-secret-v1`），并用它保护应用支持目录 `com.vaultmesh.desktop` 中的 `device-credentials.enc`。macOS 上同一 Team ID 签名的包内主程序和包内 `vaultmesh-native-host` 必须通过 Keychain Access Group `$(TeamIdentifierPrefix)com.vaultmesh.desktop` 共享该条目；没有 Team ID 时，创建和更新文件钥匙串条目都必须只信任这两个包内可执行文件，并按两个信任应用的不透明身份和当前 cdhash 分区全量校验，不得仅因存在某个看似匹配的 ACL 就跳过。主程序与 Host 必须以 VaultMesh 应用支持目录内 owner-only 非秘密文件锁串行检查和读取。读取根条目前必须先完成该校验；污染或旧版本根条目只可由用户主动启动的桌面主程序在每个 main/Host cdhash 组合下迁移一次：读取秘密、删除根条目并以仅信任双二进制与当前分区列表的 Access 重建，成功后写入非秘密迁移标记；标记匹配时不得再检查或修改 ACL，不得使用 `SecKeychainItemSetAccess`（它追加 ACL 且总要求密码）。重建失败必须恢复原秘密。Native Host 遇到未迁移或缺失条目必须 fail closed，不得请求系统修改或创建授权。用户取消或迁移失败时必须 fail closed。未签名程序、开发专用 Host、Agent sidecar 和其他第三方二进制不得加入 Access Group 或 Trusted Applications。根钥匙串不可用或用户取消修复时，桌面主程序必须降级启动（凭据存储拒绝一切读写、主密码解锁可用、PIN/生物识别/配对停用并显示不含秘密的原因），不得因此崩溃；发布构建在 `.app` 内无法形成完整共享计划（未签名或签名不一致）时必须在访问钥匙串前失败。未签名程序、开发专用 Host、Agent sidecar 和其他第三方二进制不得加入 Access Group 或 Trusted Applications。
 - 必须：主程序与 Native Host 使用同一 `device-credentials.enc`。统一存储不得读取、枚举或删除 v0.1.4 之前的旧凭据钥匙串 Service；凭据缺失时不得回退读取旧 `keyring` 条目。直接从 v0.1.1–v0.1.3 升级的安装必须重新设置 PIN/生物识别并重新配对。生产 PIN 与生物识别必须经过 `DeviceCredentialStore`。文件必须使用绑定应用标识、当前 OS 用户和协议版本的 AAD；空 AAD 的旧文件在解密成功后必须重封。给已签名主程序或包内 Host 补上 Keychain Access Group 时，必须合并进该二进制现有 entitlements，不得用只含访问组的 plist 覆盖其他 entitlement。
@@ -542,12 +544,13 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 ### REQ-BROWSER-001 配对与独立授权
 
-- 必须：当前 WXT popup 进入需要解锁的页面时，若当前 Vault 的桌面 Touch ID 配置可用且已启用，必须自动请求一次 macOS 系统认证；不得新建认证页面、自动重试或因重渲染重复弹窗。取消或失败后必须保留显式 Touch ID 重试与 PIN/主密码回退；用户开始输入或选择回退后不得由迟到状态查询启动认证。认证成功后必须显示摘要加载进度，摘要就绪前不得展示空主页。
-- 必须：Touch ID 由 privileged desktop runtime 调用，仅授予独立 Browser 授权。认证会话绑定当前已鉴权 Browser 通道、随机 session ID、Vault 和桌面 credential ID，最长 30 秒并以 3 秒轮询租约限制存活；关闭/隐藏 popup、切换 PIN/主密码、断连、锁定、撤销、凭据变化或期限结束必须取消并拒绝迟到结果；原生等待不得持有 broker 或凭据锁。
+- 必须（ADR-0058）：当前 WXT popup 锁定态只显示精简锁定页，不得在 popup 内收集 PIN/主密码或轮询 Touch ID；正常打开必须自动通过 `browser.unlock.request` 唤起一次桌面统一紧凑解锁窗（嵌入式 Touch ID、浏览器独立 PIN、主密码，标题 `解锁 VaultMesh 浏览器插件`），用户在设置中点击“立即锁定”后不得立即自动重弹，仅提供手动解锁按钮；popup 关闭、隐藏或失焦不得取消桌面解锁窗。认证成功后必须显示摘要加载进度，摘要就绪前不得展示空主页。
+- 必须：Touch ID 由 privileged desktop runtime 调用，仅授予独立 Browser 授权。统一解锁窗内的认证绑定窗口 generation 与当前浏览器解锁请求；既有（向后兼容）`biometric.authentication.*` 会话绑定当前已鉴权 Browser 通道、随机 session ID、Vault 和桌面 credential ID，最长 30 秒并以 3 秒轮询租约限制存活；关闭/隐藏 popup、切换 PIN/主密码、断连、锁定、撤销、凭据变化或期限结束必须取消并拒绝迟到结果；原生等待不得持有 broker 或凭据锁。
 
 - 必须：扩展通过固定 ID/native host 配对；桌面 unlock 不授权扩展，撤销立即清除浏览器访问。生产 Host 与桌面使用同一 `device-credentials.enc`；统一存储打开后不得回退到旧配对钥匙串条目。同一 Team ID 的签名包完成一次根钥匙串授权后，冷启动和自动填充不得再次弹出钥匙串密码。
 - 必须：桌面端在 `device-credentials.enc` 中维护绑定当前 `vault.enc` SHA-256 摘要的无秘密预授权自动填充候选预览索引（仅保存 `id`、`kind`、`title`、`subtitle`、归一化站点域名匹配列表、`autofillOnPageLoad`、`masterPasswordReprompt` 与布尔标志 `hasTotpSecret`，严禁包含密码、TOTP 种子、卡号/CVV/PIN、敏感信息正文、SSH 私钥/口令或恢复码）。当浏览器会话处于锁定状态时，`browser.autofill.candidates` 必须先校验磁盘 `vault.enc` SHA-256 与索引一致，再返回当前页面匹配的只读候选摘要并标记 `requiresUnlock: true`；摘要不匹配或无索引时返回空候选列表。
-- 必须：当浏览器会话锁定（或所选条目要求 `masterPasswordReprompt`）且用户在网页内联候选列表中显式点击某一条目填充时，`browser.autofill.execute` 必须唤起桌面端统一受保护临时解锁窗口（`agent-unlock`），展示目标 `origin`、条目名称与 30 秒倒计时（隐藏仅适用于 Agent 的范围开关），并在桌面 Touch ID 已启用且不要求 `masterPasswordReprompt` 时自动触发一次 Touch ID，支持在同一窗口内回退 PIN 或主密码；验证通过后仅在局部临时 `DesktopRuntime` 中生成单次 `ApprovedFill` 并立即销毁临时 Runtime，不得将 `BrowserBrokerCore` 会话置为已解锁或写入 `popupWorkspaceCache`，点击浏览器工具栏打开 Popup 仍须独立解锁。
+- 必须（ADR-0058，取代 ADR-0055 的单次临时解锁）：浏览器解锁为会话持久。当浏览器会话锁定且用户点击网页内联候选填充、点击 popup 解锁或发起 Passkey 请求时，Broker 必须唤起桌面端统一紧凑解锁窗口（`agent-unlock`），展示目标 `origin`、条目名称与 30 秒倒计时（隐藏仅适用于 Agent 的范围开关），在桌面 Touch ID 已启用时自动触发一次 Touch ID，支持同窗口回退浏览器 PIN（`state.browser_pin`）或主密码；验证通过后必须持久化解锁 `BrowserBrokerCore` 会话（除非已撤销），直至 `PluginSecurityPolicy`（空闲、系统锁定、浏览器重启）、`vault.lock` 或撤销锁定；已解锁期间非 card 且 `masterPasswordReprompt == false` 的填充必须零弹窗。card 与 `masterPasswordReprompt: true` 条目无论是否已解锁都必须通过仅主密码的重验解锁窗核验，验证后只生成一次性填充且不改写解锁状态。`browser.unlock.request` 已解锁时直接返回已解锁状态。浏览器解锁不得授予桌面或 Agent 授权。
+- 必须：主动锁定、系统锁定与配对撤销必须使先前的浏览器解锁和重验请求失效，即使认证结果已交给 Broker 等待提交。
 - 必须：当前 WXT 原插件的 popup 使用 Broker `browser.autofill.candidates` 作为 Login、Secret 与 SSH 当前页建议的权威来源，不得以本地 hostname 猜测替代；无来源字段上下文时不得把全部 card/identity 误标为当前页建议。摘要列表、搜索和类型筛选覆盖完整授权集合，每页最多 25 条；单条与批量删除必须明确区分可恢复条目和永久删除的 Secret/Passkey。
 - 必须：当前 WXT popup 打开期间持续读取桌面授权与事件序列；锁定、配对撤销、Host 停止或断连立即清除摘要、候选、编辑页、恢复列表、确认、生成结果与历史，并使迟到响应失效。Login、card、identity、SSH 与 Secret 编辑草稿隐藏时清除且最长保留 5 分钟；恢复码原生文件框只允许既有 45 秒有界例外，不能延长编辑期限。
 - 必须：插件必须接受 Broker 发出的 `vault-changed` 事件并在仍获授权时重新读取安全摘要；该事件不得被误判为桌面断连。空闲锁定产生的既有 `vault-locked` 事件在 PIN、主密码或生物识别重新解锁后，不得使已恢复的会话错误地进入断连状态。
@@ -564,6 +567,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 
 - 必须：RPC 请求有版本、大小、认证、关联、过期和防重放；每个操作分类并执行 unlock/gesture/confirmation policy。
 - 必须：Broker 仅判断解锁授权时使用 runtime 的轻量授权状态，不得为布尔检查构造各类条目摘要；磁盘变更、撤销、锁定和逐操作权限验证不得被性能优化跳过。
+- 必须（ADR-0058）：`browser.unlock.request` 是 popup 唤起统一解锁窗的 Browser RPC，必须在 operation schema、policy（`requiresUnlock: false`、`requiresGesture: true`、`requiresConfirmation: false`）、Rust dispatcher、扩展 client、workflow manifest（`vault-session`）与 parity 测试中同步存在；既有 `vault.unlock`、`pin.unlock`、`biometric.authentication.*` 保持向后兼容。
 - 验收：`CT-BROWSER-002`。
 
 ### REQ-BROWSER-003 插件非秘密偏好持久化
@@ -605,8 +609,8 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 - 必须：页内选择和页面自动填充使用来源 frame 内的短期不透明目标引用，将 discovery 限定到所属表单簇；主密码二次确认不得丢失原目标或覆盖策略。目标过期、移动、失去资格或文档改变时必须拒绝，不得回退全页填充；逐次写入必须继续校验表单归属。
 - 必须：mutation 不得触发整页 discovery；相关 mutation 只可以在固定 100 毫秒窗口内合并为局部无值发现与当前字段重验，不因连续 mutation 无限延期；collector 忙时只延后发现，不重试已发出的页面写入。已尝试的表单簇必须在整页目标采集前排除；首次 focus 可以等待正在进行的只读 capture 采集，但不得复用过期 DOM 绑定。图标失效必须立即撤下，重建可以短暂合并；同一目标的在途候选读取必须去重。
 - 必须：mutation 相关性以字段、表单或含字段容器为准：只有它们的增删与属性/语义文本变化可以触发对当前字段的有界重验，无关节点的 `class`/`style` churn、无关列表标记增删和插件自身注入 UI 不得触发任何工作；新插入子树的 shadow root 观察代价必须与被插入内容成正比；新增、显现或语义改变的登录/OTP 表单必须通过局部无值发现恢复自动填充就绪，局部 pass 的簇与目标采集不得隐式回退整页遍历，且必须保留原簇归属重验；跨 ShadowRoot.host 的祖先资格变化及关联标签语义变化也必须使原字段 UI 失效，禁止整页 `querySelectorAll("*")` 遍历。同文档导航、BFCache 恢复和显式 rescan 各重新执行一次发现；单次 discovery 的一次性 DOM 遍历必须与文档规模成正比，禁止按字段数 × 祖先深度重复全文档遍历；输入事件不得触发 discovery，编辑跟踪以本次填充记录的控件为准。
-- 必须：页内填充图标出现后必须为当前短期目标预取只读候选，同一 `targetRef` 的图标点击必须复用在途或已完成读取；点击必须立即展示候选浮层或加载态，不得等待 Broker 往返后才提供视觉反馈。预取结果不得跨字段、导航、失焦或目标期限复用，迟到的 OTP 候选必须清除。
-- 必须：用户在网页输入框聚焦或点击内联填充图标时，若浏览器会话锁定且存在匹配候选，必须直接展示内联候选浮层，并在用户于登录账号/邮箱输入框键入字符时按 `subtitle` 前缀、邮箱 `@` 前本地部分前缀或 `title` 子串实时过滤候选（无匹配时自动收起浮层，回删重新匹配时恢复展示），不得在聚焦时直接打开工具栏 Popup 强制全局解锁；锁定状态下页面加载自动填充（`autofillOnPageLoad`）不得自动拉起解锁窗口。
+- 必须：页内填充图标出现后必须为当前短期目标预取只读候选，同一 `targetRef` 的图标点击必须复用在途或已完成读取；点击以内联菜单为主交互，支持再次点击 `V` 图标 Toggle 收起（仅当 `menu.visible && menu.target === target && !menu.statusMessage` 时收起，处于错误/状态提示态时点击重开候选；`InlineAutofillMenu` 必须忽略来自触发器宿主的 `pointerdown` 以免先隐藏后重开）。预取结果不得跨字段、导航、失焦或目标期限复用，迟到的 OTP 候选必须清除。
+- 必须：用户在网页输入框被动聚焦时，若浏览器会话锁定且存在匹配候选，必须直接展示内联候选浮层（并可在底部附「解锁 VaultMesh」按钮），并在用户于登录账号/邮箱输入框键入字符时按 `subtitle` 前缀、邮箱 `@` 前本地部分前缀或 `title` 子串实时过滤候选（无匹配时自动收起浮层，回删重新匹配时恢复展示）；锁定态无匹配或桌面断连时，被动聚焦必须保持静默，不得在聚焦时直接打开工具栏 Popup 或拉起解锁窗口；锁定状态下页面加载自动填充（`autofillOnPageLoad`）不得自动拉起解锁窗口。用户主动点击 `V` 图标时，锁定无匹配展示「VaultMesh 已锁定」与底部「解锁 VaultMesh」按钮（经 `vaultmesh.open-unlock` 唤起桌面统一紧凑解锁窗并在解锁后自动刷新候选），桌面断连展示明确状态提示；已解锁态（非纯状态提示）菜单底部在 Chromium 提供「打开 VaultMesh」（通过 `vaultmesh.open-popup` 调用 `extensionAction.openPopup()`，失败降级提示工具栏图标）而在 Firefox 显示静态工具栏引导文案（底部按钮不设 `role="option"`）。
 - 必须：自动 Login 填充不读取未使用的 custom-field profile；显式选择的无值 DOM 采集与只读 profile 可以并行，但两者完成后及最终 assignment 前后仍须重验页面和授权。压缩网站注入脚本仍须保持既有字段识别、写入语义与逐动作安全检查。
 - 必须：页内图标和菜单按具体字段的可填充类型与角色判定；页面或表单场景不得使无关字段获得图标。搜索、筛选、评论、优惠码、图形验证码、禁用和只读字段不得展示填充图标；字段动态失去资格时必须撤下图标并丢弃迟到候选。支付表单内的个人资料字段必须按其自身类型处理，分段 OTP 不得使同簇无关字段被判为验证码。
 - 必须：content script 先在同一真实或最小可见伪表单内识别账号、当前密码、新密码、确认密码和 OTP 字段角色，再按显式字段语义、同表单结构、form action/page path/submit 语义与排除导航链接后的弱上下文依次推导场景；表单外或导航注册链接不得把登录表单识别为注册，密码生成只允许可靠的新密码角色。
@@ -631,14 +635,16 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
 ### REQ-PASSKEY-001 软件 Passkey
 
 - 必须：旧 BE=0 Passkey 不参与同步且不得改变备份资格；新注册 Passkey 使用 BE=1、counter=0，副本持久化成功后才设置 BS。私钥只经已授权 Rust 同步通道复制，使用仍执行逐次原生确认。
-
-- 必须：Chromium 页面级 WebAuthn shim 的 ES256 私钥保存在加密 secret 中，签名在 main 完成，每次 registration/assertion 显示 native confirmation。
+- 必须：WebAuthn 协议校验、含 WebAuthn Level 3 `crossOrigin` 与 `topOrigin` 的 `clientDataJSON` 生成、`StoredPasskey`/`PrivateJwk`（私钥标量在 `Drop` 时清零且永不离开 `VaultSession`）、多凭据精确匹配及 ES256 签名必须归属 `crates/vault-core`，经 `crates/vault-ffi` 事务先原子写盘再发布内存状态，桌面端 `apps/tauri-desktop/src-tauri/src/passkey_service.rs` 仅作薄门面。
 - 必须：Passkey 创建或导入使用当前 RP/origin 的默认 Login 作为归属提示，并由 desktop 重新验证；无有效默认值时可以唯一用户名匹配，仍不确定时作为 Passkey-only Login，禁止进入普通 Secret/密钥分类。
-- 必须：Chromium 扩展不得声明或使用 `webAuthenticationProxy`，不得持有浏览器全局 WebAuthn 状态；必须以 MAIN world shim 包装 `navigator.credentials.create/get`，并逐请求决策。VaultMesh 无法或不应处理的请求（接管关闭、未配对、桌面不可达、conditional mediation、依赖扩展结果的扩展（`prf`、`largeBlob`、`hmacCreateSecret`、`credBlob`、`getCredBlob`、`payment`、`enforceCredentialProtectionPolicy=true`，其余扩展被忽略）、请求超限、跨源 frame、`passkeys.probe` 为 `unavailable`、用户选择浏览器/系统）必须在同一次调用内回退到浏览器原生实现，不得要求重试。`origin` 与 `sameOriginWithAncestors` 只能由 background 依据 sender 与帧树写入。
-- 必须：浏览器自己报告没有平台认证器时，shim 才可以在 VaultMesh 可用（接管开启、同源 frame 链、桌面端已配对可达）时把 `isUserVerifyingPlatformAuthenticatorAvailable` 与 `getClientCapabilities` 的平台认证器能力报告为可用；浏览器已报告可用时不得改写或询问桌面端。
+- 必须：设置采用三层分离：`apps/browser-extension` 拥有本地安全策略（含 `passkeyProxyEnabled`、`passkeyGetDefault` 默认 `"vaultmesh"`、`passkeyCreateDefault` 默认 `"ask"`）、站点模式（`SitePasskeyMode`: `"default" | "ask" | "vaultmesh" | "native"`，统一在「设置 → 安全策略」配置，Popup 密码库页不设常驻站点切换栏）与会话诊断；`crates/vault-core` 不得持久化浏览器或 UI 设置；桌面端拥有预检索索引、统一解锁窗会话解锁与每次请求的原生确认。
+- 必须：Chromium 扩展不得声明或使用 `webAuthenticationProxy`，不得持有浏览器全局 WebAuthn 状态；扩展通过 `PasskeyBrowserFactory` 隔离 `ChromiumPasskeyAdapter`（启用）与 `FirefoxPasskeyAdapter`（禁用），Firefox 目标不得注入 Passkey shim。Chromium 必须以 MAIN world shim 包装 `navigator.credentials.create/get`，逐请求决策并支持正整数 `publicKey.timeout` 限时（回退原生时传入扣减已耗时的剩余时间）。
+- 必须：VaultMesh 无法或不应处理的请求（接管关闭、未配对、桌面不可达、站点设为原生、依赖扩展结果的扩展（`prf`、`largeBlob`、`hmacCreateSecret`、`credBlob`、`getCredBlob`、`payment`、`enforceCredentialProtectionPolicy=true`，其余扩展被忽略）、请求超限、`PermissionsPolicy` 拒绝或帧链不可信）必须在同一次调用内回退到浏览器原生实现，不得要求重试。`origin`、`sameOriginWithAncestors` 与 `topOrigin` 只能由 background 依据 `sender` 与可信帧树写入并覆盖页面字段。
+- 必须：`mediation: "conditional"` 请求仅在接管开启、未设站点原生模式、权限策略允许且 `passkeys.probe` 返回 `available` 含候选时挂起于 broker，并接入 `InlineAutofillMenu`（支持锁定态展示与桌面确认取消后保留重试）；否则立即回退浏览器原生条件式 UI。
+- 必须：浏览器自己报告没有平台认证器时，shim 才可以在 VaultMesh 可用（接管开启、权限策略与帧链允许、桌面端已配对可达）时把 `isUserVerifyingPlatformAuthenticatorAvailable` 与 `getClientCapabilities` 的平台认证器能力报告为可用；浏览器已报告可用时不得改写或询问桌面端。
 - 必须：每次回退、取消、失败、提示显示、用户选择与 VaultMesh 已返回凭据必须有不含请求内容的原因码，并只在 `storage.session` 保留最近 20 条（origin、操作、原因码）供设置页查看与清除；不得写入 `storage.local`，不得包含请求参数、challenge、credential ID、用户信息或 Vault 数据。
-- 必须：选择与解锁等待提示必须优先显示为发起请求标签页内的页面对话框（页面无法显示时回退插件窗口）；对话框不得收集任何凭据，解锁只在插件窗口完成，页面对话框只能应答所属标签页的提示。
-- 必须：`create` 与有匹配的 `get` 必须让用户选择“使用 VaultMesh”或“使用浏览器/系统”，选择可以按 origin 与操作记住并可在设置中清除；选择 VaultMesh 后仍须解锁（锁定时）并通过桌面端原生确认。用户取消、5 分钟未完成属于取消并以 `NotAllowedError` 结束；页面 abort、导航与标签页关闭必须取消等待。Firefox 不提供 Passkey 能力。
+- 必须：选择提示必须优先显示为发起请求标签页内的页面对话框（页面无法显示时回退插件窗口）；对话框不得收集任何凭据，页面对话框只能应答所属标签页的提示。`create` 与 `get` 遵循全局默认与站点策略（`get` `probe` 为 `available` 单候选或同源 `create` 解析为 `"vaultmesh"` 时可直接进入，多候选或 `unknown` 来自全局默认时弹出选择框）；命中多候选时必须在对话框提供账号选择（传 `itemId`）或回退原生；`get` 在 `probe` 为 `unavailable` 且未记住原生时必须展示极简 `no-match` 卡片，仅提供原生回退、记住选择与取消（不提供密码登录跳转）。选择可以按操作与站点范围记住（跨源按 `(topOrigin, origin)` 复合键，跨源 `create` 强制询问且不自动记住）并在设置页统一切换或清除。
+- 必须：桌面端 `passkeys.create`/`passkeys.get` 通过 `DeferredBrokerExecution` 在释放 broker 互斥锁后执行锁定态 `agent-unlock` 统一解锁窗会话解锁（Touch ID / 浏览器 PIN / 主密码；已解锁则跳过解锁窗；无平台 waiter 且未解锁时 fail-closed 返回 `unlock-required`）与锁外原生确认（解锁前后均保留一次，拒绝确认只取消请求）；macOS 弹出原生确认前必须激活应用前台置顶（结束后仅在无其他可见窗口时恢复 Dock 隐藏），跨源确认必须同时展示请求方与当前网站。用户取消、5 分钟未完成（或请求 `timeout` 到期）属于取消并以 `NotAllowedError` 结束。页面 abort、导航与标签页关闭必须撤销该请求的桌面执行权限；取消、过期或会话锁定后，迟到的确认不得触发签名或写盘。
 - 验收：`CT-PASSKEY-001`、`CT-PASSKEY-002`、`CT-PASSKEY-003`、`AT-PASSKEY-001`。
 
 ## 本地 Agent Capability Broker
@@ -660,7 +666,7 @@ Requirement ID 永久稳定。详细机制由 `specs/` 和 ADR 所有；本文�
   已配对客户端并行连接共享一个 memory-only lease。desktop、browser、不同 client 或不同 Vault 已解锁不能创建
   或借用该 lease；共享身份只能由 Rust broker 推导。用户可以在安全中心或当前独立 Agent unlock window 显式切换
   scope；unlock window 只能修改该非秘密 enum。用户只能在独立、置顶、content-protected 且仅具有 Agent unlock
-  typed API 的系统窗口中以主密码或 Agent 专用 PIN/biometric 解锁。解锁成功可以在 30 秒内继续同一调用；
+  typed API 的系统窗口中以主密码或 Agent 专用 PIN/biometric 解锁；该窗口复用与桌面主窗口、浏览器插件相同的紧凑解锁卡片与嵌入式 Touch ID（ADR-0058，标题 `解锁 VaultMesh Agent工具`，PIN 域为 `state.agent_pin`），不借用桌面或浏览器 PIN。解锁成功可以在 30 秒内继续同一调用；
   30 秒倒计时归零或收到后端超时事件时，临时解锁窗口必须自动取消当前超时请求并在无后续待处理解锁请求时自动隐藏关闭窗口。MCP/IPC 不得存在接收 factor 的 unlock operation。
 - 必须：同一 unlock scope 内的并发 Vault 调用必须合并为一个 pending unlock request，单次成功 factor 必须唤醒
   该 request 的全部等待调用；同一窗口已经可见时，重复等待不得反复显示、刷新或抢焦点。已完成 request 不得在

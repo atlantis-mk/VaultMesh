@@ -25,13 +25,14 @@ context_refs:
 related_changes:
   - "CHG-2026-083-passkey-intercept-fallback"
 boundaries:
-  - "浏览器信任模型：移除 webAuthenticationProxy 权限，新增 MAIN world content script 与隔离世界消息桥"
-  - "Browser RPC 不新增操作；origin 与 sameOriginWithAncestors 只能由 background 依据 sender 与帧树写入"
-  - "Firefox 范围不变，不包含 Passkey shim"
+  - "浏览器信任模型：移除 webAuthenticationProxy 权限，新增 MAIN world content script、隔离世界 PermissionsPolicy 门禁与可信帧树校验"
+  - "Browser RPC 新增受既有配对鉴权的 passkeys.cancel；origin、sameOriginWithAncestors 与 topOrigin 只能由 background 依据 sender 与 resolveFrameAncestry 帧树写入"
+  - "协议校验、clientDataJSON（含 topOrigin）与 ES256 签名归属 crates/vault-core 与 crates/vault-ffi；扩展本地策略与站点模式保留在 browser-extension"
+  - "Firefox 范围不变，FirefoxPasskeyAdapter 保持 disabled 且不注入 Passkey shim"
 risks:
   - "页面可检测或绕过 shim，只影响该页面是否使用 VaultMesh，不得降低秘密保护"
   - "响应对象必须在 PublicKeyCredential 原型下可被主流网站库接受，需要真实站点验收"
   - "CHG-2026-083 已 Active 且部分行为被取代，完成后需要一并收尾"
 next:
-  - "用户批准 ADR-0057 后在同一分支实现 shim、background 决策、popup 选择窗口并删除 passkey-proxy"
-  - "在真实 Chromium 完成 AT-PASSKEY-001"
+  - "已完成 core/FFI 下沉、桌面 Broker 锁外单次解锁与 macOS 置顶确认、扩展 Factory+Adapter/conditional 内联菜单/PermissionsPolicy/timeout/站点开关实现"
+  - "在真实 macOS + Chromium 完成 AT-PASSKEY-001 后通过 pnpm work:finish 收尾（并同步处理 CHG-2026-083）"

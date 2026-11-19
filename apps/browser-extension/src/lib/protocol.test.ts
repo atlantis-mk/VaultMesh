@@ -148,5 +148,39 @@ describe("browser form discovery protocol", () => {
       kind: "vaultmesh.save-capture-confirmed", captureId, pageUrl: "https://github.com/settings/tokens",
       data: { sshCredentials: [{ ...data.sshCredentials[0], publicKey: null }] },
     }).success).toBe(false);
+    expect(PopupMessageSchema.safeParse({
+      kind: "vaultmesh.passkey-choice",
+      token: crypto.randomUUID(),
+      choice: "vaultmesh",
+      itemId: crypto.randomUUID(),
+    }).success).toBe(true);
+    expect(PopupMessageSchema.safeParse({
+      kind: "vaultmesh.passkey-choice",
+      token: crypto.randomUUID(),
+      choice: "password-login",
+    }).success).toBe(false);
+    expect(PopupMessageSchema.safeParse({
+      kind: "vaultmesh.passkey-conditional.select",
+      requestId: "r1",
+      itemId: crypto.randomUUID(),
+      credentialId: "cred-1",
+    }).success).toBe(true);
+    expect(PopupMessageSchema.safeParse({
+      kind: "vaultmesh.passkey-conditional.native",
+      requestId: "r1",
+    }).success).toBe(true);
+    expect(PopupMessageSchema.safeParse({
+      kind: "vaultmesh.passkey-site-mode.updated",
+      origin: "https://example.test",
+      mode: "default",
+    }).success).toBe(true);
+    expect(PopupMessageSchema.safeParse({
+      kind: "vaultmesh.passkey-site-mode.updated",
+      origin: "https://example.test",
+      mode: "native",
+    }).success).toBe(true);
+    expect(PopupMessageSchema.safeParse({ kind: "vaultmesh.browser-unlock.request" }).success).toBe(true);
+    expect(PopupMessageSchema.safeParse({ kind: "vaultmesh.open-unlock" }).success).toBe(true);
+    expect(PopupMessageSchema.safeParse({ kind: "vaultmesh.open-popup" }).success).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createWindowTransport, installCapabilityShim, installPasskeyShim, PASSKEY_ACK_TIMEOUT_MS, PASSKEY_AVAILABILITY_TTL_MS, PASSKEY_CHANNEL, type PasskeyShimResult, type PasskeyShimTransport } from './passkey-shim';
-import { fromBase64Url, toBase64Url } from './passkey-shim-codec';
+import { encodeCreationOptions, encodeRequestOptions, fromBase64Url, PASSKEY_PROMPT_WAIT_MS, toBase64Url } from './passkey-shim-codec';
 
 class FakePublicKeyCredential {}
 class FakeAttestation {}
@@ -15,7 +15,7 @@ const constructors = {
 const bytes = (...values: number[]) => new Uint8Array(values).buffer;
 const NATIVE = { native: true } as unknown as Credential;
 
-function setup(result: PasskeyShimResult | (() => Promise<PasskeyShimResult>)) {
+function setup(result: PasskeyShimResult | (() => Promise<PasskeyShimResult>), now: () => number = Date.now) {
   const nativeCreate = vi.fn(async (_options?: unknown) => NATIVE);
   const nativeGet = vi.fn(async (_options?: unknown) => NATIVE);
   const prototype = { create: nativeCreate as unknown as (o?: unknown) => Promise<Credential | null>, get: nativeGet as unknown as (o?: unknown) => Promise<Credential | null> };
@@ -23,8 +23,9 @@ function setup(result: PasskeyShimResult | (() => Promise<PasskeyShimResult>)) {
     request: vi.fn(async () => (typeof result === 'function' ? result() : result)),
     abort: vi.fn(),
   };
-  installPasskeyShim(prototype as never, transport, constructors, () => 'request-id');
-  return { prototype, transport, nativeCreate, nativeGet };
+  const reasons: string[] = [];
+  installPasskeyShim(prototype as never, transport, constructors, () => 'request-id', (reason) => reasons.push(reason), now);
+  return { prototype, transport, nativeCreate, nativeGet, reasons };
 }
 
 const creation = (): PublicKeyCredentialCreationOptions => ({
@@ -133,7 +134,6 @@ describe('WebAuthn page shim', () => {
 
   it.each([
     ['password credential requests', () => ({ password: true })],
-    ['conditional mediation', () => ({ publicKey: request(), mediation: 'conditional' })],
     ['an already aborted signal', () => ({ publicKey: request(), signal: AbortSignal.abort() })],
     ['extensions VaultMesh cannot serve', () => ({ publicKey: { ...request(), extensions: { prf: { eval: { first: bytes(1) } } } } })],
   ])('never contacts VaultMesh for %s', async (_name, make) => {
@@ -141,6 +141,98 @@ describe('WebAuthn page shim', () => {
     await prototype.get(make() as never);
     expect(transport.request).not.toHaveBeenCalled();
     expect(nativeGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('encodes positive integer timeout and mediation on request/creation options', () => {
+    expect(encodeCreationOptions({ ...creation(), timeout: 45_000 })).toMatchObject({ timeout: 45_000 });
+    expect(encodeCreationOptions({ ...creation(), timeout: 0 })).not.toHaveProperty('timeout');
+    expect(encodeCreationOptions({ ...creation(), timeout: -100 })).not.toHaveProperty('timeout');
+    expect(encodeCreationOptions({ ...creation(), timeout: 12.5 })).not.toHaveProperty('timeout');
+
+    expect(encodeRequestOptions({ ...request(), timeout: 15_000 }, 'conditional')).toMatchObject({
+      timeout: 15_000,
+      mediation: 'conditional',
+    });
+    expect(encodeRequestOptions(request())).toMatchObject({ mediation: 'modal' });
+    expect(encodeRequestOptions({ ...request(), timeout: Number.NaN })).not.toHaveProperty('timeout');
+  });
+
+  it('routes conditional mediation through transport without arming a local timeout timer and honours AbortSignal', async () => {
+    vi.useFakeTimers();
+    try {
+      const ok = setup({ status: 'ok', responseJson: assertionJson });
+      const cred = await ok.prototype.get({ publicKey: { ...request(), timeout: 2_000 }, mediation: 'conditional' }) as unknown as PublicKeyCredential;
+      expect(ok.transport.request).toHaveBeenCalledWith('request-id', 'get', expect.objectContaining({
+        mediation: 'conditional',
+        timeout: 2_000,
+      }));
+      expect(cred.id).toBe('AQID');
+
+      const pendingSetup = setup(() => new Promise(() => undefined));
+      const controller = new AbortController();
+      const pending = pendingSetup.prototype.get({
+        publicKey: { ...request(), timeout: 1_500 },
+        mediation: 'conditional',
+        signal: controller.signal,
+      });
+      await vi.advanceTimersByTimeAsync(PASSKEY_PROMPT_WAIT_MS + 60_000);
+      expect(pendingSetup.transport.abort).not.toHaveBeenCalled();
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      expect(pendingSetup.transport.abort).toHaveBeenCalledWith('request-id');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('enforces bounded publicKey.timeout for non-conditional requests and rejects with NotAllowedError', async () => {
+    vi.useFakeTimers();
+    try {
+      const short = setup(() => new Promise(() => undefined));
+      const shortPending = short.prototype.get({ publicKey: { ...request(), timeout: 200 } });
+      const shortAssertion = expect(shortPending).rejects.toMatchObject({ name: 'NotAllowedError' });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(short.transport.abort).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2);
+      await shortAssertion;
+      expect(short.transport.abort).toHaveBeenCalledWith('request-id');
+
+      const long = setup(() => new Promise(() => undefined));
+      const longPending = long.prototype.create({ publicKey: { ...creation(), timeout: PASSKEY_PROMPT_WAIT_MS * 3 } });
+      const longAssertion = expect(longPending).rejects.toMatchObject({ name: 'NotAllowedError' });
+      await vi.advanceTimersByTimeAsync(PASSKEY_PROMPT_WAIT_MS - 1);
+      expect(long.transport.abort).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2);
+      await longAssertion;
+      expect(long.transport.abort).toHaveBeenCalledWith('request-id');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('passes a shallow clone with remaining timeout (min 1000ms) when falling back to native', async () => {
+    let clock = 10_000;
+    const originalPublicKey = { ...request(), timeout: 5_000 };
+    const originalOptions: CredentialRequestOptions = { publicKey: originalPublicKey };
+    const { prototype, nativeGet } = setup(async () => {
+      clock += 3_200;
+      return { status: 'fallback' };
+    }, () => clock);
+
+    await expect(prototype.get(originalOptions)).resolves.toBe(NATIVE);
+    expect(nativeGet).toHaveBeenCalledTimes(1);
+    const forwarded = nativeGet.mock.calls[0]![0] as CredentialRequestOptions;
+    expect(forwarded).not.toBe(originalOptions);
+    expect(forwarded.publicKey).not.toBe(originalPublicKey);
+    expect(forwarded.publicKey?.timeout).toBe(1_800);
+    expect(originalPublicKey.timeout).toBe(5_000);
+
+    const floor = setup(async () => {
+      clock += 9_000;
+      return { status: 'fallback' };
+    }, () => clock);
+    await expect(floor.prototype.get({ publicKey: { ...request(), timeout: 2_000 } })).resolves.toBe(NATIVE);
+    expect((floor.nativeGet.mock.calls[0]![0] as CredentialRequestOptions).publicKey?.timeout).toBe(1_000);
   });
 
   it('falls back when the transport fails or the response is malformed', async () => {

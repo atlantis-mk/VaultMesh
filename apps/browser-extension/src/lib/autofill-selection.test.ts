@@ -93,6 +93,19 @@ describe("explicit fill confirmation and feedback", () => {
     expect(filterCandidatesByTypedUsername(items, "nonexistent")).toEqual([]);
   });
 
+  it("filters passkey candidates by typed username and keeps passkey-native only while a passkey matches", () => {
+    const passkeyAlice = { kind: "passkey" as const, id: pathId, requestId: "req-1", credentialId: "c1", title: "GitHub Passkey", subtitle: "alice@example.test" };
+    const passkeyBob = { kind: "passkey" as const, id: originId, requestId: "req-1", credentialId: "c2", title: "GitHub Ops", subtitle: "bob@company.test" };
+    const passkeyNative = { kind: "passkey-native" as const, id: "passkey-native:req-1", requestId: "req-1", title: "使用浏览器/系统通行密钥", subtitle: "改用系统或硬件安全密钥" };
+    const loginBob = candidate(domainId, "domain", { title: "Bob Password", subtitle: "bob@company.test" });
+
+    const all = [passkeyAlice, passkeyBob, passkeyNative, loginBob];
+    expect(filterCandidatesByTypedUsername(all, "")).toEqual(all);
+    expect(filterCandidatesByTypedUsername(all, "ali")).toEqual([passkeyAlice, passkeyNative]);
+    expect(filterCandidatesByTypedUsername(all, "bob")).toEqual([passkeyBob, passkeyNative, loginBob]);
+    expect(filterCandidatesByTypedUsername(all, "nonexistent")).toEqual([]);
+  });
+
   it("keeps success and confirmation quiet but maps typed failures to bounded page feedback", () => {
     expect(inlineFillFailureMessage({ status: "filled" })).toBeNull();
     expect(inlineFillFailureMessage({ status: "confirmation-required" })).toBeNull();

@@ -18,17 +18,37 @@ describe('CT-TAURI-COMMAND-001 typed adapter', () => {
     });
   });
 
-  it('routes desktop startup state through fixed backend operations', async () => {
+  it('routes desktop startup state and compact window sizing through fixed backend operations', async () => {
     const { createTauriVaultMeshApi } = await import('./tauri-api');
     const api = createTauriVaultMeshApi();
     invoke.mockResolvedValue({ enabled: true });
 
     await api.desktop.startupSettings();
     await api.desktop.updateStartupSettings({ enabled: false });
+    await api.desktop.setCompactWindowMode(true, 412);
+    await api.desktop.setCompactWindowMode(false);
 
-    expect(invoke.mock.calls.slice(-2)).toEqual([
+    expect(invoke.mock.calls.slice(-4)).toEqual([
       ['desktop_invoke', { request: { operation: 'desktop.startup.get', input: {} } }],
       ['desktop_invoke', { request: { operation: 'desktop.startup.update', input: { enabled: false } } }],
+      ['desktop_window_set_compact_mode', { compact: true, contentHeight: 412 }],
+      ['desktop_window_set_compact_mode', { compact: false, contentHeight: null }],
+    ]);
+  });
+
+  it('routes browser extension PIN operations through fixed desktop operations', async () => {
+    const { createTauriVaultMeshApi } = await import('./tauri-api');
+    const api = createTauriVaultMeshApi();
+    invoke.mockResolvedValue({ enabled: true, locked: false, failureLimit: 5, failedAttempts: 0, remainingAttempts: 5 });
+
+    await api.browser.pinStatus();
+    await api.browser.enablePin({ pin: '123456', failureLimit: 5 });
+    await api.browser.disablePin();
+
+    expect(invoke.mock.calls.slice(-3)).toEqual([
+      ['desktop_invoke', { request: { operation: 'browser.pin.status', input: {} } }],
+      ['desktop_invoke', { request: { operation: 'browser.pin.enable', input: { pin: '123456', failureLimit: 5 } } }],
+      ['desktop_invoke', { request: { operation: 'browser.pin.disable', input: {} } }],
     ]);
   });
 
@@ -37,14 +57,16 @@ describe('CT-TAURI-COMMAND-001 typed adapter', () => {
     invoke.mockResolvedValue({});
     const api = createTauriVaultMeshApi();
     await api.agent.status();
+    await api.agent.pinStatus();
     await api.agent.enablePin({ pin: '123456', failureLimit: 5 });
     await api.agent.disablePin();
     await api.agent.lockAllAccess();
     await api.agent.lockClientAccess('00000000-0000-4000-8000-000000000002');
     await api.agent.updateAccessSettings({ unlockScope: 'client', idleTimeoutMs: 900000, maxUnlockDurationMs: null });
     await api.agent.revokeClient('00000000-0000-4000-8000-000000000001');
-    expect(invoke.mock.calls.slice(-7)).toEqual([
+    expect(invoke.mock.calls.slice(-8)).toEqual([
       ['desktop_invoke', { request: { operation: 'agent.status', input: {} } }],
+      ['desktop_invoke', { request: { operation: 'agent.pin.status', input: {} } }],
       ['desktop_invoke', { request: { operation: 'agent.pin.enable', input: { pin: '123456', failureLimit: 5 } } }],
       ['desktop_invoke', { request: { operation: 'agent.pin.disable', input: {} } }],
       ['desktop_invoke', { request: { operation: 'agent.access.lock-all', input: {} } }],

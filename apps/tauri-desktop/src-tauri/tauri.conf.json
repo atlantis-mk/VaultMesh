@@ -14,12 +14,13 @@
       {
         "label": "main",
         "title": "VaultMesh",
-        "width": 1180,
-        "height": 760,
-        "minWidth": 780,
-        "minHeight": 560,
+        "width": 460,
+        "height": 472,
+        "minWidth": 420,
+        "minHeight": 300,
         "visible": false,
-        "resizable": true,
+        "center": true,
+        "resizable": false,
         "fullscreen": false,
         "contentProtected": true
       }

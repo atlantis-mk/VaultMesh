@@ -6,7 +6,7 @@ import { InlineAutofillTrigger } from "@/lib/inline-autofill-trigger";
 import { fillResultStatus, filterCandidatesByTypedUsername, inlineFillFailureMessage } from "@/lib/autofill-selection";
 import { fillGeneratedLogin, fillGeneratedPassword } from "@/lib/generated-login-fill";
 import { generatePassword } from "@/lib/generated-credentials";
-import { AutofillAvailabilityResponseSchema, AutofillCandidatesResponseSchema, SaveCaptureDecisionResponseSchema, SaveCapturePendingResponseSchema, SaveCaptureQueuedResponseSchema, type AutofillCandidate, type InlineAutofillCandidate } from "@/lib/protocol";
+import { AutofillAvailabilityResponseSchema, AutofillCandidatesResponseSchema, SaveCaptureDecisionResponseSchema, SaveCapturePendingResponseSchema, SaveCaptureQueuedResponseSchema, type AutofillCandidate, type InlineAutofillCandidate, type PasskeyCandidate } from "@/lib/protocol";
 import { loadPasswordGeneratorOptions, loadUsernameGeneratorOptions } from "@/lib/generator-preferences";
 import { captureSubmittedData, capturedDataSignature, hasCapturedData, submittedAccountValue, submittedDataContext, type CapturedSaveData } from "@/lib/save-capture";
 import { SaveCapturePrompt } from "@/lib/save-capture-prompt";
@@ -88,6 +88,7 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     pageContext: "login" | "unknown";
     loaded: boolean;
     typed: boolean;
+    locked: boolean;
     pendingPromise: Promise<unknown> | null;
     allCandidates: InlineAutofillCandidate[];
   };
@@ -109,6 +110,14 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
   const shadowEventRoots = new Set<ShadowRoot>();
   const handledEvents = new WeakSet<Event>();
   const menu = new InlineAutofillMenu(document, (candidate, target) => {
+    if (candidate.kind === "passkey") {
+      void selectPasskeyCandidate(candidate, target);
+      return;
+    }
+    if (candidate.kind === "passkey-native") {
+      void selectNativePasskey(candidate, target);
+      return;
+    }
     if (candidate.kind === "device-assist") {
       if (!captureTarget?.(target)) return;
       closeAssist?.();
@@ -135,8 +144,19 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
       }
       void fillGeneratedPassword(document, currentDocumentId, target, password);
     }
+  }, (target) => {
+    void handleUnlockRequest(target);
+  }, (target) => {
+    void handleOpenPopup(target);
   });
-  const trigger = new InlineAutofillTrigger(document, (target) => void openCandidates(target));
+  const trigger = new InlineAutofillTrigger(document, (target) => {
+    if (menu.visible && menu.target === target && !menu.statusMessage) {
+      focusRequest += 1;
+      menu.hide();
+      return;
+    }
+    void openCandidates(target);
+  });
   const savePrompt = new SaveCapturePrompt(document, async (captureId, decision) => {
     const response = SaveCaptureDecisionResponseSchema.safeParse(await sendMessage({
       kind: "vaultmesh.save-capture-decision",
@@ -188,6 +208,103 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     }
     const failure = inlineFillFailureMessage(response);
     if (failure) menu.showStatus(target, failure);
+  }
+
+  function clearPasskeysFromSession(requestId: string) {
+    if (!activeLoginAccountSession) return;
+    activeLoginAccountSession.allCandidates = activeLoginAccountSession.allCandidates.filter(
+      (candidate) => !((candidate.kind === "passkey" || candidate.kind === "passkey-native") && candidate.requestId === requestId),
+    );
+  }
+
+  async function selectPasskeyCandidate(
+    candidate: Extract<InlineAutofillCandidate, { kind: "passkey" }>,
+    target: HTMLElement,
+  ) {
+    const request = ++focusRequest;
+    const response = await sendMessage({
+      kind: "vaultmesh.passkey-conditional.select",
+      requestId: candidate.requestId,
+      itemId: candidate.id,
+      credentialId: candidate.credentialId,
+    }).catch(() => null) as { status?: unknown; message?: unknown } | null;
+    if (disposed || request !== focusRequest || !target.isConnected) return;
+    const status = typeof response?.status === "string" ? response.status : "error";
+    if (status === "unlock-required") {
+      availability = "locked";
+      trigger.setLocked(true);
+      menu.showStatus(
+        target,
+        typeof response?.message === "string"
+          ? response.message
+          : "VaultMesh 已锁定，请在插件窗口解锁后重试，或点击表单图标改用系统通行密钥。",
+      );
+      return;
+    }
+    if (status === "cancelled") {
+      menu.showStatus(
+        target,
+        typeof response?.message === "string"
+          ? response.message
+          : "已取消通行密钥确认，可点击表单图标重试或改用其他方式。",
+      );
+      return;
+    }
+    clearPasskeysFromSession(candidate.requestId);
+    if (status === "error") {
+      menu.showStatus(
+        target,
+        typeof response?.message === "string" ? response.message : "通行密钥验证失败，请重试。",
+      );
+    }
+  }
+
+  async function handleUnlockRequest(target: HTMLElement) {
+    const request = ++focusRequest;
+    const response = await sendMessage({ kind: "vaultmesh.open-unlock" }).catch(() => null) as {
+      status?: unknown;
+      errorMessage?: unknown;
+    } | null;
+    if (disposed || request !== focusRequest || !target.isConnected || trigger.target !== target) return;
+    if (response?.status === "unlocked") {
+      availability = "ready";
+      trigger.setLocked(false);
+      if (classifyControl(target)) await openCandidates(target);
+      return;
+    }
+    if (!response || response.status === "unavailable") {
+      availability = "unavailable";
+      menu.showStatus(
+        target,
+        typeof response?.errorMessage === "string"
+          ? response.errorMessage
+          : "未连接 VaultMesh 桌面端，请先启动桌面端。",
+      );
+    }
+  }
+
+  async function handleOpenPopup(target: HTMLElement) {
+    const request = ++focusRequest;
+    const response = await sendMessage({ kind: "vaultmesh.open-popup" }).catch(() => null) as {
+      status?: unknown;
+    } | null;
+    if (disposed || request !== focusRequest || !target.isConnected || trigger.target !== target) return;
+    if (response?.status === "opened") {
+      menu.hide();
+      return;
+    }
+    menu.showStatus(target, "请点击浏览器工具栏的 VaultMesh 图标。");
+  }
+
+  async function selectNativePasskey(
+    candidate: Extract<InlineAutofillCandidate, { kind: "passkey-native" }>,
+    _target: HTMLElement,
+  ) {
+    clearPasskeysFromSession(candidate.requestId);
+    await sendMessage({
+      kind: "vaultmesh.passkey-conditional.native",
+      requestId: candidate.requestId,
+    }).catch(() => undefined);
   }
 
   async function resumePendingCapture() {
@@ -464,19 +581,22 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     availability = isLocked ? "locked" : "ready";
     trigger.setLocked(isLocked);
     session.loaded = true;
-    session.allCandidates = response.data.candidates.filter((candidate) => candidate.kind === "login");
+    session.locked = isLocked;
+    const passkeyItems = inlinePasskeyCandidates(response.data.passkeyCandidates);
+    const loginItems = response.data.candidates.filter((candidate) => candidate.kind === "login");
+    session.allCandidates = [...passkeyItems, ...loginItems];
     if (session.allCandidates.length === 0) {
       if (session.typed) menu.hide();
       return;
     }
     if (session.typed) {
       const filtered = filterCandidatesByTypedUsername(session.allCandidates, session.target.value);
-      if (filtered.length > 0) menu.showFilteredCandidates(session.target, filtered);
+      if (filtered.length > 0) menu.showFilteredCandidates(session.target, filtered, { locked: isLocked });
       else menu.hide();
       return;
     }
     if (session.target.value === "") {
-      menu.showFilteredCandidates(session.target, session.allCandidates);
+      menu.showFilteredCandidates(session.target, session.allCandidates, { locked: isLocked });
     }
   }
 
@@ -515,11 +635,23 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
       : await sendMessage({ kind: "vaultmesh.autofill-candidates", fieldKind, pageContext }).catch(() => null);
     const response = AutofillCandidatesResponseSchema.safeParse(rawResponse);
     if (disposed || request !== focusRequest || trigger.target !== target || classifyControl(target) !== fieldKind) return;
-    if (!response.success || (response.data.status !== "ready" && response.data.status !== "locked")) return menu.hide();
+    if (!response.success || response.data.status === "unavailable") {
+      availability = "unavailable";
+      trigger.setLocked(false);
+      menu.showStatus(target, "未连接 VaultMesh 桌面端，请先启动桌面端。");
+      return;
+    }
+    if (response.data.status !== "ready" && response.data.status !== "locked") return menu.hide();
     const isLocked = response.data.status === "locked" || response.data.requiresUnlock === true;
     availability = isLocked ? "locked" : "ready";
     trigger.setLocked(isLocked);
-    const candidates: InlineAutofillCandidate[] = response.data.candidates.filter((candidate) => candidate.kind === fieldKind);
+    const passkeyItems = fieldKind === "login" && pageContext !== "otp" && pageContext !== "signup"
+      ? inlinePasskeyCandidates(response.data.passkeyCandidates)
+      : [];
+    const candidates: InlineAutofillCandidate[] = [
+      ...passkeyItems,
+      ...response.data.candidates.filter((candidate) => candidate.kind === fieldKind),
+    ];
     if (!isLocked && pageContext === "otp") {
       candidates.unshift(...(response.data.emailOtpCandidates ?? []).map((candidate) => ({
         ...candidate,
@@ -530,15 +662,15 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     }
     if (activeLoginAccountSession?.target === target) {
       activeLoginAccountSession.loaded = true;
+      activeLoginAccountSession.locked = isLocked;
       activeLoginAccountSession.allCandidates = [...candidates];
     }
     if (isLocked && candidates.length === 0) {
+      const anchor = pageContext === "otp" ? segmentedOtpAnchor(target) : target;
+      menu.show(target, [], "none", { anchor, locked: true });
       const deviceEntries = await deviceAssistEntries(target);
-      if (disposed || request !== focusRequest || trigger.target !== target || !target.isConnected) return;
-      if (deviceEntries.length) {
-        menu.show(target, deviceEntries, "none", { anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target });
-      } else {
-        menu.hide();
+      if (deviceEntries.length && !disposed && request === focusRequest && trigger.target === target && target.isConnected) {
+        menu.show(target, deviceEntries, "none", { anchor, locked: true });
       }
       return;
     }
@@ -546,9 +678,9 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
     // candidate list is not a signup opportunity. Never fall back to the
     // random account/password generator for a verification-code field or while locked.
     const generatedMode = !isLocked && fieldKind === "login" && pageContext !== "otp" ? "login" : "none";
-    menu.show(target, candidates, generatedMode, { anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target });
+    menu.show(target, candidates, generatedMode, { anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target, locked: isLocked });
     const deviceEntries = await deviceAssistEntries(target);
-    if (deviceEntries.length && !disposed && request === focusRequest && trigger.target === target && target.isConnected) menu.show(target, [...candidates, ...deviceEntries], generatedMode, {anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target});
+    if (deviceEntries.length && !disposed && request === focusRequest && trigger.target === target && target.isConnected) menu.show(target, [...candidates, ...deviceEntries], generatedMode, {anchor: pageContext === "otp" ? segmentedOtpAnchor(target) : target, locked: isLocked});
   }
 
   async function refreshOtpCandidates() {
@@ -591,6 +723,7 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
         pageContext: loginAccountContext,
         loaded: false,
         typed: false,
+        locked: availability === "locked",
         pendingPromise: null,
         allCandidates: [],
       };
@@ -779,7 +912,7 @@ export function startAutofillPage(document: Document, documentId: DocumentIdSour
       session.typed = true;
       if (session.loaded) {
         const filtered = filterCandidatesByTypedUsername(session.allCandidates, session.target.value);
-        if (filtered.length > 0) menu.showFilteredCandidates(session.target, filtered);
+        if (filtered.length > 0) menu.showFilteredCandidates(session.target, filtered, { locked: session.locked });
         else menu.hide();
       } else {
         void preloadLoginAccountCandidates(session, focusRequest);
@@ -1019,6 +1152,28 @@ export function isOtpRequestAction(button: HTMLElement) {
     ? `${button.value} ${button.getAttribute("aria-label") ?? ""}`
     : `${button.textContent ?? ""} ${button.getAttribute("aria-label") ?? ""}`;
   return /(?:获取|发送|重新发送|重发|取得).{0,8}(?:验证码|校验码|动态码)|(?:验证码|校验码|动态码).{0,8}(?:获取|发送|重发)|(?:get|send|request|resend).{0,12}(?:verification|security|one[-\s]*time|otp).{0,8}(?:code|password)?|(?:verification|security|otp).{0,8}(?:code)?.{0,12}(?:send|resend)/i.test(text);
+}
+
+function inlinePasskeyCandidates(passkeyCandidates: readonly PasskeyCandidate[] | undefined): InlineAutofillCandidate[] {
+  if (!passkeyCandidates || passkeyCandidates.length === 0) return [];
+  const requestId = passkeyCandidates[0]!.requestId;
+  return [
+    ...passkeyCandidates.map((candidate) => ({
+      kind: "passkey" as const,
+      id: candidate.itemId,
+      requestId: candidate.requestId,
+      credentialId: candidate.credentialId,
+      title: candidate.title,
+      subtitle: candidate.account || "VaultMesh 通行密钥",
+    })),
+    {
+      kind: "passkey-native" as const,
+      id: `passkey-native:${requestId}`,
+      requestId,
+      title: "使用浏览器/系统通行密钥",
+      subtitle: "改用系统或硬件安全密钥",
+    },
+  ];
 }
 
 export type { InlineAutofillCandidate };

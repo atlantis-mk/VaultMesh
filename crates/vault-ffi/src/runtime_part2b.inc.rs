@@ -411,6 +411,7 @@ pub fn record_agent_audit(
         let _guard = mutation_lock.lock().map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
         write_vault(&self.path, canonical.as_slice())
             .map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
+        let master_password_verified = matches!(unlock_source, UnlockEventSource::Desktop);
         session
             .record_unlock_event(unlock_source)
             .map_err(map_runtime_core_error)?;
@@ -420,7 +421,56 @@ pub fn record_agent_audit(
         self.relay.invalidate();
         drop(_guard);
         self.replace(session, canonical.as_slice());
+        self.desktop_master_password_verified = master_password_verified;
         Ok(self.status())
+    }
+
+    pub fn matching_passkeys(
+        &mut self,
+        request_json: &str,
+    ) -> Result<Vec<PasskeyCandidate>, DesktopRuntimeError> {
+        self.refresh_from_disk()?;
+        let vault = self
+            .vault
+            .as_ref()
+            .ok_or(DesktopRuntimeError::from(VAULTMESH_STATUS_LOCKED))?;
+        vault
+            .session
+            .matching_passkeys(request_json)
+            .map_err(DesktopRuntimeError::from)
+    }
+
+    pub fn create_passkey(
+        &mut self,
+        request_json: &str,
+        default_login_id: Option<Uuid>,
+        now: &str,
+    ) -> Result<String, DesktopRuntimeError> {
+        self.refresh_from_disk()?;
+        let vault = self
+            .vault
+            .as_mut()
+            .ok_or(DesktopRuntimeError::from(VAULTMESH_STATUS_LOCKED))?;
+        run_passkey_transaction(vault, |session| {
+            session.create_passkey(request_json, default_login_id, now)
+        })
+    }
+
+    pub fn sign_passkey_assertion(
+        &mut self,
+        request_json: &str,
+        allowed_item_id: Option<Uuid>,
+        credential_id: Option<&str>,
+        now: &str,
+    ) -> Result<String, DesktopRuntimeError> {
+        self.refresh_from_disk()?;
+        let vault = self
+            .vault
+            .as_mut()
+            .ok_or(DesktopRuntimeError::from(VAULTMESH_STATUS_LOCKED))?;
+        run_passkey_transaction(vault, |session| {
+            session.sign_passkey_assertion(request_json, allowed_item_id, credential_id, now)
+        })
     }
 
     pub fn item_kind_login() -> u32 {
@@ -449,6 +499,31 @@ pub fn record_agent_audit(
             crate::sync_relay::publish(vault);
             let _ = crate::sync_relay::pump(vault);
         }
+    }
+}
+
+fn run_passkey_transaction(
+    vault: &mut VaultmeshVault,
+    operation: impl FnOnce(&mut VaultSession) -> Result<String, PasskeyError>,
+) -> Result<String, DesktopRuntimeError> {
+    let mut passkey_error: Option<PasskeyError> = None;
+    let result = transaction(vault, |session| match operation(session) {
+        Ok(response) => Ok(json!({ "response": response })),
+        Err(error) => {
+            let status = DesktopRuntimeError::from(error).status();
+            passkey_error = Some(error);
+            Err(status)
+        }
+    });
+    match result {
+        Ok(value) => value
+            .get("response")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| DesktopRuntimeError::from(VAULTMESH_STATUS_CORE_ERROR)),
+        Err(status) => Err(passkey_error
+            .map(DesktopRuntimeError::from)
+            .unwrap_or_else(|| DesktopRuntimeError::from(status))),
     }
 }
 

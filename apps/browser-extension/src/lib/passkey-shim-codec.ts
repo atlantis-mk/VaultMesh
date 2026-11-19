@@ -6,6 +6,8 @@ export type JsonObject = Record<string, unknown>;
 
 export const MAX_PASSKEY_JSON_CHARS = 128 * 1024;
 export const MAX_PASSKEY_RESPONSE_CHARS = 256 * 1024;
+/** Upper bound for holding a page's WebAuthn call while the user chooses or unlocks. */
+export const PASSKEY_PROMPT_WAIT_MS = 5 * 60_000;
 
 /** Extensions the desktop honours. */
 const SUPPORTED_EXTENSIONS = new Set(['appid', 'credProps']);
@@ -70,16 +72,22 @@ function encodeExtensions(extensions: AuthenticationExtensionsClientInputs | und
   return encoded;
 }
 
+function encodeTimeout(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 export function encodeCreationOptions(options: PublicKeyCredentialCreationOptions): JsonObject | null {
   const extensions = encodeExtensions(options.extensions);
   if (!extensions) return null;
   const selection = options.authenticatorSelection;
+  const timeout = encodeTimeout(options.timeout);
   return {
     rp: { ...(options.rp.id === undefined ? {} : { id: options.rp.id }), name: options.rp.name },
     user: { id: toBase64Url(options.user.id), name: options.user.name, displayName: options.user.displayName },
     challenge: toBase64Url(options.challenge),
     pubKeyCredParams: options.pubKeyCredParams.map((parameter) => ({ type: parameter.type, alg: parameter.alg })),
     excludeCredentials: encodeDescriptors(options.excludeCredentials),
+    ...(timeout !== undefined ? { timeout } : {}),
     ...(selection ? {
       authenticatorSelection: {
         ...(selection.authenticatorAttachment ? { authenticatorAttachment: selection.authenticatorAttachment } : {}),
@@ -91,14 +99,20 @@ export function encodeCreationOptions(options: PublicKeyCredentialCreationOption
   };
 }
 
-export function encodeRequestOptions(options: PublicKeyCredentialRequestOptions): JsonObject | null {
+export function encodeRequestOptions(
+  options: PublicKeyCredentialRequestOptions,
+  mediation?: CredentialMediationRequirement,
+): JsonObject | null {
   const extensions = encodeExtensions(options.extensions);
   if (!extensions) return null;
+  const timeout = encodeTimeout(options.timeout);
   return {
     challenge: toBase64Url(options.challenge),
     ...(options.rpId === undefined ? {} : { rpId: options.rpId }),
     allowCredentials: encodeDescriptors(options.allowCredentials),
     ...(options.userVerification ? { userVerification: options.userVerification } : {}),
+    ...(timeout !== undefined ? { timeout } : {}),
+    mediation: mediation === 'conditional' ? 'conditional' : 'modal',
     extensions,
   };
 }
