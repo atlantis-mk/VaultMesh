@@ -1,3 +1,5 @@
+use std::{thread, time::Duration};
+
 use super::*;
 
 #[test]
