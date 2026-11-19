@@ -11,7 +11,7 @@ permissions:
 jobs:
   windows-browser:
     runs-on: windows-2025
-    timeout-minutes: 35
+    timeout-minutes: 40
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
@@ -31,3 +31,5 @@ jobs:
           cargo test --locked -p vaultmesh-tauri-desktop --lib ct_native_browser_001_windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p vaultmesh-tauri-desktop --lib test_browser_broker_http_listener_discover_and_security_and_rpc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p vaultmesh-tauri-desktop --lib windows_named_pipe_round_trip_reaches_browser_broker
