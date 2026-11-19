@@ -26,7 +26,7 @@
 2. **桌面端本地回环动态端口 HTTP API 服务 (`browser_broker_http`)**：
    - 桌面主进程启动时，在 `127.0.0.1:42800..=42850` 动态端口池中自动绑定首个可用端口，提供内部回环 HTTP 服务。
    - 提供 `GET /discover` 端点：返回 `200 OK` 及 `{"service":"vaultmesh-desktop","version":2,"port":<u16>}`。
-   - 提供 `POST /rpc` 端点：接收 JSON-RPC 请求，通过桌面主进程的 `BrowserBrokerCore` 处理后返回响应，完整支持即时响应与挂起授权（如临时解锁弹窗等待）。
+   - 提供 `POST /rpc` 端点：接收 JSON-RPC 请求，通过桌面主进程的 `BrowserBrokerCore` 处理后返回响应，完整支持即时响应与挂起授权（如临时解锁弹窗等待）。Windows 保留兼容命名管道时，两个生产监听器必须共享同一个 Broker；重试监听不得创建平行的配对会话。
    - **严格防御网页探测与跨站攻击**：
      - `POST /rpc` 强制校验请求头 `X-VaultMesh-Browser-Origin` 必须匹配白名单 Origin；
      - 严禁返回任何 `Access-Control-Allow-*` 跨域头；

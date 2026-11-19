@@ -166,7 +166,7 @@ fn locate_native_host_binary() -> Option<PathBuf> {
                 "vaultmesh-native-host"
             };
             let sibling = parent.join(candidate_name);
-            if sibling.is_file() {
+            if sibling.metadata().is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0) {
                 return Some(sibling);
             }
         }
@@ -269,67 +269,37 @@ fn check_macos_extension_installed(browser: &BrowserDefinition, home: &Path) -> 
 }
 
 #[cfg(target_os = "windows")]
-fn check_windows_browser_installed(browser: &BrowserDefinition) -> bool {
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let base = Path::new(&local_app_data);
-        match browser.id {
-            "chrome" => if base.join("Google/Chrome").is_dir() { return true; },
-            "edge" => if base.join("Microsoft/Edge").is_dir() { return true; },
-            "brave" => if base.join("BraveSoftware/Brave-Browser").is_dir() { return true; },
-            _ => {},
-        }
+fn windows_browser_profile_dir(browser: &BrowserDefinition) -> Option<PathBuf> {
+    if browser.is_firefox {
+        return std::env::var_os("APPDATA").map(PathBuf::from)
+            .map(|path| path.join("Mozilla/Firefox/Profiles"));
     }
-    false
-}
-
-#[cfg(target_os = "windows")]
-fn check_windows_manifest_registered(app_data: &Path) -> (bool, Option<String>) {
-    let manifest_path = app_data.join(crate::browser_host_registration::HOST_MANIFEST_NAME);
-    if !manifest_path.is_file() {
-        return (false, None);
-    }
-    if let Ok(bytes) = fs::read(&manifest_path) {
-        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-            let name_matches = value.get("name").and_then(Value::as_str) == Some(BROWSER_HOST_NAME);
-            let path_valid = value.get("path").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
-            if name_matches && path_valid {
-                return (true, Some(manifest_path.display().to_string()));
-            }
-        }
-    }
-    (false, Some(manifest_path.display().to_string()))
-}
-
-#[cfg(target_os = "windows")]
-fn check_windows_extension_installed(browser: &BrowserDefinition, extension_id: &str) -> bool {
-    let Ok(local_app_data) = std::env::var("LOCALAPPDATA") else {
-        return false;
-    };
     let user_data = match browser.id {
         "chrome" => "Google/Chrome/User Data",
         "edge" => "Microsoft/Edge/User Data",
         "brave" => "BraveSoftware/Brave-Browser/User Data",
-        _ => return false,
+        _ => return None,
     };
-    let base = Path::new(&local_app_data).join(user_data);
-    if !base.is_dir() {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).map(|path| path.join(user_data))
+}
+
+#[cfg(target_os = "windows")]
+fn check_windows_extension_installed(browser: &BrowserDefinition, profiles: &Path) -> bool {
+    if browser.is_firefox {
+        let package = format!("{}.xpi", crate::browser_host_registration::FIREFOX_EXTENSION_ID);
+        return fs::read_dir(profiles).is_ok_and(|entries| entries.flatten().any(|profile| {
+            profile.path().join("extensions").join(&package).is_file()
+        }));
+    }
+    let Ok(extension_id) = crate::browser_host_registration::configured_extension_id() else {
         return false;
-    }
-    if base.join("Default/Extensions").join(extension_id).is_dir() {
-        return true;
-    }
-    if let Ok(entries) = fs::read_dir(&base) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("Profile ")
-                && entry.path().join("Extensions").join(extension_id).is_dir()
-            {
-                return true;
-            }
-        }
-    }
-    false
+    };
+    fs::read_dir(profiles).is_ok_and(|entries| entries.flatten().any(|profile| {
+        let name = profile.file_name();
+        let name = name.to_string_lossy();
+        (name == "Default" || name.starts_with("Profile "))
+            && profile.path().join("Extensions").join(extension_id).is_dir()
+    }))
 }
 
 pub fn diagnose(state: &RuntimeState, repair: bool) -> Result<Value, String> {
@@ -340,22 +310,27 @@ pub fn diagnose(state: &RuntimeState, repair: bool) -> Result<Value, String> {
                 eprintln!("doctor repair macos registration error: {err}");
             }
         }
-        #[cfg(target_os = "windows")]
-        {
-            if let Err(err) = crate::browser_host_registration::install_windows_browser_host(&state.app_data) {
-                eprintln!("doctor repair windows registration error: {err}");
-            }
-        }
     }
 
+    #[cfg(target_os = "windows")]
+    let (broker_ready, api_port) = {
+        let mut integration = state.browser_integration.lock()
+            .map_err(|_| "浏览器连接状态暂时不可用。".to_owned())?;
+        let status = if repair { integration.repair() } else { integration.status() };
+        (status.broker_ready, status.api_port)
+    };
+    #[cfg(unix)]
     let (broker_ready, api_port) = match &state._browser_http_listener {
         Some(listener) if listener.is_healthy() => (true, Some(listener.port())),
         _ => (false, None),
     };
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let (broker_ready, api_port) = (false, None);
 
     let host_binary = locate_native_host_binary();
     let host_binary_found = host_binary.is_some();
 
+    #[cfg(target_os = "macos")]
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
 
     let mut browser_items: Vec<BrowserDoctorItem> = Vec::new();
@@ -370,10 +345,14 @@ pub fn diagnose(state: &RuntimeState, repair: bool) -> Result<Value, String> {
 
         #[cfg(target_os = "windows")]
         let (installed, manifest_registered, manifest_path, extension_installed) = {
-            let installed = check_windows_browser_installed(def);
-            let (reg, path) = check_windows_manifest_registered(&state.app_data);
-            let ext = check_windows_extension_installed(def, DEFAULT_DEVELOPMENT_EXTENSION_ID);
-            (installed, reg, path, ext)
+            let profiles = windows_browser_profile_dir(def).filter(|path| path.is_dir());
+            let (registered, manifest_path) =
+                crate::browser_host_registration::check_windows_browser_registration(
+                    &state.app_data, host_binary.as_deref(), def.id,
+                );
+            let extension_installed = profiles.as_deref()
+                .is_some_and(|profiles| check_windows_extension_installed(def, profiles));
+            (profiles.is_some(), registered, manifest_path, extension_installed)
         };
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]

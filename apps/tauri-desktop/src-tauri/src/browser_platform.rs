@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::Utc;
 use rand_core::{OsRng, RngCore};
 use serde_json::{Map, Value, json};
 use tauri::{AppHandle, Manager};
@@ -27,13 +27,16 @@ use zeroize::Zeroizing;
 use crate::{
     NativeDialogFocusState, SecuritySettings,
     biometric_service::BiometricQuickUnlockService,
-    browser_broker::{BrowserBrokerPlatform, BrowserPlatformError},
+    browser_broker::{
+        BrowserBrokerPlatform, BrowserPlatformError, BrowserRepromptRequest,
+        BrowserRepromptWaiter, BrowserSessionUnlockRequest, BrowserSessionUnlockWaiter,
+        BrowserUnlockResolution, PasskeyConfirmationRequest, PasskeyOpKind,
+    },
     browser_fill::email_otp_assignment,
     browser_pairing::BrowserPairingService,
     email_otp::{EmailOtpService, EmailScanPlan},
     focus_main_window_for_dialog,
     import_service::{ImportService, MAX_IMPORT_FILE_BYTES, validate_source},
-    passkey_service::PasskeyService,
     pin_service::PinQuickUnlockService,
     recovery_code_file::{PreparedRecoveryCodeFile, RecoveryFileCleanupSessions},
     ssh_scan::SshScanService,
@@ -48,11 +51,11 @@ pub struct TauriBrowserPlatform {
     native_dialog_focus: Arc<NativeDialogFocusState>,
     imports: Mutex<ImportService>,
     recovery_files: Mutex<RecoveryFileCleanupSessions>,
-    pin: Mutex<PinQuickUnlockService>,
+    pin: Arc<Mutex<PinQuickUnlockService>>,
     biometric: Mutex<BiometricQuickUnlockService>,
     desktop_biometric: Option<Arc<Mutex<BiometricQuickUnlockService>>>,
     preauth_preview: crate::browser_preauth_preview::BrowserPreAuthPreviewStore,
-    one_shot_unlocks: Option<Arc<Mutex<crate::agent_unlock_window::BrowserAutofillUnlockQueue>>>,
+    browser_unlocks: Option<Arc<Mutex<crate::agent_unlock_window::BrowserUnlockQueue>>>,
     authentication: Arc<crate::browser_authentication::Authentication>,
     pairing: BrowserPairingService,
     ssh_directory: PathBuf,
@@ -69,9 +72,11 @@ impl TauriBrowserPlatform {
         let credentials = crate::device_credentials::DeviceCredentialStore::platform(app_data)
             .expect("DeviceCredentialStore::platform");
         self.desktop_biometric = None;
-        self.pin = Mutex::new(PinQuickUnlockService::new_bitwarden_development_with_credentials(
-            directory.join("pin-unlock.json"),
-            &credentials,
+        self.pin = Arc::new(Mutex::new(
+            PinQuickUnlockService::new_bitwarden_development_with_credentials(
+                directory.join("pin-unlock.json"),
+                &credentials,
+            ),
         ));
         self.biometric = Mutex::new(BiometricQuickUnlockService::new_with_credentials(
             directory.join("biometric-unlock.json"),
@@ -85,7 +90,7 @@ impl TauriBrowserPlatform {
         self.preauth_preview = crate::browser_preauth_preview::BrowserPreAuthPreviewStore::new(
             credentials.scoped("com.vaultmesh.desktop.bitwarden-dev-autofill-preview"),
         );
-        self.one_shot_unlocks = None;
+        self.browser_unlocks = None;
         self
     }
 
@@ -98,8 +103,9 @@ impl TauriBrowserPlatform {
         native_dialog_focus: Arc<NativeDialogFocusState>,
         email_otp: Arc<Mutex<EmailOtpService>>,
         desktop_biometric: Arc<Mutex<BiometricQuickUnlockService>>,
+        browser_pin: Arc<Mutex<PinQuickUnlockService>>,
         preauth_preview: crate::browser_preauth_preview::BrowserPreAuthPreviewStore,
-        one_shot_unlocks: Arc<Mutex<crate::agent_unlock_window::BrowserAutofillUnlockQueue>>,
+        browser_unlocks: Arc<Mutex<crate::agent_unlock_window::BrowserUnlockQueue>>,
     ) -> Self {
         let ssh_directory = app
             .path()
@@ -116,10 +122,7 @@ impl TauriBrowserPlatform {
             native_dialog_focus,
             imports: Mutex::new(ImportService::default()),
             recovery_files: Mutex::new(RecoveryFileCleanupSessions::default()),
-            pin: Mutex::new(PinQuickUnlockService::new_browser_with_credentials(
-                app_data.join("browser-pin-unlock.json"),
-                &credentials,
-            )),
+            pin: browser_pin,
             biometric: Mutex::new(BiometricQuickUnlockService::new_with_credentials(
                 app_data.join("browser-biometric-unlock.json"),
                 credentials.scoped("com.vaultmesh.desktop.browser-biometric"),
@@ -127,7 +130,7 @@ impl TauriBrowserPlatform {
             )),
             desktop_biometric: Some(desktop_biometric),
             preauth_preview,
-            one_shot_unlocks: Some(one_shot_unlocks),
+            browser_unlocks: Some(browser_unlocks),
             authentication: Arc::default(),
             pairing: BrowserPairingService::new(app_data.join("browser-pairing.json"), &credentials),
             ssh_directory,
@@ -533,16 +536,7 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                     let status = runtime
                         .restore_from_for_browser(&path, password)
                         .map_err(runtime_error)?;
-                    self.pin
-                        .lock()
-                        .map_err(|_| failure("PIN 快速解锁暂时不可用。"))?
-                        .disable()
-                        .map_err(|message| failure(&message))?;
-                    self.biometric
-                        .lock()
-                        .map_err(|_| failure("Touch ID 快速解锁暂时不可用。"))?
-                        .disable()
-                        .map_err(|message| failure(&message))?;
+                    self.disable_all_quick_unlocks()?;
                     Ok(json!({ "cancelled": false, "status": status }))
                 }
                 "biometric.status" => {
@@ -938,82 +932,6 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                         .map_err(|message| failure(&message))?;
                     Ok(json!({}))
                 }
-                "passkeys.create" | "passkeys.get" => {
-                    let request_json = required_string(input, "requestDetailsJson")?;
-                    let kind = if operation == "passkeys.create" {
-                        "create"
-                    } else {
-                        "get"
-                    };
-                    let mut prepared_get = None;
-                    let (rp_id, origin, account) = if kind == "create" {
-                        PasskeyService::describe(kind, &request_json)
-                            .map_err(|message| failure(&message))?
-                    } else {
-                        let Some(selection) = PasskeyService::prepare_get(runtime, &request_json)
-                            .map_err(|message| failure(&message))?
-                        else {
-                            return Err(BrowserPlatformError {
-                                code: "passkey-unavailable",
-                                message: "VaultMesh 没有该网站可用的 Passkey。".to_owned(),
-                            });
-                        };
-                        let presentation = (
-                            selection.rp_id.clone(),
-                            selection.origin.clone(),
-                            selection.account.clone(),
-                        );
-                        prepared_get = Some(selection);
-                        presentation
-                    };
-                    let detail = account
-                        .map(|account| format!("账号：{account}\n来源：{origin}\n私钥始终保留在 VaultMesh 加密保险库中。"))
-                        .unwrap_or_else(|| format!("来源：{origin}\n私钥始终保留在 VaultMesh 加密保险库中。"));
-                    let approved = {
-                        let _dialog_guard = self.native_dialog_focus.begin();
-                        self.app
-                            .dialog()
-                            .message(detail)
-                            .title(if kind == "create" {
-                                "创建 Passkey"
-                            } else {
-                                "使用 Passkey"
-                            })
-                            .buttons(MessageDialogButtons::OkCancelCustom(
-                                if kind == "create" {
-                                    "创建 Passkey".into()
-                                } else {
-                                    "允许登录".into()
-                                },
-                                "取消".into(),
-                            ))
-                            .blocking_show()
-                    };
-                    if !approved {
-                        return Err(cancelled());
-                    }
-                    let now = DateTime::<Utc>::from_timestamp_millis(now_millis)
-                        .unwrap_or(DateTime::UNIX_EPOCH)
-                        .to_rfc3339_opts(SecondsFormat::Millis, true);
-                    let response = if kind == "create" {
-                        let default_login_id = input
-                            .get("loginId")
-                            .and_then(Value::as_str)
-                            .and_then(|value| Uuid::parse_str(value).ok());
-                        PasskeyService::create(runtime, &request_json, default_login_id, &now)
-                    } else {
-                        let selection =
-                            prepared_get.ok_or_else(|| failure("Passkey 选择已失效。"))?;
-                        PasskeyService::get_for_item(
-                            runtime,
-                            &request_json,
-                            &now,
-                            Some(selection.item_id),
-                        )
-                    }
-                    .map_err(|message| failure(&format!("{message} ({rp_id})")))?;
-                    Ok(json!({ "responseJson": response }))
-                }
                 _ => unreachable!("platform operation checked above"),
             }
         })();
@@ -1021,39 +939,16 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
     }
 
     fn after_master_unlock(&self, runtime: &mut DesktopRuntime) -> Result<(), BrowserPlatformError> {
-        // Warm the authenticated subscription before the user opens a fill menu.
-        if let Ok(state) = runtime.sync_state() {
-            if let Ok(mut assist) = self.device_assist.lock() {
-                let _ = assist.prepare(format!("{}:{}:{}", runtime.current_path().display(), state.vault_id, state.replica));
-            }
-        }
-        let path = runtime.current_path();
-        let pin = self
-            .pin
-            .lock()
-            .map_err(|_| failure("PIN 快速解锁暂时不可用。"))?;
-        pin.disable_if_for_different_vault(&path)
-            .and_then(|()| pin.reset_failures(&path))
-            .map_err(|message| failure(&message))?;
-        self.biometric
-            .lock()
-            .map_err(|_| failure("Touch ID 快速解锁暂时不可用。"))?
-            .disable_if_for_different_vault(&path)
-            .map_err(|message| failure(&message))
+        self.sync_quick_unlock_after_unlock(runtime, true)
+    }
+
+    fn after_quick_unlock(&self, runtime: &mut DesktopRuntime) -> Result<(), BrowserPlatformError> {
+        self.sync_quick_unlock_after_unlock(runtime, false)
     }
 
     fn after_runtime_mutation(&self, operation: &str) -> Result<(), BrowserPlatformError> {
         if operation == "vault.change-password" {
-            self.pin
-                .lock()
-                .map_err(|_| failure("PIN 快速解锁暂时不可用。"))?
-                .disable()
-                .map_err(|message| failure(&message))?;
-            self.biometric
-                .lock()
-                .map_err(|_| failure("Touch ID 快速解锁暂时不可用。"))?
-                .disable()
-                .map_err(|message| failure(&message))?;
+            self.disable_all_quick_unlocks()?;
         }
         Ok(())
     }
@@ -1087,49 +982,132 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
             .blocking_show())
     }
 
-    fn begin_one_shot_unlock_for_fill(
+    fn confirm_passkey(
         &self,
-        request: crate::browser_broker::OneShotUnlockRequest,
-    ) -> Option<crate::browser_broker::OneShotUnlockWaiter> {
-        let queue = Arc::clone(self.one_shot_unlocks.as_ref()?);
+        request: &PasskeyConfirmationRequest,
+    ) -> Result<bool, BrowserPlatformError> {
+        let detail = format_passkey_confirmation_message(
+            request.account.as_deref(),
+            &request.origin,
+            request.top_origin.as_deref(),
+        );
+        let (title, ok_label) = match request.kind {
+            PasskeyOpKind::Create => ("创建 Passkey", "创建 Passkey"),
+            PasskeyOpKind::Get => ("使用 Passkey", "允许登录"),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            if !any_vaultmesh_window_visible(&self.app) {
+                let _ = self.app.set_dock_visibility(true);
+            }
+            activate_macos_foreground_for_dialog(&self.app);
+        }
+        let approved = {
+            let _dialog_guard = self.native_dialog_focus.begin();
+            self.app
+                .dialog()
+                .message(detail)
+                .title(title)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    ok_label.into(),
+                    "取消".into(),
+                ))
+                .blocking_show()
+        };
+        #[cfg(target_os = "macos")]
+        if !any_vaultmesh_window_visible(&self.app) {
+            let _ = self.app.set_dock_visibility(false);
+        }
+        Ok(approved)
+    }
+
+    fn begin_browser_session_unlock(
+        &self,
+        request: BrowserSessionUnlockRequest,
+    ) -> Option<BrowserSessionUnlockWaiter> {
+        let queue = Arc::clone(self.browser_unlocks.as_ref()?);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let unlock_ref = Uuid::new_v4().to_string();
+        let now = crate::unix_millis();
+        let passkey = request.passkey_request;
+        let passkey_deadline = passkey.map(|(_, deadline)| deadline.max(0) as u64);
+        let expires_at = now.saturating_add(crate::agent_unlock_window::TEMPORARY_UNLOCK_WAIT_MILLIS)
+            .min(passkey_deadline.unwrap_or(u64::MAX));
+        if expires_at <= now {
+            return Some(BrowserSessionUnlockWaiter::new(|| Err(BrowserPlatformError {
+                code: "request-expired",
+                message: "插件请求已过期，请重试。".to_owned(),
+            })));
+        }
+        let (unlock_ref, responder_id) = {
+            let mut guard = queue.lock().ok()?;
+            let (unlock_ref, responder_id) = guard.enqueue_session_or_merge(request, now, expires_at, sender);
+            if let Some((request_id, _)) = passkey {
+                guard.track_passkey(request_id, unlock_ref.clone(), responder_id);
+            }
+            (unlock_ref, responder_id)
+        };
+        crate::agent_unlock_window::show_agent_unlock_window(&self.app);
+        let app = self.app.clone();
+        Some(BrowserSessionUnlockWaiter::new(move || {
+            let result = wait_for_queued_unlock(
+                app,
+                Arc::clone(&queue),
+                unlock_ref,
+                responder_id,
+                receiver,
+                passkey_deadline,
+                "浏览器解锁已超时，请重试。",
+            );
+            if let Some((request_id, _)) = passkey
+                && let Ok(mut guard) = queue.lock()
+            {
+                guard.finish_passkey(request_id);
+            }
+            result
+        }))
+    }
+
+    fn begin_master_password_reprompt(
+        &self,
+        request: BrowserRepromptRequest,
+    ) -> Option<BrowserRepromptWaiter> {
+        let queue = Arc::clone(self.browser_unlocks.as_ref()?);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let now = crate::unix_millis();
         let expires_at =
             now.saturating_add(crate::agent_unlock_window::TEMPORARY_UNLOCK_WAIT_MILLIS);
-        {
+        let (unlock_ref, responder_id) = {
             let mut guard = queue.lock().ok()?;
-            guard.enqueue(crate::agent_unlock_window::PendingBrowserAutofillUnlock {
-                unlock_ref: unlock_ref.clone(),
-                vault_path: request.vault_path,
-                origin: request.origin,
-                item_title: request.item_title,
-                item_kind: request.item_kind,
-                master_password_reprompt: request.master_password_reprompt,
-                created_at: now,
-                expires_at,
-                responder: sender,
-            });
-        }
+            guard.enqueue_reprompt(request, now, expires_at, sender)
+        };
         crate::agent_unlock_window::show_agent_unlock_window(&self.app);
         let app = self.app.clone();
-        Some(crate::browser_broker::OneShotUnlockWaiter::new(move || {
-            match receiver.recv_timeout(Duration::from_millis(
-                crate::agent_unlock_window::TEMPORARY_UNLOCK_WAIT_MILLIS,
-            )) {
-                Ok(result) => result,
-                Err(_) => {
-                    if let Ok(mut guard) = queue.lock() {
-                        let _ = guard.take(&unlock_ref);
-                    }
-                    crate::agent_unlock_window::expire_agent_unlock_window(&app, &unlock_ref);
-                    Err(BrowserPlatformError {
-                        code: "cancelled",
-                        message: "自动填充临时解锁已超时。".to_owned(),
-                    })
-                }
-            }
+        Some(BrowserRepromptWaiter::new(move || {
+            let resolution = wait_for_queued_unlock(
+                app,
+                queue,
+                unlock_ref,
+                responder_id,
+                receiver,
+                None,
+                "主密码确认已超时。",
+            )?;
+            resolution.master_password.ok_or_else(|| BrowserPlatformError {
+                code: "reprompt",
+                message: "此条目受主密码保护，请使用主密码确认填充。".to_owned(),
+            })
         }))
+    }
+
+    fn cancel_passkey_unlock(&self, request_id: Uuid) {
+        let expired = self.browser_unlocks.as_ref()
+            .and_then(|queue| queue.lock().ok()?.cancel_passkey(request_id));
+        if let Some(reference) = expired {
+            let app = self.app.clone();
+            let _ = self.app.run_on_main_thread(move || {
+                crate::agent_unlock_window::expire_agent_unlock_window(&app, &reference);
+            });
+        }
     }
 
     fn cancel_authentication(&self) {
@@ -1144,7 +1122,7 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
 
     fn clear(&self) {
         self.cancel_authentication();
-        if let Some(queue) = &self.one_shot_unlocks
+        if let Some(queue) = &self.browser_unlocks
             && let Ok(mut guard) = queue.lock()
         {
             guard.clear_all();
@@ -1164,6 +1142,127 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
         }
         if let Ok(mut seen) = self.email_fill_seen.lock() {
             seen.clear();
+        }
+    }
+}
+
+impl TauriBrowserPlatform {
+    fn sync_quick_unlock_after_unlock(
+        &self,
+        runtime: &mut DesktopRuntime,
+        reset_pin_failures: bool,
+    ) -> Result<(), BrowserPlatformError> {
+        // Warm the authenticated subscription before the user opens a fill menu.
+        if let Ok(state) = runtime.sync_state() {
+            if let Ok(mut assist) = self.device_assist.lock() {
+                let _ = assist.prepare(format!(
+                    "{}:{}:{}",
+                    runtime.current_path().display(),
+                    state.vault_id,
+                    state.replica
+                ));
+            }
+        }
+        let path = runtime.current_path();
+        {
+            let pin = self
+                .pin
+                .lock()
+                .map_err(|_| failure("PIN 快速解锁暂时不可用。"))?;
+            pin.disable_if_for_different_vault(&path)
+                .map_err(|message| failure(&message))?;
+            if reset_pin_failures {
+                pin.reset_failures(&path)
+                    .map_err(|message| failure(&message))?;
+            }
+        }
+        self.biometric
+            .lock()
+            .map_err(|_| failure("Touch ID 快速解锁暂时不可用。"))?
+            .disable_if_for_different_vault(&path)
+            .map_err(|message| failure(&message))
+    }
+
+    fn disable_all_quick_unlocks(&self) -> Result<(), BrowserPlatformError> {
+        self.pin
+            .lock()
+            .map_err(|_| failure("PIN 快速解锁暂时不可用。"))?
+            .disable()
+            .map_err(|message| failure(&message))?;
+        self.biometric
+            .lock()
+            .map_err(|_| failure("Touch ID 快速解锁暂时不可用。"))?
+            .disable()
+            .map_err(|message| failure(&message))?;
+        if self.desktop_biometric.is_some()
+            && let Some(runtime_state) = self.app.try_state::<crate::RuntimeState>()
+        {
+            crate::pin_domain_adapter::disable_all_domain_pins_sync(&runtime_state)
+                .map_err(|message| failure(&message))?;
+            runtime_state
+                .biometric
+                .lock()
+                .map_err(|_| failure("Touch ID 快速解锁暂时不可用。"))?
+                .disable()
+                .map_err(|message| failure(&message))?;
+            runtime_state
+                .agent_biometric
+                .lock()
+                .map_err(|_| failure("Agent Touch ID 快速解锁暂时不可用。"))?
+                .disable()
+                .map_err(|message| failure(&message))?;
+        }
+        Ok(())
+    }
+}
+
+fn wait_for_queued_unlock(
+    app: AppHandle,
+    queue: Arc<Mutex<crate::agent_unlock_window::BrowserUnlockQueue>>,
+    unlock_ref: String,
+    responder_id: u64,
+    receiver: std::sync::mpsc::Receiver<Result<BrowserUnlockResolution, BrowserPlatformError>>,
+    deadline: Option<u64>,
+    timeout_message: &str,
+) -> Result<BrowserUnlockResolution, BrowserPlatformError> {
+    loop {
+        let wait_millis = queue
+            .lock()
+            .ok()
+            .and_then(|guard| guard.entry_expires_at(&unlock_ref))
+            .map(|expires_at| expires_at.min(deadline.unwrap_or(u64::MAX)).saturating_sub(crate::unix_millis()))
+            .unwrap_or(0);
+
+        if wait_millis == 0 {
+            if let Ok(result) = receiver.try_recv() {
+                return result;
+            }
+            let outcome = queue
+                .lock()
+                .ok()
+                .map(|mut guard| guard.remove_responder(&unlock_ref, responder_id))
+                .unwrap_or(crate::agent_unlock_window::RemoveResponderOutcome::NotFound);
+            if let Ok(result) = receiver.try_recv() {
+                return result;
+            }
+            if outcome == crate::agent_unlock_window::RemoveResponderOutcome::EntryRemoved {
+                crate::agent_unlock_window::expire_agent_unlock_window(&app, &unlock_ref);
+            }
+            return Err(BrowserPlatformError {
+                code: "cancelled",
+                message: timeout_message.to_owned(),
+            });
+        }
+
+        match receiver.recv_timeout(Duration::from_millis(wait_millis)) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(BrowserPlatformError {
+                    code: "cancelled",
+                    message: "解锁请求已取消。".to_owned(),
+                });
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
         }
     }
 }
@@ -1223,9 +1322,56 @@ pub(crate) fn is_platform_operation(operation: &str) -> bool {
             | "ssh.scan"
             | "ssh.scan.commit"
             | "ssh.scan.cancel"
-            | "passkeys.create"
-            | "passkeys.get"
     )
+}
+
+#[cfg(target_os = "macos")]
+fn any_vaultmesh_window_visible(app: &AppHandle) -> bool {
+    app.webview_windows()
+        .values()
+        .any(|window| window.is_visible().unwrap_or(false))
+}
+
+#[cfg(target_os = "macos")]
+fn activate_macos_foreground_for_dialog(app: &AppHandle) {
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<()>(1);
+    if app
+        .run_on_main_thread(move || {
+            unsafe {
+                let ns_app: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+                if !ns_app.is_null() {
+                    let _: () = objc2::msg_send![
+                        ns_app,
+                        activateIgnoringOtherApps: objc2::runtime::Bool::YES
+                    ];
+                }
+            }
+            let _ = sender.send(());
+        })
+        .is_ok()
+    {
+        let _ = receiver.recv_timeout(Duration::from_millis(500));
+    }
+}
+
+fn format_passkey_confirmation_message(
+    account: Option<&str>,
+    origin: &str,
+    top_origin: Option<&str>,
+) -> String {
+    let mut lines = Vec::new();
+    if let Some(account) = account.filter(|value| !value.is_empty()) {
+        lines.push(format!("账号：{account}"));
+    }
+    if let Some(top_origin) = top_origin.filter(|top| *top != origin) {
+        lines.push(format!("请求方：{origin}"));
+        lines.push(format!("当前网站：{top_origin}"));
+    } else {
+        lines.push(format!("来源：{origin}"));
+    }
+    lines.push("私钥始终保留在 VaultMesh 加密保险库中。".to_owned());
+    lines.join("\n")
 }
 
 fn random_index(upper: usize) -> usize {
@@ -1321,4 +1467,40 @@ fn authentication_id(input: &Map<String, Value>) -> Result<Uuid, BrowserPlatform
         .and_then(Value::as_str)
         .and_then(|id| Uuid::parse_str(id).ok())
         .ok_or_else(invalid)
+}
+
+#[cfg(test)]
+mod passkey_confirmation_tests {
+    use super::format_passkey_confirmation_message;
+
+    #[test]
+    fn confirmation_message_formats_same_origin_and_cross_origin_contexts() {
+        let same_origin = format_passkey_confirmation_message(
+            Some("ada@example.test"),
+            "https://example.test",
+            None,
+        );
+        assert!(same_origin.contains("账号：ada@example.test"));
+        assert!(same_origin.contains("来源：https://example.test"));
+        assert!(!same_origin.contains("当前网站："));
+
+        let same_top = format_passkey_confirmation_message(
+            None,
+            "https://example.test",
+            Some("https://example.test"),
+        );
+        assert!(!same_top.contains("账号："));
+        assert!(same_top.contains("来源：https://example.test"));
+        assert!(!same_top.contains("当前网站："));
+
+        let cross_origin = format_passkey_confirmation_message(
+            Some("ada@example.test"),
+            "https://auth.example.test",
+            Some("https://top.partner.test"),
+        );
+        assert!(cross_origin.contains("账号：ada@example.test"));
+        assert!(cross_origin.contains("请求方：https://auth.example.test"));
+        assert!(cross_origin.contains("当前网站：https://top.partner.test"));
+        assert!(!cross_origin.contains("\n来源："));
+    }
 }

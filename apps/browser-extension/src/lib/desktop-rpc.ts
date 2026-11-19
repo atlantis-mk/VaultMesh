@@ -76,11 +76,11 @@ export class DesktopRpcError extends Error {
 export type Operation =
   | "vault.status" | "vault.workspace" | "vault.create" | "vault.unlock" | "vault.unlock-history" | "vault.lock" | "vault.backup" | "vault.restore" | "vault.change-password"
   | "biometric.authentication.start" | "biometric.authentication.poll" | "biometric.authentication.cancel" | "biometric.status" | "biometric.enable" | "biometric.disable" | "biometric.unlock" | "pin.status" | "pin.enable" | "pin.disable" | "pin.unlock" | "security.settings.get" | "security.settings.update"
-  | "events.poll" | "browser.pairing.status" | "browser.pairing.revoke" | "confirmation.request"
+  | "events.poll" | "browser.pairing.status" | "browser.pairing.revoke" | "browser.unlock.request" | "confirmation.request"
   | "browser.autofill.candidates" | "browser.autofill.profile" | "browser.autofill.execute" | "browser.card.capture-status" | "browser.login.password-changed" | "browser.fill.record" | "browser.fill.history" | "browser.fill.request"
   | "device.assist.capabilities" | "device.assist.start" | "device.assist.poll" | "device.assist.select" | "device.assist.finish" | "device.assist.cancel"
   | "email.otp.watch" | "email.otp.poll" | "email.otp.candidates" | "email.otp.fill"
-  | "passkeys.create" | "passkeys.probe" | "passkeys.get"
+  | "passkeys.create" | "passkeys.probe" | "passkeys.get" | "passkeys.cancel"
   | "items.list" | "items.detail" | "items.add" | "items.update" | "items.delete" | "items.copy-username" | "items.copy-password" | "items.copy-totp" | "items.recovery-codes" | "items.copy-recovery-code" | "items.recovery-codes.import-file" | "items.trash.list" | "items.trash.restore" | "items.trash.purge" | "items.trash.empty" | "items.history.list" | "items.history.restore" | "items.history.clear"
   | "cards.list" | "cards.detail" | "cards.add" | "cards.update" | "cards.delete" | "cards.copy-number" | "cards.copy-security-code" | "cards.copy-pin" | "cards.trash.list" | "cards.trash.restore" | "cards.trash.purge" | "cards.trash.empty" | "cards.history.list" | "cards.history.restore" | "cards.history.clear"
   | "identities.list" | "identities.detail" | "identities.add" | "identities.update" | "identities.delete" | "identities.trash.list" | "identities.trash.restore" | "identities.trash.purge" | "identities.trash.empty" | "identities.history.list" | "identities.history.restore" | "identities.history.clear"
@@ -88,7 +88,7 @@ export type Operation =
   | "secrets.list" | "secrets.detail" | "secrets.add" | "secrets.update" | "secrets.delete" | "secrets.copy-value"
   | "imports.select" | "imports.commit" | "imports.cancel" | "password.generate" | "browser.generated.copy" | "password.health";
 
-const NO_GESTURE_OPERATIONS = new Set<Operation>(["vault.status", "vault.workspace", "vault.unlock-history", "biometric.status", "biometric.authentication.poll", "biometric.authentication.cancel", "pin.status", "security.settings.get", "events.poll", "browser.pairing.status", "browser.autofill.candidates", "browser.autofill.profile", "browser.autofill.execute", "browser.card.capture-status", "browser.login.password-changed", "browser.fill.record", "browser.fill.history", "email.otp.poll", "email.otp.candidates", "passkeys.create", "passkeys.probe", "passkeys.get", "items.list", "items.trash.list", "items.history.list", "cards.list", "cards.detail", "cards.trash.list", "cards.history.list", "identities.list", "identities.detail", "identities.trash.list", "identities.history.list", "ssh.list", "ssh.detail", "ssh.trash.list", "ssh.history.list", "secrets.list", "secrets.detail", "password.health"]);
+const NO_GESTURE_OPERATIONS = new Set<Operation>(["vault.status", "vault.workspace", "vault.unlock-history", "biometric.status", "biometric.authentication.poll", "biometric.authentication.cancel", "pin.status", "security.settings.get", "events.poll", "browser.pairing.status", "browser.autofill.candidates", "browser.autofill.profile", "browser.autofill.execute", "browser.card.capture-status", "browser.login.password-changed", "browser.fill.record", "browser.fill.history", "email.otp.poll", "email.otp.candidates", "passkeys.create", "passkeys.probe", "passkeys.get", "passkeys.cancel", "items.list", "items.trash.list", "items.history.list", "cards.list", "cards.detail", "cards.trash.list", "cards.history.list", "identities.list", "identities.detail", "identities.trash.list", "identities.history.list", "ssh.list", "ssh.detail", "ssh.trash.list", "ssh.history.list", "secrets.list", "secrets.detail", "password.health"]);
 
 export async function desktopRpc(operation: Operation, input: Record<string, unknown> = {}, userGestureId?: string): Promise<unknown> {
   const request = createRequest(operation, input, userGestureId);
@@ -97,9 +97,36 @@ export async function desktopRpc(operation: Operation, input: Record<string, unk
 
 /** Background-only entry point used by fill commands without routing a
  * message back into the same service worker. */
-export async function backgroundDesktopRpc(operation: Operation, input: Record<string, unknown> = {}, userGestureId?: string): Promise<unknown> {
-  const request = createRequest(operation, input, userGestureId);
-  return parseResponse(request, persistentNativeConnection.request(request));
+export type DesktopRpcTiming = { requestId: string; deadlineAt?: number };
+
+export async function backgroundDesktopRpc(
+  operation: Operation,
+  input: Record<string, unknown> = {},
+  userGestureId?: string,
+  timing?: DesktopRpcTiming,
+): Promise<unknown> {
+  const request = createRequest(operation, input, userGestureId, timing);
+  const result = await parseResponse(request, persistentNativeConnection.request(request));
+  if (PAGE_TRIGGERED_UNLOCK_OPERATIONS.has(operation)) notifyPossibleUnlockTransition(operation);
+  return result;
+}
+
+/** Operations a web page can trigger that may move a locked vault into the
+ * persistent browser session (desktop unlock window). The background worker
+ * observes them to warm the popup workspace cache without blocking the RPC. */
+const PAGE_TRIGGERED_UNLOCK_OPERATIONS = new Set<Operation>(["browser.autofill.execute", "passkeys.create", "passkeys.get"]);
+let possibleUnlockObserver: ((operation: Operation) => void) | null = null;
+
+export function setPossibleUnlockObserver(observer: ((operation: Operation) => void) | null): void {
+  possibleUnlockObserver = observer;
+}
+
+function notifyPossibleUnlockTransition(operation: Operation): void {
+  try {
+    possibleUnlockObserver?.(operation);
+  } catch {
+    // Warm-up is best effort and must never fail the page-triggered operation.
+  }
 }
 
 export type DesktopRpcRuntimeMessage = { kind: "vaultmesh.desktop-rpc"; request: NativeRpcRequest };
@@ -113,15 +140,19 @@ export function isDesktopRpcRuntimeMessage(value: unknown): value is DesktopRpcR
     && typeof candidate.request.requestId === "string";
 }
 
-function createRequest(operation: Operation, input: Record<string, unknown>, userGestureId?: string): NativeRpcRequest {
-  const requestId = crypto.randomUUID();
+function createRequest(operation: Operation, input: Record<string, unknown>, userGestureId?: string, timing?: DesktopRpcTiming): NativeRpcRequest {
+  const requestId = timing?.requestId ?? crypto.randomUUID();
   const now = new Date();
+  const deadlineAt = Math.min(timing?.deadlineAt ?? Infinity, now.getTime() + MAX_REQUEST_LIFETIME_MS);
+  if (deadlineAt <= now.getTime()) {
+    throw new DesktopRpcError("request-expired", "插件请求已过期，请重试。");
+  }
   return {
     kind: "vaultmesh.rpc",
     version: VERSION,
     requestId,
     issuedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + MAX_REQUEST_LIFETIME_MS).toISOString(),
+    expiresAt: new Date(deadlineAt).toISOString(),
     operation,
     input: NO_GESTURE_OPERATIONS.has(operation) ? input : { ...input, userGestureId: userGestureId ?? crypto.randomUUID() },
   };

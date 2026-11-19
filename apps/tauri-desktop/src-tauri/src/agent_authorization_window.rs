@@ -256,11 +256,21 @@ pub(super) fn show_agent_authorization_window(app: &AppHandle) {
         .get_webview_window(AGENT_AUTHORIZATION_WINDOW_LABEL)
         .or_else(|| build_agent_authorization_window(app, true));
     let Some(window) = window else { return };
+    let was_visible = window.is_visible().unwrap_or(false);
     let deadline = unix_millis().saturating_add(AUTHORIZATION_TTL_MILLIS);
     if let Some(state) = app.try_state::<RuntimeState>() {
         state
             .agent_authorization_window_deadline
             .store(deadline, Ordering::Release);
+    }
+    if !was_visible {
+        crate::window_layout_adapter::center_window_on_current_monitor(
+            &window,
+            Some(crate::window_layout_adapter::LogicalWindowSize {
+                width: 520.0,
+                height: 670.0,
+            }),
+        );
     }
     let _ = window.unminimize();
     let _ = window.show();

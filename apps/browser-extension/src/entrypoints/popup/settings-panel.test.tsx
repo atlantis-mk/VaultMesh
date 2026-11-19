@@ -6,6 +6,7 @@ const desktopRpc = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/desktop-rpc", () => ({ desktopRpc, confirmedDesktopRpc: vi.fn() }));
 
 import { loadPluginSecurityPolicy } from "@/lib/plugin-security-policy";
+import { PasskeyBrowserFactory } from "@/lib/passkey-browser-adapter";
 import { SettingsPanel } from "./settings-panel";
 
 const desktopSettings = {
@@ -181,6 +182,98 @@ describe("CT-BROWSER-003 popup plugin security settings", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  it("explains that plugin PIN is independent while pointing to the desktop security center for unified management", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => root.render(createElement(SettingsPanel, {
+        fillHistory: [], recoveryTargets: [], onRecoveryChanged: vi.fn(), onNotice: vi.fn(), onLocked: vi.fn(),
+      })));
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("插件 PIN 解锁"))!.click());
+      const text = container.textContent ?? "";
+      expect(text).toContain("与桌面端、Agent PIN 相互独立");
+      expect(text).toContain("VaultMesh 桌面端「安全中心 → PIN 快速解锁」中统一管理三端 PIN");
+      expect(container.querySelectorAll('input[type="password"]')).toHaveLength(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it("configures global passkeyGetDefault and passkeyCreateDefault, disables sub-options when takeover is off, and persists via saveSecurityPolicy", async () => {
+    const sendMessage = vi.spyOn(browser.runtime, "sendMessage").mockResolvedValue({ status: "updated" } as never);
+    const querySpy = vi.spyOn(browser.tabs, "query").mockResolvedValue([{ id: 1, url: "https://example.test/login" }] as never);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => root.render(createElement(SettingsPanel, {
+        fillHistory: [], recoveryTargets: [], onRecoveryChanged: vi.fn(), onNotice: vi.fn(), onLocked: vi.fn(),
+      })));
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("安全策略"))!.click());
+
+      const getGroup = container.querySelector('[role="group"][aria-labelledby="passkey-get-default-label"]');
+      const createGroup = container.querySelector('[role="group"][aria-labelledby="passkey-create-default-label"]');
+      expect(getGroup).not.toBeNull();
+      expect(createGroup).not.toBeNull();
+      expect(Array.from(getGroup!.querySelectorAll("button"), (b) => b.textContent)).toEqual(["VaultMesh（默认）", "每次询问"]);
+      expect(getGroup!.querySelector('[aria-pressed="true"]')?.textContent).toBe("VaultMesh（默认）");
+      expect(Array.from(createGroup!.querySelectorAll("button"), (b) => b.textContent)).toEqual(["每次询问（默认）", "VaultMesh"]);
+      expect(createGroup!.querySelector('[aria-pressed="true"]')?.textContent).toBe("每次询问（默认）");
+
+      await act(async () => Array.from(getGroup!.querySelectorAll("button")).find((b) => b.textContent === "每次询问")!.click());
+      await act(async () => Array.from(createGroup!.querySelectorAll("button")).find((b) => b.textContent === "VaultMesh")!.click());
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("保存安全策略"))!.click());
+
+      const saved = await loadPluginSecurityPolicy();
+      expect(saved.passkeyGetDefault).toBe("ask");
+      expect(saved.passkeyCreateDefault).toBe("vaultmesh");
+
+      const takeoverCheckbox = Array.from(container.querySelectorAll("label"))
+        .find((label) => label.textContent?.includes("接管网页通行密钥请求"))!
+        .querySelector("input[type=checkbox]") as HTMLInputElement;
+      await act(async () => takeoverCheckbox.click());
+
+      expect(Array.from(getGroup!.querySelectorAll("button")).every((b) => b.disabled)).toBe(true);
+      expect(Array.from(createGroup!.querySelectorAll("button")).every((b) => b.disabled)).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sendMessage.mockRestore();
+      querySpy.mockRestore();
+    }
+  });
+
+  it("hides full Passkey options when PasskeyBrowserFactory reports unsupported (Firefox)", async () => {
+    const createSpy = vi.spyOn(PasskeyBrowserFactory, "create").mockReturnValue({
+      target: "firefox",
+      isSupported: false,
+      disabledReason: "firefox-unsupported",
+      allowsFrameWebAuthn: () => false,
+      openPromptWindow: async () => undefined,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => root.render(createElement(SettingsPanel, {
+        fillHistory: [], recoveryTargets: [], onRecoveryChanged: vi.fn(), onNotice: vi.fn(), onLocked: vi.fn(),
+      })));
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("安全策略"))!.click());
+      expect(container.querySelector('[aria-labelledby="passkey-get-default-label"]')).toBeNull();
+      expect(container.querySelector('[aria-labelledby="passkey-create-default-label"]')).toBeNull();
+      expect(container.textContent).not.toContain("接管网页通行密钥请求 (Passkey)");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      createSpy.mockRestore();
     }
   });
 });

@@ -1,3 +1,4 @@
+import { PasskeyBrowserFactory } from "@/lib/passkey-browser-adapter";
 import { createWindowTransport, installCapabilityShim, installPasskeyShim } from "@/lib/passkey-shim";
 
 // MAIN world, Chromium only (ADR-0057). The shim holds no secrets; it asks the
@@ -12,6 +13,7 @@ export default defineContentScript({
   runAt: "document_start",
   world: "MAIN",
   main() {
+    if (!PasskeyBrowserFactory.create().isSupported) return;
     const credentials = navigator.credentials;
     if (!credentials || typeof PublicKeyCredential === "undefined") return;
     const marker = Symbol.for("vaultmesh.passkey-shim");

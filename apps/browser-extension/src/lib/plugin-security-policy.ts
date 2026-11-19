@@ -2,6 +2,9 @@ import { z } from "zod";
 
 const PLUGIN_SECURITY_POLICY_KEY = "vaultmesh.plugin-security-policy.v1";
 
+const passkeyDefaultModeSchema = z.enum(["vaultmesh", "ask"]);
+export type PasskeyDefaultMode = z.infer<typeof passkeyDefaultModeSchema>;
+
 const pluginSecurityPolicySchema = z.object({
   lockOnBrowserRestart: z.boolean(),
   lockOnSystemLock: z.boolean(),
@@ -14,6 +17,8 @@ const pluginSecurityPolicySchema = z.object({
     z.literal(30),
   ]),
   passkeyProxyEnabled: z.boolean().default(true),
+  passkeyGetDefault: passkeyDefaultModeSchema.default("vaultmesh"),
+  passkeyCreateDefault: passkeyDefaultModeSchema.default("ask"),
 });
 
 export type PluginSecurityPolicy = z.infer<typeof pluginSecurityPolicySchema>;
@@ -24,6 +29,8 @@ export const DEFAULT_PLUGIN_SECURITY_POLICY: PluginSecurityPolicy = {
   lockOnSystemLock: true,
   idleTimeoutMinutes: 5,
   passkeyProxyEnabled: true,
+  passkeyGetDefault: "vaultmesh",
+  passkeyCreateDefault: "ask",
 };
 
 export async function loadPluginSecurityPolicy(): Promise<PluginSecurityPolicy> {

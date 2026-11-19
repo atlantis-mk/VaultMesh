@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { toast } from 'sonner';
 
+import { PinSettingsDomainFactory, type PinSettingsDomain } from '@/lib/pin-settings-adapter';
 import { useVaultStore } from '@/stores/vault-store';
 import type {
   AgentBrokerStatus,
@@ -17,6 +18,14 @@ import type {
   SshCredentialTrashSummary,
   TrashItemSummary,
 } from '../../../shared/contracts';
+
+export type DomainPinStatuses = Record<PinSettingsDomain, PinStatus | null>;
+
+const INITIAL_PIN_STATUSES: DomainPinStatuses = {
+  desktop: null,
+  browser: null,
+  agent: null,
+};
 
 function displayDomain(url: string): string {
   try {
@@ -37,6 +46,12 @@ function duplicateLoginKey(item: LoginItemSummary): string | null {
   } catch {
     return null;
   }
+}
+
+async function fetchAllDomainPinStatuses(): Promise<DomainPinStatuses> {
+  const adapters = PinSettingsDomainFactory.all();
+  const results = await Promise.all(adapters.map(async (adapter) => [adapter.domain, await adapter.getStatus()] as const));
+  return Object.fromEntries(results) as DomainPinStatuses;
 }
 
 export function useSecurityCenterModel() {
@@ -63,10 +78,7 @@ export function useSecurityCenterModel() {
   const [identityHistory, setIdentityHistory] = useState<IdentityRevisionSummary[]>([]);
   const [securitySettings, setSecuritySettings] = useState<SecuritySettings | null>(null);
   const [securityDraft, setSecurityDraft] = useState<SecuritySettings | null>(null);
-  const [pinStatus, setPinStatus] = useState<PinStatus | null>(null);
-  const [pinValue, setPinValue] = useState('');
-  const [pinConfirmation, setPinConfirmation] = useState('');
-  const [pinFailureLimit, setPinFailureLimit] = useState(5);
+  const [pinStatuses, setPinStatuses] = useState<DomainPinStatuses>(INITIAL_PIN_STATUSES);
   const [agentStatus, setAgentStatus] = useState<AgentBrokerStatus | null>(null);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -101,15 +113,35 @@ export function useSecurityCenterModel() {
     }));
   }, [items]);
 
+  const setPinStatusForDomain = (domain: PinSettingsDomain, next: PinStatus): void => {
+    setPinStatuses((current) => ({ ...current, [domain]: next }));
+    if (domain === 'desktop') {
+      useVaultStore.setState({ pin: next });
+    } else if (domain === 'agent') {
+      setAgentStatus((current) => (current ? { ...current, pin: next } : current));
+    }
+  };
+
+  const refreshPinStatuses = async (): Promise<void> => {
+    const nextPinStatuses = await fetchAllDomainPinStatuses();
+    setPinStatuses(nextPinStatuses);
+    if (nextPinStatuses.desktop) {
+      useVaultStore.setState({ pin: nextPinStatuses.desktop });
+    }
+    if (nextPinStatuses.agent) {
+      setAgentStatus((current) => (current ? { ...current, pin: nextPinStatuses.agent! } : current));
+    }
+  };
+
   const reload = async (): Promise<void> => {
-    const [nextHealth, nextTrash, nextCardTrash, nextSshTrash, nextIdentityTrash, nextSecuritySettings, nextPinStatus, nextAgentStatus] = await Promise.all([
+    const [nextHealth, nextTrash, nextCardTrash, nextSshTrash, nextIdentityTrash, nextSecuritySettings, nextPinStatuses, nextAgentStatus] = await Promise.all([
       window.vaultMesh.items.passwordHealth(),
       window.vaultMesh.items.trash(),
       window.vaultMesh.cards.trash(),
       window.vaultMesh.ssh.trash(),
       window.vaultMesh.identities.trash(),
       window.vaultMesh.security.settings(),
-      window.vaultMesh.vault.pinStatus(),
+      fetchAllDomainPinStatuses(),
       window.vaultMesh.agent.status(),
     ]);
     setHealth(nextHealth);
@@ -119,9 +151,11 @@ export function useSecurityCenterModel() {
     setIdentityTrash(nextIdentityTrash);
     setSecuritySettings(nextSecuritySettings);
     setSecurityDraft(nextSecuritySettings);
-    setPinStatus(nextPinStatus);
+    setPinStatuses(nextPinStatuses);
     setAgentStatus(nextAgentStatus);
-    setPinFailureLimit(nextPinStatus.failureLimit);
+    if (nextPinStatuses.desktop) {
+      useVaultStore.setState({ pin: nextPinStatuses.desktop });
+    }
     if (historyItemId) setHistory(await window.vaultMesh.items.history(historyItemId));
     if (cardHistoryItemId) setCardHistory(await window.vaultMesh.cards.history(cardHistoryItemId));
     if (sshHistoryItemId) setSshHistory(await window.vaultMesh.ssh.history(sshHistoryItemId));
@@ -157,7 +191,7 @@ export function useSecurityCenterModel() {
     }
     await run(async () => {
       await window.vaultMesh.vault.changeMasterPassword({ currentPassword, newPassword });
-      setPinStatus(await window.vaultMesh.vault.pinStatus());
+      await refreshPinStatuses();
       setCurrentPassword('');
       setNewPassword('');
       setConfirmation('');
@@ -175,28 +209,6 @@ export function useSecurityCenterModel() {
 
   const updateSecurityDraft = (patch: Partial<SecuritySettings>): void => {
     setSecurityDraft((current) => current ? { ...current, ...patch } : current);
-  };
-
-  const savePin = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    if (pinValue !== pinConfirmation) {
-      toast.error('两次输入的 PIN 不一致。');
-      return;
-    }
-    await run(async () => {
-      const next = await window.vaultMesh.vault.enablePin({ pin: pinValue, failureLimit: pinFailureLimit });
-      setPinStatus(next);
-      setPinValue('');
-      setPinConfirmation('');
-    }, pinStatus?.enabled ? '桌面端 PIN 已更新。' : '桌面端 PIN 解锁已启用。');
-  };
-
-  const disablePin = async (): Promise<void> => {
-    await run(async () => {
-      setPinStatus(await window.vaultMesh.vault.disablePin());
-      setPinValue('');
-      setPinConfirmation('');
-    }, '桌面端 PIN 解锁已关闭。');
   };
 
   const loadHistory = async (itemId: string): Promise<void> => {
@@ -262,7 +274,61 @@ export function useSecurityCenterModel() {
       setBusy(false);
     }
   };
-  return { items, cards, sshCredentials, identities, refreshVault, health, trash, cardTrash, sshTrash, identityTrash, historyItemId, history, cardHistoryItemId, cardHistory, sshHistoryItemId, sshHistory, identityHistoryItemId, identityHistory, securitySettings, securityDraft, pinStatus, pinValue, pinConfirmation, pinFailureLimit, agentStatus, currentPassword, newPassword, confirmation, restorePassword, mergePrimaryIds, busy, issueMap, duplicateGroups, setAgentStatus, setSecurityDraft, setCurrentPassword, setNewPassword, setConfirmation, setRestorePassword, setPinValue, setPinConfirmation, setPinFailureLimit, setMergePrimaryIds, setHistory, setCardHistory, setSshHistory, setIdentityHistory, reload, run, changePassword, saveSecuritySettings, updateSecurityDraft, savePin, disablePin, loadHistory, loadCardHistory, loadSshHistory, loadIdentityHistory, mergeDuplicateGroup };
+  return {
+    items,
+    cards,
+    sshCredentials,
+    identities,
+    refreshVault,
+    health,
+    trash,
+    cardTrash,
+    sshTrash,
+    identityTrash,
+    historyItemId,
+    history,
+    cardHistoryItemId,
+    cardHistory,
+    sshHistoryItemId,
+    sshHistory,
+    identityHistoryItemId,
+    identityHistory,
+    securitySettings,
+    securityDraft,
+    pinStatuses,
+    agentStatus,
+    currentPassword,
+    newPassword,
+    confirmation,
+    restorePassword,
+    mergePrimaryIds,
+    busy,
+    issueMap,
+    duplicateGroups,
+    setAgentStatus,
+    setSecurityDraft,
+    setCurrentPassword,
+    setNewPassword,
+    setConfirmation,
+    setRestorePassword,
+    setPinStatusForDomain,
+    refreshPinStatuses,
+    setMergePrimaryIds,
+    setHistory,
+    setCardHistory,
+    setSshHistory,
+    setIdentityHistory,
+    reload,
+    run,
+    changePassword,
+    saveSecuritySettings,
+    updateSecurityDraft,
+    loadHistory,
+    loadCardHistory,
+    loadSshHistory,
+    loadIdentityHistory,
+    mergeDuplicateGroup,
+  };
 }
 
 export type SecurityCenterModel = ReturnType<typeof useSecurityCenterModel>;

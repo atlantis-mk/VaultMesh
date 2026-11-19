@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { InlineAutofillView } from "@/lib/inline-autofill-view";
 import { classifyControl } from "@/lib/form-discovery";
 import { inlineMenuLayout } from "@/lib/inline-menu-layout";
+import { PasskeyBrowserFactory } from "@/lib/passkey-browser-adapter";
 import type { GeneratedLogin, PasswordGeneratorOptions, UsernameGeneratorOptions } from "@/lib/generated-credentials";
 import { DEFAULT_PASSWORD_GENERATOR_OPTIONS, DEFAULT_USERNAME_GENERATOR_OPTIONS } from "@/lib/generator-preferences";
 import type { InlineAutofillCandidate } from "@/lib/protocol";
@@ -18,6 +19,8 @@ export class InlineAutofillMenu {
   readonly #onSelect: (candidate: InlineAutofillCandidate, target: HTMLElement) => void;
   readonly #onGeneratedSelect: (login: GeneratedLogin, target: HTMLElement) => void;
   readonly #onGeneratedPasswordSelect: (password: string, target: HTMLElement) => void;
+  readonly #onUnlockRequest?: (target: HTMLElement) => void;
+  readonly #onOpenPopup?: (target: HTMLElement) => void;
   #target: HTMLElement | null = null;
   #anchor: HTMLElement | null = null;
   #candidates: InlineAutofillCandidate[] = [];
@@ -25,6 +28,7 @@ export class InlineAutofillMenu {
   #generatedMode: "none" | "login" | "password" = "none";
   #generatedEmailRequired = false;
   #statusMessage: string | null = null;
+  #locked = false;
   #passwordGeneratorOptions = DEFAULT_PASSWORD_GENERATOR_OPTIONS;
   #usernameGeneratorOptions = DEFAULT_USERNAME_GENERATOR_OPTIONS;
 
@@ -33,6 +37,8 @@ export class InlineAutofillMenu {
     onSelect: (candidate: InlineAutofillCandidate, target: HTMLElement) => void,
     onGeneratedSelect: (login: GeneratedLogin, target: HTMLElement) => void,
     onGeneratedPasswordSelect: (password: string, target: HTMLElement) => void,
+    onUnlockRequest?: (target: HTMLElement) => void,
+    onOpenPopup?: (target: HTMLElement) => void,
   ) {
     this.#document = document;
     const Observer = document.defaultView?.ResizeObserver;
@@ -40,6 +46,8 @@ export class InlineAutofillMenu {
     this.#onSelect = onSelect;
     this.#onGeneratedSelect = onGeneratedSelect;
     this.#onGeneratedPasswordSelect = onGeneratedPasswordSelect;
+    this.#onUnlockRequest = onUnlockRequest;
+    this.#onOpenPopup = onOpenPopup;
     this.#host = document.createElement("div");
     this.#host.dataset.vaultmeshAutofill = "";
     this.#host.style.cssText = "all:initial;position:fixed;z-index:2147483647;display:none";
@@ -70,7 +78,14 @@ export class InlineAutofillMenu {
       .generated-mark { background:#268a5b; }
       .generated-password { font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:CanvasText; }
       .empty { padding:10px;color:GrayText; }
+      .locked-state { padding:12px 10px 8px;color:GrayText;font-weight:600;text-align:center; }
       .status { padding:10px;color:CanvasText;background:color-mix(in srgb, Mark 32%, transparent); }
+      .footer { border-top:1px solid rgba(127,127,127,.25);padding:4px; }
+      .footer-action { width:100%;display:flex;align-items:center;justify-content:center;border:0;border-radius:7px;padding:7px 10px;background:transparent;color:inherit;font:inherit;font-weight:600;cursor:pointer; }
+      .footer-action:hover,.footer-action:focus-visible { background:color-mix(in srgb, Highlight 14%, transparent);outline:2px solid transparent; }
+      .footer-action-primary { background:#6d5dfc;color:#fff; }
+      .footer-action-primary:hover,.footer-action-primary:focus-visible { background:#5b4be8;filter:brightness(1.04); }
+      .footer-hint { padding:6px 8px;color:GrayText;font-size:11px;line-height:1.4;text-align:center; }
     `;
     const mount = document.createElement("div");
     this.#shadow.append(style, mount);
@@ -86,19 +101,22 @@ export class InlineAutofillMenu {
   }
 
   get visible() { return this.#host.style.display !== "none"; }
+  get target() { return this.#target; }
+  get locked() { return this.#locked; }
   get generatedMode() { return this.#generatedMode; }
   get statusMessage() { return this.#statusMessage; }
   get candidates(): readonly InlineAutofillCandidate[] { return this.#candidates; }
 
   owns(target: EventTarget | null) { return target === this.#host; }
 
-  showFilteredCandidates(target: HTMLElement, candidates: InlineAutofillCandidate[]) {
+  showFilteredCandidates(target: HTMLElement, candidates: InlineAutofillCandidate[], options: { locked?: boolean } = {}) {
     const alreadyShowingForTarget = this.visible && this.#target === target;
     this.#target = target;
     this.#anchor = target;
     this.#candidates = candidates;
     this.#generatedMode = "none";
     this.#statusMessage = null;
+    this.#locked = options.locked ?? false;
     this.#generatedEmailRequired = false;
     this.#render();
     if (!alreadyShowingForTarget) {
@@ -118,6 +136,7 @@ export class InlineAutofillMenu {
       generatedEmailRequired?: boolean;
       passwordGeneratorOptions?: PasswordGeneratorOptions;
       usernameGeneratorOptions?: UsernameGeneratorOptions;
+      locked?: boolean;
     } = {},
   ) {
     this.#target = target;
@@ -127,6 +146,7 @@ export class InlineAutofillMenu {
     this.#candidates = candidates;
     this.#generatedMode = generatedMode === "login" && candidates.length > 0 ? "none" : generatedMode;
     this.#statusMessage = null;
+    this.#locked = options.locked ?? false;
     this.#generatedEmailRequired = options.generatedEmailRequired ?? false;
     this.#passwordGeneratorOptions = options.passwordGeneratorOptions ?? DEFAULT_PASSWORD_GENERATOR_OPTIONS;
     this.#usernameGeneratorOptions = options.usernameGeneratorOptions ?? DEFAULT_USERNAME_GENERATOR_OPTIONS;
@@ -144,6 +164,7 @@ export class InlineAutofillMenu {
     this.#candidates = [];
     this.#generatedMode = "none";
     this.#generatedEmailRequired = false;
+    this.#locked = false;
     this.#statusMessage = message;
     this.#render();
     this.#host.style.display = "block";
@@ -158,6 +179,7 @@ export class InlineAutofillMenu {
     this.#candidates = [];
     this.#generatedMode = "none";
     this.#generatedEmailRequired = false;
+    this.#locked = false;
     this.#statusMessage = null;
     flushSync(() => this.#root.render(null));
   }
@@ -222,7 +244,16 @@ export class InlineAutofillMenu {
   };
 
   readonly #onPointerDown = (event: PointerEvent) => {
-    if (!this.visible || event.composedPath().includes(this.#host) || event.composedPath().includes(this.#target as EventTarget)) return;
+    if (
+      !this.visible
+      || event.composedPath().some((node) =>
+        node === this.#host
+        || node === this.#target
+        || (node instanceof Element && node.matches("[data-vaultmesh-autofill-trigger]")),
+      )
+    ) {
+      return;
+    }
     this.hide();
   };
 
@@ -230,6 +261,7 @@ export class InlineAutofillMenu {
 
   #render() {
     const location = this.#document.defaultView?.location;
+    const canOpenPopup = PasskeyBrowserFactory.currentTarget() !== "firefox";
     flushSync(() => {
       this.#root.render(createElement(InlineAutofillView, {
         candidates: this.#candidates,
@@ -239,6 +271,8 @@ export class InlineAutofillMenu {
         generatedMode: this.#generatedMode,
         generatedEmailRequired: this.#generatedEmailRequired,
         statusMessage: this.#statusMessage,
+        locked: this.#locked,
+        canOpenPopup,
         passwordGeneratorOptions: this.#passwordGeneratorOptions,
         usernameGeneratorOptions: this.#usernameGeneratorOptions,
         onGeneratedPasswordSelect: (password) => {
@@ -255,6 +289,14 @@ export class InlineAutofillMenu {
           const target = this.#target;
           this.hide();
           if (target) this.#onSelect(candidate, target);
+        },
+        onUnlockRequest: () => {
+          const target = this.#target;
+          if (target) this.#onUnlockRequest?.(target);
+        },
+        onOpenPopup: () => {
+          const target = this.#target;
+          if (target) this.#onOpenPopup?.(target);
         },
       }));
     });

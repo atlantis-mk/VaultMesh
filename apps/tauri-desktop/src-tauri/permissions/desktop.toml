@@ -10,5 +10,10 @@ commands.allow = ["desktop_activity"]
 
 [[permission]]
 identifier = "allow-desktop-authentication"
-description = "Allows only the main window to manage its non-secret native authentication presentation."
+description = "Allows authorized unlock windows to manage their non-secret native authentication presentation."
 commands.allow = ["desktop_authentication_status", "desktop_authentication_begin", "desktop_authentication_layout", "desktop_authentication_cancel"]
+
+[[permission]]
+identifier = "allow-desktop-window-layout"
+description = "Allows authorized unlock windows to synchronize compact card layout dimensions."
+commands.allow = ["desktop_window_set_compact_mode"]

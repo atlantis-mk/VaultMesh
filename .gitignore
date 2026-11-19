@@ -39,3 +39,4 @@ apps/desktop/native/index.d.ts
 # Android signing keys must never be committed
 *.jks
 *.keystore
+.artifacts/

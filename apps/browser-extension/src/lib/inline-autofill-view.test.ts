@@ -148,4 +148,176 @@ describe("candidateGroups", () => {
     expect(onGeneratedPasswordSelect).toHaveBeenCalledWith(refreshed);
     await act(async () => root.unmount());
   });
+
+  it("renders a top 通行密钥 group with passkeys and native fallback ahead of email OTP and logins", async () => {
+    const passkey = {
+      kind: "passkey" as const,
+      id: "553370ec-4dc7-4c77-a6e0-f2a4f6e37f03",
+      requestId: "req-1",
+      credentialId: "cred-1",
+      title: "Example Passkey",
+      subtitle: "alice@example.test",
+    };
+    const passkeyNative = {
+      kind: "passkey-native" as const,
+      id: "passkey-native:req-1",
+      requestId: "req-1",
+      title: "使用浏览器/系统通行密钥",
+      subtitle: "改用系统或硬件安全密钥",
+    };
+    const emailOtp = {
+      id: "453370ec-4dc7-4c77-a6e0-f2a4f6e37f03",
+      kind: "email-otp" as const,
+      title: "A12B34",
+      subtitle: "来自 example.test",
+      code: "A12B34",
+      sourceDomain: "example.test",
+      receivedAt: 1,
+      expiresAt: 2,
+    };
+
+    const groups = candidateGroups([domain, emailOtp, exact, passkey, passkeyNative], "example.test", "example.test");
+    expect(groups.map((group) => group.label)).toEqual(["通行密钥", "邮箱验证码", "当前站点 · example.test", "同域名 · example.test"]);
+    expect(groups[0]?.candidates).toEqual([passkey, passkeyNative]);
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const onSelect = vi.fn();
+    await act(async () => root.render(createElement(InlineAutofillView, {
+      candidates: [passkey, passkeyNative, exact],
+      currentHost: "example.test",
+      currentHostname: "example.test",
+      generatedLoginKey: 1,
+      generatedMode: "none",
+      onGeneratedPasswordSelect: vi.fn(),
+      onGeneratedSelect: vi.fn(),
+      onSelect,
+    })));
+    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+    expect(buttons[0]?.textContent).toContain("Example Passkey");
+    expect(buttons[1]?.textContent).toContain("使用浏览器/系统通行密钥");
+    await act(async () => buttons[0]!.click());
+    expect(onSelect).toHaveBeenCalledWith(passkey);
+    await act(async () => buttons[1]!.click());
+    expect(onSelect).toHaveBeenCalledWith(passkeyNative);
+    await act(async () => root.unmount());
+  });
+
+  it("renders a locked empty card with primary 解锁 VaultMesh footer action without role=option", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const onUnlockRequest = vi.fn();
+    await act(async () => root.render(createElement(InlineAutofillView, {
+      candidates: [],
+      currentHost: "example.test",
+      currentHostname: "example.test",
+      generatedLoginKey: 1,
+      generatedMode: "none",
+      locked: true,
+      canOpenPopup: true,
+      onGeneratedPasswordSelect: vi.fn(),
+      onGeneratedSelect: vi.fn(),
+      onSelect: vi.fn(),
+      onUnlockRequest,
+    })));
+
+    expect(container.textContent).toContain("VaultMesh 已锁定");
+    expect(container.querySelector(".empty")).toBeNull();
+    expect(container.querySelectorAll('[role="option"]')).toHaveLength(0);
+    const unlockButton = container.querySelector<HTMLButtonElement>('.footer [data-vaultmesh-footer-action="unlock"]')!;
+    expect(unlockButton).not.toBeNull();
+    expect(unlockButton.getAttribute("role")).toBeNull();
+    expect(unlockButton.textContent).toContain("解锁 VaultMesh");
+
+    const pointerDown = new Event("pointerdown", { bubbles: true, cancelable: true, composed: true });
+    await act(async () => unlockButton.dispatchEvent(pointerDown));
+    expect(pointerDown.defaultPrevented).toBe(true);
+    await act(async () => unlockButton.click());
+    expect(onUnlockRequest).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+  });
+
+  it("renders footer unlock alongside locked candidates and footer open-popup or static hint when unlocked", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const onUnlockRequest = vi.fn();
+    const onOpenPopup = vi.fn();
+
+    await act(async () => root.render(createElement(InlineAutofillView, {
+      candidates: [exact],
+      currentHost: "example.test",
+      currentHostname: "example.test",
+      generatedLoginKey: 1,
+      generatedMode: "none",
+      locked: true,
+      canOpenPopup: true,
+      onGeneratedPasswordSelect: vi.fn(),
+      onGeneratedSelect: vi.fn(),
+      onSelect: vi.fn(),
+      onUnlockRequest,
+      onOpenPopup,
+    })));
+
+    expect(container.querySelectorAll('[role="option"]')).toHaveLength(1);
+    expect(container.querySelector('.footer [data-vaultmesh-footer-action="unlock"]')?.textContent).toContain("解锁 VaultMesh");
+
+    await act(async () => root.render(createElement(InlineAutofillView, {
+      candidates: [exact],
+      currentHost: "example.test",
+      currentHostname: "example.test",
+      generatedLoginKey: 1,
+      generatedMode: "none",
+      locked: false,
+      canOpenPopup: true,
+      onGeneratedPasswordSelect: vi.fn(),
+      onGeneratedSelect: vi.fn(),
+      onSelect: vi.fn(),
+      onUnlockRequest,
+      onOpenPopup,
+    })));
+
+    const openButton = container.querySelector<HTMLButtonElement>('.footer [data-vaultmesh-footer-action="open-popup"]')!;
+    expect(openButton).not.toBeNull();
+    expect(openButton.getAttribute("role")).toBeNull();
+    expect(openButton.textContent).toContain("打开 VaultMesh");
+    await act(async () => openButton.click());
+    expect(onOpenPopup).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.render(createElement(InlineAutofillView, {
+      candidates: [exact],
+      currentHost: "example.test",
+      currentHostname: "example.test",
+      generatedLoginKey: 1,
+      generatedMode: "none",
+      locked: false,
+      canOpenPopup: false,
+      onGeneratedPasswordSelect: vi.fn(),
+      onGeneratedSelect: vi.fn(),
+      onSelect: vi.fn(),
+      onUnlockRequest,
+      onOpenPopup,
+    })));
+
+    expect(container.querySelector('[data-vaultmesh-footer-action]')).toBeNull();
+    expect(container.querySelector(".footer")?.textContent).toContain("点击工具栏 VaultMesh 图标可搜索或添加项目");
+
+    await act(async () => root.render(createElement(InlineAutofillView, {
+      candidates: [],
+      currentHost: "example.test",
+      currentHostname: "example.test",
+      generatedLoginKey: 1,
+      generatedMode: "none",
+      locked: false,
+      canOpenPopup: true,
+      statusMessage: "请点击浏览器工具栏的 VaultMesh 图标。",
+      onGeneratedPasswordSelect: vi.fn(),
+      onGeneratedSelect: vi.fn(),
+      onSelect: vi.fn(),
+      onUnlockRequest,
+      onOpenPopup,
+    })));
+
+    expect(container.querySelector(".footer")).toBeNull();
+    await act(async () => root.unmount());
+  });
 });

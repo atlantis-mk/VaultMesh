@@ -1,4 +1,8 @@
 //! Portable, encrypted record synchronization. No transport, files or UI.
+use crate::passkey::{
+    passkey_apply_local_sync_state, passkey_is_backed_up, passkey_is_backup_eligible,
+    passkey_mark_backed_up, passkey_strip_local_sync_state,
+};
 use crate::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -143,52 +147,17 @@ fn insert<T: Serialize>(
     Ok(())
 }
 fn syncable_secret(item: &SecretItem) -> bool {
-    if !item.scopes.iter().any(|s| s == "vaultmesh:passkey:v1") {
-        return true;
-    }
-    // Legacy single-device WebAuthn credentials must never be cloned.
-    #[derive(Deserialize)]
-    struct Eligibility {
-        #[serde(rename = "backupEligible", default)]
-        eligible: bool,
-    }
-    serde_json::from_str::<Eligibility>(&item.secret).is_ok_and(|s| s.eligible)
+    !item.scopes.iter().any(|s| s == PASSKEY_SCOPE) || passkey_is_backup_eligible(&item.secret)
 }
 fn portable_secret(item: &SecretItem) -> Result<SecretItem, VaultError> {
     let mut item = item.clone();
-    if item.scopes.iter().any(|s| s == "vaultmesh:passkey:v1") {
+    if item.scopes.iter().any(|s| s == PASSKEY_SCOPE) {
         // Backup state is local receipt evidence, not a last-writer value.
-        let mut value = SensitiveValue(
-            serde_json::from_str(&item.secret).map_err(|_| VaultError::InvalidPayload)?,
-        );
-        value.0["backupState"] = serde_json::Value::Bool(false);
-        value.0["lastUsedAt"] = serde_json::Value::Null;
+        let mut stripped = passkey_strip_local_sync_state(&item.secret)?;
         item.secret.zeroize();
-        item.secret = serde_json::to_string(&value.0).map_err(|_| VaultError::Serialization)?;
+        item.secret = std::mem::take(&mut *stripped);
     }
     Ok(item)
-}
-fn backed_up(text: &str) -> bool {
-    #[derive(Deserialize)]
-    struct State {
-        #[serde(rename = "backupState", default)]
-        backed: bool,
-    }
-    serde_json::from_str::<State>(text).is_ok_and(|s| s.backed)
-}
-struct SensitiveValue(serde_json::Value);
-impl Drop for SensitiveValue {
-    fn drop(&mut self) {
-        wipe_json(&mut self.0);
-    }
-}
-fn wipe_json(v: &mut serde_json::Value) {
-    match v {
-        serde_json::Value::String(s) => s.zeroize(),
-        serde_json::Value::Array(a) => a.iter_mut().for_each(wipe_json),
-        serde_json::Value::Object(o) => o.values_mut().for_each(wipe_json),
-        _ => {}
-    }
 }
 
 fn project(p: &VaultPayload) -> Result<Projection, VaultError> {
@@ -919,7 +888,7 @@ impl VaultSession {
         let passkey_states: BTreeMap<_, _> = candidate
             .secrets
             .iter()
-            .filter(|s| s.scopes.iter().any(|x| x == "vaultmesh:passkey:v1"))
+            .filter(|s| s.scopes.iter().any(|x| x == PASSKEY_SCOPE))
             .map(|s| (s.id, s.clone()))
             .collect();
         clear_portable(&mut candidate);
@@ -933,10 +902,7 @@ impl VaultSession {
                 .and_then(|previous| local_ssh_binding(previous, ssh));
         }
         for item in &mut candidate.secrets {
-            if item.scopes.iter().any(|x| x == "vaultmesh:passkey:v1") && syncable_secret(item) {
-                let mut value = SensitiveValue(
-                    serde_json::from_str(&item.secret).map_err(|_| VaultError::InvalidPayload)?,
-                );
+            if item.scopes.iter().any(|x| x == PASSKEY_SCOPE) && syncable_secret(item) {
                 let current = encode("secrets", &portable_secret(item)?)?;
                 let current_digest = digest(Some(&current));
                 let previous = passkey_states.get(&item.id).filter(|s| {
@@ -944,23 +910,19 @@ impl VaultSession {
                         .and_then(|s| encode("secrets", &s))
                         .is_ok_and(|body| digest(Some(&body)) == current_digest)
                 });
-                let backed = previous.is_some_and(|s| backed_up(&s.secret))
+                let backed = previous.is_some_and(|s| passkey_is_backed_up(&s.secret))
                     || incoming.iter().any(|r| {
                         r.key == format!("secret/{}", item.id)
                             && r.body.is_some()
                             && r.entry.digest == current_digest
                     });
-                if let Some(previous) = previous {
-                    let old = SensitiveValue(
-                        serde_json::from_str(&previous.secret)
-                            .map_err(|_| VaultError::InvalidPayload)?,
-                    );
-                    value.0["lastUsedAt"] = old.0["lastUsedAt"].clone();
-                }
-                value.0["backupState"] = serde_json::Value::Bool(backed);
+                let mut applied = passkey_apply_local_sync_state(
+                    &item.secret,
+                    previous.map(|s| s.secret.as_str()),
+                    backed,
+                )?;
                 item.secret.zeroize();
-                item.secret =
-                    serde_json::to_string(&value.0).map_err(|_| VaultError::Serialization)?;
+                item.secret = std::mem::take(&mut *applied);
             }
         }
         for (kind, id) in changed_credentials {
@@ -986,9 +948,9 @@ impl VaultSession {
         let p = self.payload()?;
         let mut records = Vec::new();
         for item in &p.secrets {
-            if !item.scopes.iter().any(|s| s == "vaultmesh:passkey:v1")
+            if !item.scopes.iter().any(|s| s == PASSKEY_SCOPE)
                 || !syncable_secret(item)
-                || backed_up(&item.secret)
+                || passkey_is_backed_up(&item.secret)
             {
                 continue;
             }
@@ -1017,22 +979,18 @@ impl VaultSession {
             }
             for item in &mut p.secrets {
                 if r.key != format!("secret/{}", item.id)
-                    || !item.scopes.iter().any(|s| s == "vaultmesh:passkey:v1")
+                    || !item.scopes.iter().any(|s| s == PASSKEY_SCOPE)
                     || !syncable_secret(item)
-                    || backed_up(&item.secret)
+                    || passkey_is_backed_up(&item.secret)
                 {
                     continue;
                 }
                 if digest(Some(&encode("secrets", &portable_secret(item)?)?)) != r.entry.digest {
                     continue;
                 }
-                let mut value = SensitiveValue(
-                    serde_json::from_str(&item.secret).map_err(|_| VaultError::InvalidPayload)?,
-                );
-                value.0["backupState"] = serde_json::Value::Bool(true);
+                let mut marked = passkey_mark_backed_up(&item.secret)?;
                 item.secret.zeroize();
-                item.secret =
-                    serde_json::to_string(&value.0).map_err(|_| VaultError::Serialization)?;
+                item.secret = std::mem::take(&mut *marked);
                 changed = true;
             }
         }
@@ -1083,7 +1041,7 @@ impl VaultSession {
                 .and_then(|s| local_ssh_binding(s, ssh));
         }
         for item in &mut p.secrets {
-            if item.scopes.iter().any(|s| s == "vaultmesh:passkey:v1") && syncable_secret(item) {
+            if item.scopes.iter().any(|s| s == PASSKEY_SCOPE) && syncable_secret(item) {
                 if let Some(old) = self.payload()?.secrets.iter().find(|s| s.id == item.id) {
                     if portable_secret(old)? == portable_secret(item)? {
                         item.secret.zeroize();
@@ -1114,6 +1072,7 @@ impl VaultSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::passkey_is_backed_up as backed_up;
     fn session(item: Option<LoginItem>) -> VaultSession {
         let mut p = VaultPayload::default();
         if let Some(item) = item {

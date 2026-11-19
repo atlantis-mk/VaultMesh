@@ -29,7 +29,10 @@ describe('CT-LAN-PAIRING-001 nearby page requires desktop unlock', () => {
       configurable: true,
       value: {
         activity: vi.fn(),
-        desktop: { authenticationStatus: vi.fn().mockResolvedValue({ supported: false, label: "Test platform" }) },
+        desktop: {
+          authenticationStatus: vi.fn().mockResolvedValue({ supported: false, label: "Test platform" }),
+          setCompactWindowMode: vi.fn().mockResolvedValue(undefined),
+        },
         vault: {
           status: vi.fn(async () => vaultStatus),
           biometricStatus: vi.fn().mockResolvedValue(null),
@@ -93,6 +96,7 @@ describe('CT-LAN-PAIRING-001 nearby page requires desktop unlock', () => {
     expect(await screen.findByText('482913')).toBeTruthy();
     expect(screen.getAllByText('Test peer')).toHaveLength(2);
     expect(router.state.location.pathname).toBe('/nearby');
+    expect(window.vaultMesh.desktop.setCompactWindowMode).toHaveBeenCalledWith(false);
   });
 
   it.each(['event', 'focus refresh', 'lock button'] as const)('removes device data and stops discovery on %s', async (source) => {

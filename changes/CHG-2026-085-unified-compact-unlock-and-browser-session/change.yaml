@@ -1,0 +1,49 @@
+schema: "2"
+id: "CHG-2026-085-unified-compact-unlock-and-browser-session"
+title: "统一紧凑解锁窗口与浏览器会话持久解锁"
+type: "feature"
+status: "Active"
+spec_revision: "0.1.53-active"
+target_release: null
+goal: "统一三端紧凑解锁窗口并将浏览器单次临时解锁改为会话持久解锁；改变浏览器信任与解锁边界、Browser RPC 与 PIN 管理契约，须经 ADR-0058 并跨平台真机验收。"
+requirements:
+  - "REQ-SEC-002"
+  - "REQ-BROWSER-001"
+  - "REQ-BROWSER-002"
+  - "REQ-PASSKEY-001"
+  - "REQ-AGENT-001"
+tests:
+  - "CT-DESKTOP-AUTH-001"
+  - "CT-BROWSER-001"
+  - "CT-BROWSER-002"
+  - "CT-BROWSER-003"
+  - "CT-PASSKEY-002"
+  - "CT-AGENT-UNLOCK-001"
+  - "AT-DESKTOP-AUTH-001"
+  - "AT-BROWSER-001"
+  - "AT-AGENT-UNLOCK-001"
+adrs:
+  - "ADR-0050"
+  - "ADR-0051"
+  - "ADR-0055"
+  - "ADR-0058"
+context_refs:
+  - "docs/03-functional-requirements.md#REQ-BROWSER-001"
+  - "docs/06-security-privacy.md#Browser 与网页边界"
+  - "specs/browser-integration.md#统一解锁窗与 Popup Touch ID"
+  - "specs/agent-capability-broker.md#MCP 独立解锁与锁定"
+related_changes:
+  - "CHG-2026-084-passkey-page-shim"
+boundaries:
+  - "浏览器信任与授权：浏览器解锁由单次临时解锁改为会话持久解锁（取代 ADR-0055 的该部分），支付卡与 masterPasswordReprompt 仍强制主密码重验，Passkey 仍保留每次桌面系统确认"
+  - "公共 Browser RPC：新增 browser.unlock.request，并新增桌面 operation browser.pin.status/enable/disable 与 agent.pin.status；既有 vault.unlock、pin.*、biometric.authentication.* 保持兼容"
+  - "多窗口特权边界：嵌入式 LAAuthenticationView 与窗口布局命令只授予 main 与 agent-unlock，agent-pairing 与 agent-authorization 保持禁用"
+  - "三端授权与 PIN 隔离：state.pin、state.browser_pin、state.agent_pin 保持独立存储与失败计数，仅提供桌面统一管理入口；Windows Hello 仍不支持（OPEN-001 不关闭）"
+  - "平台范围：不修改 Android 解锁流程，不扩大 Firefox Passkey 范围，无 Vault 格式或持久化 schema 变化"
+risks:
+  - "会话持久解锁扩大了浏览器解锁后的有效窗口，依赖 PluginSecurityPolicy（空闲、系统锁定、浏览器重启）、vault.lock 与撤销保证自动锁定"
+  - "多窗口嵌入式认证的焦点切换与 generation 抢占只能在真实签名 macOS 包上完整验证"
+  - "浏览器与桌面共享 browser_pin 服务实例，需防止桌面主密码解锁误重置浏览器 PIN 失败计数"
+next:
+  - "Slice 1–3 实现已完成；在真实签名 macOS + Chromium 完成 AT-DESKTOP-AUTH-001、AT-BROWSER-001 与 AT-AGENT-UNLOCK-001 增量验收"
+  - "验收通过后运行 pnpm work:finish -- CHG-2026-085-unified-compact-unlock-and-browser-session 收尾"

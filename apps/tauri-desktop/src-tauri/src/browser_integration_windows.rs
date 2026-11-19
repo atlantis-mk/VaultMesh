@@ -9,7 +9,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    browser_broker::BrowserBrokerCore,
+    browser_broker::{BrowserBrokerCore, BrowserBrokerHttpListener},
     browser_broker_windows::BrowserBrokerWindowsListener,
     browser_host_registration::{configured_extension_id, install_windows_browser_host},
 };
@@ -23,7 +23,6 @@ pub enum BrowserIntegrationError {
     PairingUnavailable,
     BrokerUnavailable,
     ListenerUnavailable,
-    ListenerStopped,
     HostMissing,
     RegistrationUnavailable,
     IdentityInvalid,
@@ -35,6 +34,7 @@ pub struct BrowserIntegrationStatus {
     pub supported: bool,
     pub ready: bool,
     pub broker_ready: bool,
+    pub api_port: Option<u16>,
     pub host_registered: bool,
     pub extension_id: String,
     pub error_code: Option<BrowserIntegrationError>,
@@ -43,22 +43,28 @@ pub struct BrowserIntegrationStatus {
 pub struct WindowsBrowserIntegration {
     app_data: PathBuf,
     broker_factory: BrokerFactory,
-    listener: Option<Arc<BrowserBrokerWindowsListener>>,
+    broker: Option<Arc<Mutex<BrowserBrokerCore>>>,
+    pipe_listener: Option<BrowserBrokerWindowsListener>,
+    http_listener: Option<BrowserBrokerHttpListener>,
     host_registered: bool,
     error_code: Option<BrowserIntegrationError>,
 }
 
 impl WindowsBrowserIntegration {
     pub(crate) fn lock_vault(&self) {
-        if let Some(listener) = &self.listener {
-            listener.lock_vault();
+        if let Some(broker) = &self.broker
+            && let Ok(mut broker) = broker.lock()
+        {
+            broker.lock_for_system();
         }
     }
     pub fn new(app_data: PathBuf, broker_factory: BrokerFactory) -> Self {
         Self {
             app_data,
             broker_factory,
-            listener: None,
+            broker: None,
+            pipe_listener: None,
+            http_listener: None,
             host_registered: false,
             error_code: None,
         }
@@ -68,37 +74,29 @@ impl WindowsBrowserIntegration {
         self.repair()
     }
 
-    pub fn status(&mut self) -> BrowserIntegrationStatus {
-        if self
-            .listener
-            .as_ref()
-            .is_some_and(|listener| !listener.is_healthy())
-        {
-            if let Some(listener) = self.listener.take() {
-                listener.stop();
-            }
-            self.error_code = Some(BrowserIntegrationError::ListenerStopped);
-        }
+    pub fn status(&self) -> BrowserIntegrationStatus {
         self.snapshot()
     }
 
     pub fn repair(&mut self) -> BrowserIntegrationStatus {
         self.error_code = None;
-        if self
-            .listener
-            .as_ref()
-            .is_some_and(|listener| !listener.is_healthy())
-            && let Some(listener) = self.listener.take()
-        {
-            listener.stop();
-        }
-        if self.listener.is_none() {
-            match (self.broker_factory)().and_then(|broker| {
-                BrowserBrokerWindowsListener::start(Arc::new(Mutex::new(broker)))
-                    .map_err(|_| BrowserIntegrationError::ListenerUnavailable)
-            }) {
-                Ok(listener) => self.listener = Some(Arc::new(listener)),
+        if self.broker.is_none() {
+            match (self.broker_factory)() {
+                Ok(broker) => self.broker = Some(Arc::new(Mutex::new(broker))),
                 Err(error) => self.error_code = Some(error),
+            }
+        }
+        if let Some(broker) = &self.broker {
+            if self.http_listener.as_ref().is_none_or(|listener| !listener.is_healthy()) {
+                drop(self.http_listener.take());
+                match BrowserBrokerHttpListener::start(Arc::clone(broker)) {
+                    Ok(listener) => self.http_listener = Some(listener),
+                    Err(_) => self.error_code = Some(BrowserIntegrationError::ListenerUnavailable),
+                }
+            }
+            if self.pipe_listener.as_ref().is_none_or(|listener| !listener.is_healthy()) {
+                drop(self.pipe_listener.take());
+                self.pipe_listener = BrowserBrokerWindowsListener::start(Arc::clone(broker)).ok();
             }
         }
 
@@ -115,16 +113,17 @@ impl WindowsBrowserIntegration {
     }
 
     pub fn stop(&mut self) {
-        if let Some(listener) = self.listener.take() {
-            listener.stop();
-        }
+        self.lock_vault();
+        drop(self.http_listener.take());
+        drop(self.pipe_listener.take());
+        self.broker = None;
     }
 
     fn snapshot(&self) -> BrowserIntegrationStatus {
-        let broker_ready = self
-            .listener
-            .as_ref()
-            .is_some_and(|listener| listener.is_healthy());
+        let api_port = self.http_listener.as_ref()
+            .filter(|listener| listener.is_healthy())
+            .map(|listener| listener.port());
+        let broker_ready = api_port.is_some();
         let extension_id = configured_extension_id().unwrap_or_default().to_owned();
         let identity_error = extension_id
             .is_empty()
@@ -133,6 +132,7 @@ impl WindowsBrowserIntegration {
             supported: true,
             ready: broker_ready && self.host_registered && identity_error.is_none(),
             broker_ready,
+            api_port,
             host_registered: self.host_registered,
             extension_id,
             error_code: identity_error.or(self.error_code),

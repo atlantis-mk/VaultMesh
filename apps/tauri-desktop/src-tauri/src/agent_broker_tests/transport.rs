@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::super::agent_broker_transport::{
     UnixMonitorEvent, configure_unix_connection, read_line, read_line_with_deadline,
     signal_unix_monitor, wait_for_unix_monitor_event, write_json_line,

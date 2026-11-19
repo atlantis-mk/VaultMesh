@@ -104,5 +104,65 @@ describe('in-page passkey dialog', () => {
     expect(passkeyPromptText({ ...choose, operation: 'create' })).toContain('保存到 VaultMesh');
     expect(passkeyPromptText({ ...choose, origin: null })).toContain('当前网站');
     expect(passkeyPromptText({ ...choose, stage: 'unlock' })).toContain('已锁定');
+    expect(passkeyPromptText({ ...choose, stage: 'no-match' })).toContain('没有匹配的通行密钥');
+  });
+
+  it('displays requester and top site while hiding remember checkbox on cross-origin create', () => {
+    const { dialog, handlers, byText } = harness();
+    dialog.show({
+      token,
+      operation: 'create',
+      origin: 'https://auth.partner.test',
+      topOrigin: 'https://shop.example.test',
+      sameOriginWithAncestors: false,
+      stage: 'choose',
+    });
+    const root = dialog.element()!.shadowRoot!;
+    expect(root.querySelector('.site')?.textContent).toContain('请求方：https://auth.partner.test');
+    expect(root.querySelector('.site')?.textContent).toContain('当前网站：https://shop.example.test');
+    expect(root.querySelector('input[type=checkbox]')).toBeNull();
+    byText('使用 VaultMesh').click();
+    expect(handlers.choose).toHaveBeenCalledWith(token, 'vaultmesh', false);
+  });
+
+  it('lets the user select a specific credential when multiple passkeys match', () => {
+    const { dialog, handlers, byText } = harness();
+    const firstId = '11111111-1111-4111-8111-111111111111';
+    const secondId = '22222222-2222-4222-8222-222222222222';
+    dialog.show({
+      token,
+      operation: 'get',
+      origin: 'https://example.test',
+      stage: 'choose',
+      candidates: [
+        { itemId: firstId, credentialId: 'c1', title: 'Personal', account: 'alice@example.test' },
+        { itemId: secondId, credentialId: 'c2', title: 'Work', account: 'bob@example.test' },
+      ],
+    });
+    const root = dialog.element()!.shadowRoot!;
+    const radios = [...root.querySelectorAll('input[type=radio]')] as HTMLInputElement[];
+    expect(radios).toHaveLength(2);
+    expect(radios[0]!.checked).toBe(true);
+    radios[1]!.click();
+    byText('使用 VaultMesh').click();
+    expect(handlers.choose).toHaveBeenCalledWith(token, 'vaultmesh', false, secondId);
+  });
+
+  it('shows minimal no-match fallback options with remember checkbox and without password-login button', () => {
+    const { dialog, handlers, buttons, byText } = harness();
+    dialog.show({
+      token,
+      operation: 'get',
+      origin: 'https://example.test',
+      stage: 'no-match',
+    });
+    const root = dialog.element()!.shadowRoot!;
+    expect(buttons().map((button) => button.textContent)).toEqual(['取消', '使用浏览器/系统']);
+    expect(root.querySelector('.desc')?.textContent).not.toContain('填充密码登录');
+    (root.querySelector('input[type=checkbox]') as HTMLInputElement).click();
+    byText('使用浏览器/系统').click();
+    expect(handlers.choose).toHaveBeenCalledWith(token, 'native', true);
+    byText('取消').click();
+    expect(handlers.choose).toHaveBeenLastCalledWith(token, 'cancel', false);
   });
 });

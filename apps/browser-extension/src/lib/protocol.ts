@@ -171,6 +171,14 @@ export const EmailOtpCandidateSchema = z.object({
   expiresAt: z.number().int().nonnegative(),
 });
 
+export const PasskeyCandidateSchema = z.object({
+  requestId: z.string().min(1).max(128),
+  itemId: z.string().uuid(),
+  credentialId: z.string().min(1).max(4096),
+  title: boundedText(256),
+  account: boundedText(256).nullable().optional(),
+});
+
 const selectedItemSchema = z.object({
     kind: AutofillItemKindSchema,
     id: z.string().uuid(),
@@ -283,13 +291,36 @@ export const PopupMessageSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("vaultmesh.fill-confirmation.get") }),
   z.object({ kind: z.literal("vaultmesh.fill-confirmation.cancel"), fillConfirmationToken: z.string().uuid() }),
   z.object({ kind: z.literal("vaultmesh.autofill-state") }),
+  z.object({ kind: z.literal("vaultmesh.browser-unlock.request"), automatic: z.boolean().optional() }),
   z.object({ kind: z.literal("vaultmesh.open-unlock") }),
+  z.object({ kind: z.literal("vaultmesh.open-popup") }),
   z.object({ kind: z.literal("vaultmesh.passkey-unlock.get") }),
   z.object({ kind: z.literal("vaultmesh.passkey-unlock.decline"), token: z.string().uuid() }),
-  z.object({ kind: z.literal("vaultmesh.passkey-choice"), token: z.string().uuid(), choice: z.enum(["vaultmesh", "native", "cancel"]), remember: z.boolean().optional() }),
+  z.object({
+    kind: z.literal("vaultmesh.passkey-choice"),
+    token: z.string().uuid(),
+    choice: z.enum(["vaultmesh", "native", "cancel"]),
+    remember: z.boolean().optional(),
+    itemId: z.string().uuid().optional(),
+  }),
   z.object({ kind: z.literal("vaultmesh.passkey.request"), id: z.string().uuid(), operation: z.enum(["create", "get", "availability"]), optionsJson: z.string().min(2).max(128 * 1024) }),
   z.object({ kind: z.literal("vaultmesh.passkey.abort"), id: z.string().uuid() }),
   z.object({ kind: z.literal("vaultmesh.passkey.note"), reason: z.string().regex(/^[A-Za-z0-9:_-]{1,64}$/) }),
+  z.object({
+    kind: z.literal("vaultmesh.passkey-conditional.select"),
+    requestId: z.string().min(1).max(128),
+    itemId: z.string().uuid(),
+    credentialId: z.string().min(1).max(4096),
+  }),
+  z.object({
+    kind: z.literal("vaultmesh.passkey-conditional.native"),
+    requestId: z.string().min(1).max(128),
+  }),
+  z.object({
+    kind: z.literal("vaultmesh.passkey-site-mode.updated"),
+    origin: originSchema,
+    mode: z.enum(["default", "ask", "vaultmesh", "native"]),
+  }),
   z.object({ kind: z.literal("vaultmesh.passkey-diagnostics.get") }),
   z.object({ kind: z.literal("vaultmesh.passkey-diagnostics.clear") }),
   z.object({ kind: z.literal("vaultmesh.security-policy.updated") }),
@@ -366,6 +397,7 @@ export const AutofillCandidatesResponseSchema = z.object({
   requiresUnlock: z.boolean().optional(),
   candidates: z.array(AutofillCandidateSchema).max(200),
   emailOtpCandidates: z.array(EmailOtpCandidateSchema).max(20).optional(),
+  passkeyCandidates: z.array(PasskeyCandidateSchema).max(50).optional(),
 });
 
 export type ContentMessage = z.infer<typeof ContentMessageSchema>;
@@ -376,11 +408,17 @@ export type FillRequest = z.infer<typeof FillRequestSchema>;
 export type ApprovedFill = z.infer<typeof ApprovedFillSchema>;
 export type AutofillCandidate = z.infer<typeof AutofillCandidateSchema>;
 export type EmailOtpCandidate = z.infer<typeof EmailOtpCandidateSchema>;
-export type InlineAutofillCandidate = { kind: "device-assist"; id: string; title: string; subtitle: string; assistKind: "phone" | "sms"; matchScope?: "path" | "origin" | "domain" } | AutofillCandidate | (EmailOtpCandidate & {
-  kind: "email-otp";
-  title: string;
-  subtitle: string;
-});
+export type PasskeyCandidate = z.infer<typeof PasskeyCandidateSchema>;
+export type InlineAutofillCandidate =
+  | { kind: "passkey"; id: string; requestId: string; credentialId: string; title: string; subtitle: string }
+  | { kind: "passkey-native"; id: string; requestId: string; title: string; subtitle: string }
+  | { kind: "device-assist"; id: string; title: string; subtitle: string; assistKind: "phone" | "sms"; matchScope?: "path" | "origin" | "domain" }
+  | AutofillCandidate
+  | (EmailOtpCandidate & {
+      kind: "email-otp";
+      title: string;
+      subtitle: string;
+    });
 export type AutofillItemKind = z.infer<typeof AutofillItemKindSchema>;
 export type PageContext = z.infer<typeof PageContextSchema>;
 export type PageInformationDetectionResponse = z.infer<typeof PageInformationDetectionResponseSchema>;

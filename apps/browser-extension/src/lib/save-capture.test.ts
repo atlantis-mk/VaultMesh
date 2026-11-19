@@ -5,6 +5,53 @@ import { captureSubmittedData } from "./save-capture";
 afterEach(() => { document.body.innerHTML = ""; });
 
 describe("captureSubmittedData", () => {
+  it.each([
+    '<input type="hidden" autocomplete="username" value="ada@example.test">',
+    '<div hidden><input type="email" autocomplete="username" value="ada@example.test"></div>',
+    '<input type="email" autocomplete="username" value="ada@example.test" style="display:none" readonly>',
+  ])("captures the selected account retained by a password step: %s", (account) => {
+    document.body.innerHTML = `<form>${account}<input type="password" autocomplete="current-password" value="synthetic password"></form>`;
+    expect(captureSubmittedData(document.querySelector("form")!, "https://accounts.example.test/login").login)
+      .toEqual({ username: "ada@example.test", password: "synthetic password" });
+  });
+
+  it("does not guess between conflicting hidden accounts or use arbitrary hidden values", () => {
+    for (const accounts of [
+      '<input type="hidden" autocomplete="username" value="ada"><input type="hidden" autocomplete="username" value="grace">',
+      '<input type="hidden" name="email" value="never-capture"><input type="hidden" name="token" value="never-capture">',
+    ]) {
+      document.body.innerHTML = `<form>${accounts}<input type="password" autocomplete="current-password" value="synthetic password"></form>`;
+      expect(captureSubmittedData(document.querySelector("form")!, "https://example.test/login").login)
+        .toEqual({ username: "", password: "synthetic password" });
+    }
+  });
+
+  it("prefers the current visible account over a hidden account from an earlier step", () => {
+    document.body.innerHTML = `<form>
+      <input type="hidden" autocomplete="username" value="old@example.test">
+      <input autocomplete="username" value="new@example.test">
+      <input type="password" autocomplete="current-password" value="synthetic password">
+    </form>`;
+    expect(captureSubmittedData(document.querySelector("form")!, "https://example.test/login").login)
+      .toEqual({ username: "new@example.test", password: "synthetic password" });
+  });
+
+  it("does not read a hidden account owned by a different form", () => {
+    document.body.innerHTML = `<form id="other"><input type="hidden" autocomplete="username" value="other@example.test"></form>
+      <form id="login"><input type="hidden" form="other" autocomplete="username" value="other@example.test"><input type="password" autocomplete="current-password" value="synthetic password"></form>`;
+    expect(captureSubmittedData(document.querySelector("#login")!, "https://example.test/login").login)
+      .toEqual({ username: "", password: "synthetic password" });
+  });
+
+  it("ignores a CSS-hidden password retained from another step", () => {
+    document.body.innerHTML = `<form><input autocomplete="username" value="ada">
+      <input type="password" style="display:none" value="never-capture">
+      <input type="password" autocomplete="current-password" value="synthetic password">
+    </form>`;
+    expect(captureSubmittedData(document.querySelector("form")!, "https://example.test/login").login)
+      .toEqual({ username: "ada", password: "synthetic password" });
+  });
+
   it("does not offer a mismatched or empty new-password confirmation for saving", () => {
     for (const confirmation of ["different password", ""]) {
       document.body.innerHTML = `<form><input type="password" autocomplete="current-password" value="old password"><input type="password" autocomplete="new-password" value="new password"><input type="password" autocomplete="new-password"></form>`;

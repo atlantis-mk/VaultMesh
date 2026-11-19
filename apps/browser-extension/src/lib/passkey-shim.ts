@@ -5,6 +5,7 @@ import {
   blockingExtension,
   encodeRequestOptions,
   MAX_PASSKEY_JSON_CHARS,
+  PASSKEY_PROMPT_WAIT_MS,
   type CredentialConstructors,
   type JsonObject,
 } from '@/lib/passkey-shim-codec';
@@ -48,6 +49,7 @@ export function installPasskeyShim(
   newId: () => string = () => crypto.randomUUID(),
   /** Receives a non-secret reason whenever the browser serves a request without asking VaultMesh. */
   log: (reason: string) => void = () => undefined,
+  now: () => number = Date.now,
 ): void {
   const nativeCreate = prototype.create;
   const nativeGet = prototype.get;
@@ -56,28 +58,46 @@ export function installPasskeyShim(
     operation: PasskeyOperation,
     encoded: JsonObject,
     signal: AbortSignal | undefined,
+    waitTimeoutMs: number | undefined,
     native: () => Promise<Credential | null>,
     build: (responseJson: unknown) => Credential,
   ): Promise<Credential | null> {
     if (JSON.stringify(encoded).length > MAX_PASSKEY_JSON_CHARS) { log('request-too-large'); return native(); }
+    if (signal?.aborted) throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
     const id = newId();
     let onAbort: (() => void) | null = null;
-    const aborted = new Promise<'aborted'>((resolve) => {
-      if (!signal) return;
-      onAbort = () => resolve('aborted');
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-    let outcome: PasskeyShimResult | 'aborted';
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const racers: Array<Promise<PasskeyShimResult | 'aborted' | 'timed-out'>> = [
+      transport.request(id, operation, encoded),
+    ];
+    if (signal) {
+      racers.push(new Promise<'aborted'>((resolve) => {
+        onAbort = () => resolve('aborted');
+        signal.addEventListener('abort', onAbort, { once: true });
+      }));
+    }
+    if (waitTimeoutMs !== undefined) {
+      racers.push(new Promise<'timed-out'>((resolve) => {
+        timer = setTimeout(() => resolve('timed-out'), waitTimeoutMs);
+      }));
+    }
+    let outcome: PasskeyShimResult | 'aborted' | 'timed-out';
     try {
-      outcome = await Promise.race([transport.request(id, operation, encoded), aborted]);
+      outcome = await Promise.race(racers);
     } catch {
       outcome = { status: 'fallback' };
     } finally {
+      if (timer) clearTimeout(timer);
       if (signal && onAbort) signal.removeEventListener('abort', onAbort);
     }
     if (outcome === 'aborted') {
       transport.abort(id);
       throw signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+    }
+    if (outcome === 'timed-out') {
+      transport.abort(id);
+      log('shim-timeout');
+      throw new DOMException('The operation either timed out or was not allowed.', 'NotAllowedError');
     }
     switch (outcome.status) {
       case 'fallback':
@@ -101,26 +121,60 @@ export function installPasskeyShim(
     }
   }
 
+  function nativeWithRemainingTimeout<TOptions extends { publicKey?: { timeout?: number } } | undefined>(
+    callNative: (nextOptions: TOptions) => Promise<Credential | null>,
+    options: TOptions,
+    rawTimeout: unknown,
+    startedAt: number,
+  ): () => Promise<Credential | null> {
+    return () => {
+      if (typeof rawTimeout !== 'number' || !options?.publicKey) return callNative(options);
+      const elapsed = Math.max(0, now() - startedAt);
+      const remaining = Math.max(1_000, rawTimeout - elapsed);
+      return callNative({ ...options, publicKey: { ...options.publicKey, timeout: remaining } } as TOptions);
+    };
+  }
+
   const create = async function create(this: unknown, options?: CredentialCreationOptions) {
-    const native = () => nativeCreate.call(this, options);
+    const startedAt = now();
+    const callNative = (nextOptions?: CredentialCreationOptions) => nativeCreate.call(this, nextOptions);
     const publicKey = options?.publicKey;
-    if (!publicKey || options?.signal?.aborted) return native();
+    if (!publicKey || options?.signal?.aborted) return callNative(options);
     let encoded: JsonObject | null;
-    try { encoded = encodeCreationOptions(publicKey); } catch { log('unreadable-options'); return native(); }
-    if (!encoded) { log(`unsupported-extension:${blockingExtension(publicKey.extensions)}`); return native(); }
-    return delegate('create', encoded, options.signal, native, (json) => credentialFromCreateJson(json, constructors));
+    try { encoded = encodeCreationOptions(publicKey); } catch { log('unreadable-options'); return callNative(options); }
+    if (!encoded) { log(`unsupported-extension:${blockingExtension(publicKey.extensions)}`); return callNative(options); }
+    const waitMs = typeof encoded.timeout === 'number'
+      ? Math.min(Math.max(encoded.timeout, 1_000), PASSKEY_PROMPT_WAIT_MS)
+      : undefined;
+    return delegate(
+      'create',
+      encoded,
+      options.signal,
+      waitMs,
+      nativeWithRemainingTimeout(callNative, options, encoded.timeout, startedAt),
+      (json) => credentialFromCreateJson(json, constructors),
+    );
   };
 
   const get = async function get(this: unknown, options?: CredentialRequestOptions) {
-    const native = () => nativeGet.call(this, options);
+    const startedAt = now();
+    const callNative = (nextOptions?: CredentialRequestOptions) => nativeGet.call(this, nextOptions);
     const publicKey = options?.publicKey;
-    // Conditional UI is rendered by the browser and is not served by VaultMesh.
-    if (!publicKey || options?.signal?.aborted) return native();
-    if (options.mediation === 'conditional') { log('conditional-mediation'); return native(); }
+    if (!publicKey || options?.signal?.aborted) return callNative(options);
     let encoded: JsonObject | null;
-    try { encoded = encodeRequestOptions(publicKey); } catch { log('unreadable-options'); return native(); }
-    if (!encoded) { log(`unsupported-extension:${blockingExtension(publicKey.extensions)}`); return native(); }
-    return delegate('get', encoded, options.signal, native, (json) => credentialFromGetJson(json, constructors));
+    try { encoded = encodeRequestOptions(publicKey, options.mediation); } catch { log('unreadable-options'); return callNative(options); }
+    if (!encoded) { log(`unsupported-extension:${blockingExtension(publicKey.extensions)}`); return callNative(options); }
+    const waitMs = encoded.mediation !== 'conditional' && typeof encoded.timeout === 'number'
+      ? Math.min(Math.max(encoded.timeout, 1_000), PASSKEY_PROMPT_WAIT_MS)
+      : undefined;
+    return delegate(
+      'get',
+      encoded,
+      options.signal,
+      waitMs,
+      nativeWithRemainingTimeout(callNative, options, encoded.timeout, startedAt),
+      (json) => credentialFromGetJson(json, constructors),
+    );
   };
 
   for (const [name, replacement] of [['create', create], ['get', get]] as const) {

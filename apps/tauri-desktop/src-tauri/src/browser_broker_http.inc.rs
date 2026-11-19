@@ -138,6 +138,7 @@ impl BrowserBrokerHttpListener {
 
     pub fn is_healthy(&self) -> bool {
         !self.stopping.load(Ordering::Acquire)
+            && self.thread.lock().is_ok_and(|thread| thread.as_ref().is_some_and(|thread| !thread.is_finished()))
     }
 
     pub fn active_deferred_count(&self) -> usize {

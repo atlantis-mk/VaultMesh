@@ -16,6 +16,7 @@ import {
   backgroundDesktopRpc,
   DesktopRpcError,
   isDesktopRpcRuntimeMessage,
+  setPossibleUnlockObserver,
 } from "@/lib/desktop-rpc";
 import { persistentNativeConnection } from "@/lib/native-connection";
 import { AutofillAttemptRegistry } from "@/lib/autofill-attempts";
@@ -40,6 +41,7 @@ import {
   type BrowserIdleState,
   type PluginSecurityPolicy,
 } from "@/lib/plugin-security-policy";
+import { PasskeyBrowserFactory } from "@/lib/passkey-browser-adapter";
 import { createPasskeyBroker } from "@/lib/passkey-broker";
 import { clearPasskeyDiagnostics, readPasskeyDiagnostics, recordPasskeyDiagnostic } from "@/lib/passkey-diagnostics";
 import { PopupWorkspaceMemoryCache } from "@/lib/popup-workspace-cache";
@@ -78,6 +80,9 @@ type PendingPluginFill = {
   preserveExistingAccount?: boolean;
 };
 let pendingPluginFill: PendingPluginFill | null = null;
+// Best-effort hint that the desktop vault is already unlocked, so page-triggered
+// operations only trigger one warm-up per lock→unlock transition.
+let desktopUnlockedHint = false;
 let activePluginSecurityPolicy = DEFAULT_PLUGIN_SECURITY_POLICY;
 let emailOtpPollTimer: ReturnType<typeof setInterval> | null = null;
 const emailOtpBoostedTabs = new Map<number, string>();
@@ -89,10 +94,13 @@ const extensionAction = (browser as unknown as {
 
 export default defineBackground(() => {
   let activeBiometricSession: string | null = null;
+  const passkeyAdapter = PasskeyBrowserFactory.create();
   // WebAuthn requests arrive from the page-level shim (ADR-0057); there is no
   // browser-wide authenticator proxy to keep attached.
   const passkeyBroker = createPasskeyBroker({
     isEnabled: () => activePluginSecurityPolicy.passkeyProxyEnabled !== false,
+    isSupported: () => passkeyAdapter.isSupported,
+    defaultMode: (operation) => (operation === "create" ? activePluginSecurityPolicy.passkeyCreateDefault : activePluginSecurityPolicy.passkeyGetDefault),
     log: (message) => {
       console.info(message);
       void recordPasskeyDiagnostic(message);
@@ -113,13 +121,43 @@ export default defineBackground(() => {
     hidePrompt: (page, token) => {
       void browser.tabs.sendMessage(page.tabId, { kind: "vaultmesh.passkey-prompt.hide", token }, { frameId: 0 }).catch(() => undefined);
     },
-    openPrompt: openPasskeyPrompt,
+    openPrompt: () => passkeyAdapter.openPromptWindow(),
+  });
+
+  // Popup and page-originated unlock requests collapse into one desktop request.
+  let inFlightBrowserUnlock: Promise<BrowserUnlockOutcome> | null = null;
+
+  async function applyUnlockedSession(): Promise<void> {
+    desktopUnlockedHint = true;
+    await passkeyBroker.syncUnlockState().catch(() => undefined);
+    await warmPopupWorkspaceCache();
+    await syncEmailOtpPolling();
+  }
+
+  function requestBrowserUnlock(): Promise<BrowserUnlockOutcome> {
+    if (!inFlightBrowserUnlock) {
+      inFlightBrowserUnlock = runBrowserUnlock(applyUnlockedSession).finally(() => {
+        inFlightBrowserUnlock = null;
+      });
+    }
+    return inFlightBrowserUnlock;
+  }
+
+  // A page-triggered autofill/passkey operation may unlock the vault through the
+  // desktop window; mirror that into the popup cache, passkey state and OTP polling.
+  setPossibleUnlockObserver(() => {
+    if (desktopUnlockedHint) return;
+    void backgroundDesktopRpc("vault.status").then((status) => {
+      if ((status as { unlocked?: unknown }).unlocked === true) return applyUnlockedSession();
+      return undefined;
+    }).catch(() => undefined);
   });
 
   // The background worker, rather than the popup, owns the native
   // connection. An open native port also keeps the MV3 worker available.
   persistentNativeConnection.start();
   persistentNativeConnection.onDisconnected(() => {
+    desktopUnlockedHint = false;
     activeBiometricSession = null;
     popupWorkspaceCache.clear();
     stopEmailOtpPolling();
@@ -163,7 +201,7 @@ export default defineBackground(() => {
   });
   browser.webNavigation.onCommitted.addListener((details) => {
     void cancelDeviceAssists(details.tabId, details.frameId);
-    passkeyBroker.cancelPage(details.tabId, details.frameId);
+    passkeyBroker.cancelPage(details.tabId, details.frameId === 0 ? undefined : details.frameId);
     if (details.frameId === 0) {
       automaticAttempts.reset(details.tabId);
       void stopEmailOtpBoostForTab(details.tabId);
@@ -171,6 +209,7 @@ export default defineBackground(() => {
   });
   browser.webNavigation.onHistoryStateUpdated.addListener((details) => {
     void cancelDeviceAssists(details.tabId, details.frameId);
+    passkeyBroker.cancelHistoryNavigation(details.tabId, details.frameId, details.url);
     if (details.frameId === 0) {
       automaticAttempts.reset(details.tabId);
     }
@@ -237,7 +276,10 @@ export default defineBackground(() => {
         return { kind: "vaultmesh.host-status", status: "invalid-message", requestId: message.request.requestId };
       }
       if (message.request.operation === 'biometric.authentication.cancel' && authenticationId === activeBiometricSession) activeBiometricSession = null;
-      if (message.request.operation === 'vault.lock' || message.request.operation === 'browser.pairing.revoke') popupWorkspaceCache.clear();
+      if (message.request.operation === 'vault.lock' || message.request.operation === 'browser.pairing.revoke') {
+        popupWorkspaceCache.clear();
+        desktopUnlockedHint = false;
+      }
       const response = await persistentNativeConnection.request(message.request);
       popupWorkspaceCache.observeRpcResponse(message.request.operation, response);
       if (message.request.operation === "biometric.authentication.poll" && isBiometricUnlockResponse(response)) activeBiometricSession = null;
@@ -410,24 +452,44 @@ export default defineBackground(() => {
         if (!answering || answering.frameId !== 0) return { status: "unsupported-page" as const };
         tabId = answering.tabId;
       }
-      return { status: passkeyBroker.choose(parsed.data.token, parsed.data.choice, parsed.data.remember === true, tabId) ? "chosen" as const : "expired" as const };
+      return {
+        status: passkeyBroker.choose(
+          parsed.data.token,
+          parsed.data.choice,
+          parsed.data.remember === true,
+          tabId,
+          parsed.data.itemId,
+        ) ? "chosen" as const : "expired" as const,
+      };
+    }
+    if (parsed.data.kind === "vaultmesh.passkey-site-mode.updated") {
+      if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
+      passkeyBroker.onSiteModeChanged(parsed.data.origin, parsed.data.mode);
+      return { status: "updated" as const };
     }
     if (parsed.data.kind === "vaultmesh.fill-confirmation.cancel") {
       if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
       if (pendingPluginFill?.token === parsed.data.fillConfirmationToken) pendingPluginFill = null;
       return { status: "cancelled" as const };
     }
+    if (parsed.data.kind === "vaultmesh.browser-unlock.request") {
+      // The popup may close as soon as the desktop unlock window takes focus, so
+      // this worker (not the popup) owns the in-flight request.
+      if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
+      if (parsed.data.automatic && passkeyBroker.currentPrompt()) return { status: "passkey-prompt" as const };
+      return requestBrowserUnlock();
+    }
     const page = trustedPage(sender);
     if (!page) return { status: "unsupported-page" as const, candidates: [] };
     // The origin is the browser-verified sender origin, never page-supplied data.
     if (parsed.data.kind === "vaultmesh.passkey.request" && parsed.data.operation === "availability") {
-      const available = await passkeyBroker.availability({ tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin });
+      const available = await passkeyBroker.availability({ tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin, pageUrl: page.framePageUrl });
       return { status: "ok" as const, responseJson: JSON.stringify({ available }) };
     }
     if (parsed.data.kind === "vaultmesh.passkey.request") {
       return passkeyBroker.handle(
         { id: parsed.data.id, operation: parsed.data.operation as "create" | "get", optionsJson: parsed.data.optionsJson },
-        { tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin },
+        { tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin, pageUrl: page.framePageUrl },
       );
     }
     if (parsed.data.kind === "vaultmesh.passkey.note") {
@@ -435,19 +497,52 @@ export default defineBackground(() => {
       return { status: "noted" as const };
     }
     if (parsed.data.kind === "vaultmesh.passkey.abort") {
-      passkeyBroker.abort({ tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin }, parsed.data.id);
+      passkeyBroker.abort({ tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin, pageUrl: page.framePageUrl }, parsed.data.id);
       return { status: "aborted" as const };
+    }
+    if (parsed.data.kind === "vaultmesh.passkey-conditional.select") {
+      return passkeyBroker.resolveConditional(
+        { tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin, pageUrl: page.framePageUrl },
+        parsed.data.requestId,
+        { action: "vaultmesh", itemId: parsed.data.itemId, credentialId: parsed.data.credentialId },
+      );
+    }
+    if (parsed.data.kind === "vaultmesh.passkey-conditional.native") {
+      return passkeyBroker.resolveConditional(
+        { tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin, pageUrl: page.framePageUrl },
+        parsed.data.requestId,
+        { action: "native" },
+      );
     }
     if (parsed.data.kind === "vaultmesh.autofill-state") return getAutofillAvailability();
     if (parsed.data.kind === "vaultmesh.open-unlock") {
-      await extensionAction?.openPopup();
-      return { status: "opened" as const };
+      // Page-originated unlock shares the popup's single in-flight desktop request.
+      return requestBrowserUnlock();
+    }
+    if (parsed.data.kind === "vaultmesh.open-popup") {
+      if (PasskeyBrowserFactory.currentTarget() === "firefox" || typeof extensionAction?.openPopup !== "function") {
+        return { status: "unsupported" as const };
+      }
+      try {
+        await extensionAction.openPopup();
+        return { status: "opened" as const };
+      } catch {
+        return { status: "unavailable" as const };
+      }
     }
     if (parsed.data.kind === "vaultmesh.autofill-candidates") {
       const result = await getAutofillCandidates(page.fillOrigin, parsed.data.fieldKind, page.framePageUrl, parsed.data.pageContext);
-      if (result.status !== "ready" || parsed.data.pageContext !== "otp" || page.fillOrigin !== page.topOrigin) return result;
+      const passkeyCandidates = parsed.data.fieldKind === "login" && parsed.data.pageContext !== "otp" && parsed.data.pageContext !== "signup"
+        ? passkeyBroker.conditionalCandidates({ tabId: page.tabId, frameId: page.frameId, origin: page.fillOrigin, pageUrl: page.framePageUrl })
+        : [];
+      const effectiveResult = result.status === "unavailable" && passkeyCandidates.length > 0
+        ? { ...result, status: "locked" as const, requiresUnlock: true }
+        : result;
+      if (effectiveResult.status !== "ready" || parsed.data.pageContext !== "otp" || page.fillOrigin !== page.topOrigin) {
+        return passkeyCandidates.length > 0 ? { ...effectiveResult, passkeyCandidates } : effectiveResult;
+      }
       const emailOtp = await getEmailOtpCandidates(page.topOrigin);
-      return { ...result, emailOtpCandidates: emailOtp.status === "ready" ? emailOtp.candidates : [] };
+      return { ...effectiveResult, emailOtpCandidates: emailOtp.status === "ready" ? emailOtp.candidates : [] };
     }
     if (parsed.data.kind === "vaultmesh.email-otp-select") {
       if (page.fillOrigin !== page.topOrigin) return { status: "unsupported-page" as const };
@@ -510,18 +605,6 @@ export default defineBackground(() => {
   });
 });
 
-/** A pending WebAuthn choice or unlock must reach the VaultMesh UI. The toolbar
- * popup needs a focused browser window, so a standalone window is the fallback. */
-async function openPasskeyPrompt(): Promise<void> {
-  try {
-    await extensionAction?.openPopup();
-    return;
-  } catch {
-    // Fall through to a standalone unlock window.
-  }
-  await browser.windows.create({ url: browser.runtime.getURL("/popup.html?passkey=1"), type: "popup", focused: true, width: 400, height: 600 });
-}
-
 async function refreshPluginSecurityPolicy(): Promise<PluginSecurityPolicy> {
   activePluginSecurityPolicy = await loadPluginSecurityPolicy();
   browser.idle.setDetectionInterval(idleDetectionIntervalSeconds(activePluginSecurityPolicy));
@@ -574,8 +657,30 @@ async function stopEmailOtpBoostForTab(tabId: number): Promise<void> {
   await backgroundDesktopRpc("email.otp.watch", { topOrigin: origin, active: false }).catch(() => undefined);
 }
 
+type BrowserUnlockOutcome =
+  | { status: "unlocked" }
+  | { status: "cancelled" | "unavailable"; errorMessage: string };
+
+/** Sends the gesture-bound `browser.unlock.request` and, on success, runs the
+ * post-unlock synchronisation. Failures never throw into the message channel. */
+async function runBrowserUnlock(onUnlocked: () => Promise<void>): Promise<BrowserUnlockOutcome> {
+  try {
+    const result = await backgroundDesktopRpc("browser.unlock.request") as { unlocked?: unknown } | null;
+    if (result?.unlocked !== true) return { status: "cancelled", errorMessage: "已取消桌面端解锁，可点击下方按钮重试。" };
+    await onUnlocked().catch(() => undefined);
+    return { status: "unlocked" };
+  } catch (error) {
+    if (error instanceof DesktopRpcError) {
+      const unavailable = error.code === "desktop-unavailable" || error.code === "unpaired";
+      return { status: unavailable ? "unavailable" : "cancelled", errorMessage: error.message };
+    }
+    return { status: "unavailable", errorMessage: "无法连接 VaultMesh 桌面端，请确认桌面端正在运行。" };
+  }
+}
+
 async function lockExtension(onLocked: () => void | Promise<void> = () => {}): Promise<boolean> {
   popupWorkspaceCache.clear();
+  desktopUnlockedHint = false;
   try {
     await backgroundDesktopRpc("vault.lock");
     await onLocked();

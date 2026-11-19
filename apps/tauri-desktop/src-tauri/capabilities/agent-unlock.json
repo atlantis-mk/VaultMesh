@@ -1,12 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "agent-unlock-capability",
-  "description": "Minimum capability for the isolated VaultMesh MCP unlock window.",
+  "description": "Minimum capability for the isolated unified VaultMesh unlock window.",
   "windows": ["agent-unlock"],
   "local": true,
   "permissions": [
     "core:event:default",
     "core:window:allow-hide",
+    "allow-desktop-authentication",
+    "allow-desktop-window-layout",
     "allow-agent-unlock-status",
     "allow-agent-unlock-set-scope",
     "allow-agent-unlock-password",

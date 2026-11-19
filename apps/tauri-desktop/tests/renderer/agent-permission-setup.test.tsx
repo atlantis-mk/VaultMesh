@@ -122,8 +122,16 @@ describe('CT-AGENT-PERMISSION-001 system-generated session policy', () => {
         identities: { trash: vi.fn().mockResolvedValue([]) },
         security: { settings: vi.fn().mockResolvedValue(DEFAULT_SECURITY_SETTINGS) },
         vault: { pinStatus: vi.fn().mockResolvedValue({ enabled: false, locked: false, failureLimit: 5, failedAttempts: 0, remainingAttempts: 5 }) },
+        browser: {
+          pinStatus: vi.fn().mockResolvedValue({ enabled: false, locked: false, failureLimit: 5, failedAttempts: 0, remainingAttempts: 5 }),
+          enablePin: vi.fn(),
+          disablePin: vi.fn(),
+        },
         agent: {
           status: vi.fn().mockResolvedValue(status),
+          pinStatus: vi.fn().mockResolvedValue({ enabled: false, locked: false, failureLimit: 5, failedAttempts: 0, remainingAttempts: 5 }),
+          enablePin: vi.fn(),
+          disablePin: vi.fn(),
           activateAction: vi.fn().mockResolvedValue({
             request: status.permissionRequests[0],
             choice: { effect: 'allow', scope: 'exact', duration: 'connection' },

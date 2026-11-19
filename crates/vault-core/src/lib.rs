@@ -8,6 +8,7 @@ mod agent_connector;
 mod error;
 mod format;
 mod model;
+mod passkey;
 mod session;
 mod sync;
 mod sync_mailbox;
@@ -56,6 +57,10 @@ pub use model::{
     SshCredentialRevisionSummary, SshCredentialSummary, SshCredentialTrashSummary,
     TrashItemSummary, TrashedApiEnvironment, TrashedIdentity, TrashedLoginItem, TrashedPaymentCard,
     TrashedServiceRecord, TrashedSshCredential, UnlockEvent, UnlockEventSource, VaultPayload,
+};
+pub use passkey::{
+    PASSKEY_PROVIDER, PASSKEY_SCOPE, PasskeyCandidate, PasskeyError, PasskeyGetRequestView,
+    PasskeyRequestSummary, describe_passkey_request, get_passkey_request_view,
 };
 pub use session::VaultSession;
 pub use totp::{TotpCode, normalize_totp_secret};

@@ -27,9 +27,42 @@ pub const FIREFOX_EXTENSION_ID: &str = "vaultmesh@atlantis-mk.github.io";
 #[cfg(any(target_os = "windows", test))]
 const HOST_CONFIG_NAME: &str = "browser-host-config.json";
 #[cfg(any(target_os = "windows", test))]
-pub const HOST_MANIFEST_NAME: &str = "com.vaultmesh.browser.json";
+const HOST_MANIFEST_NAME: &str = "com.vaultmesh.browser.json";
 #[cfg(any(target_os = "windows", test))]
 const FIREFOX_HOST_MANIFEST_NAME: &str = "com.vaultmesh.browser.firefox.json";
+
+#[cfg(any(target_os = "windows", test))]
+struct WindowsHostRegistration {
+    browser: &'static str,
+    registry_root: &'static str,
+    firefox: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_HOST_REGISTRATIONS: &[WindowsHostRegistration] = &[
+    WindowsHostRegistration {
+        browser: "chrome",
+        registry_root: r"Google\Chrome",
+        firefox: false,
+    },
+    WindowsHostRegistration {
+        browser: "edge",
+        registry_root: r"Microsoft\Edge",
+        firefox: false,
+    },
+    WindowsHostRegistration {
+        browser: "firefox",
+        registry_root: "Mozilla",
+        firefox: true,
+    },
+];
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsHostRegistration {
+    fn registry_key(&self) -> String {
+        format!(r"Software\{}\NativeMessagingHosts\{BROWSER_HOST_NAME}", self.registry_root)
+    }
+}
 
 #[cfg(any(target_os = "windows", test))]
 pub struct WindowsBrowserHostPlan {
@@ -138,7 +171,7 @@ pub fn install_windows_browser_host(app_data: &Path) -> io::Result<()> {
         )
     })?;
     let native_host = parent.join("vaultmesh-native-host.exe");
-    if !std::fs::metadata(&native_host).is_ok_and(|metadata| metadata.is_file()) {
+    if !std::fs::metadata(&native_host).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0) {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "packaged browser native host is missing",
@@ -149,6 +182,82 @@ pub fn install_windows_browser_host(app_data: &Path) -> io::Result<()> {
     write_atomic(&plan.chromium_manifest_path, &plan.chromium_manifest)?;
     write_atomic(&plan.firefox_manifest_path, &plan.firefox_manifest)?;
     register_native_host_manifests(&plan.chromium_manifest_path, &plan.firefox_manifest_path)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn check_windows_browser_registration(
+    app_data: &Path,
+    native_host: Option<&Path>,
+    browser: &str,
+) -> (bool, Option<String>) {
+    inspect_windows_browser_registration(app_data, native_host, browser, read_windows_host_registration)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn inspect_windows_browser_registration(
+    app_data: &Path,
+    native_host: Option<&Path>,
+    browser: &str,
+    lookup: impl FnOnce(&str) -> Option<PathBuf>,
+) -> (bool, Option<String>) {
+    let Some(registration) = WINDOWS_HOST_REGISTRATIONS.iter().find(|entry| entry.browser == browser) else {
+        return (false, None);
+    };
+    let Some(registered_path) = lookup(&registration.registry_key()) else {
+        return (false, None);
+    };
+    let valid = (|| -> Option<()> {
+        let native_host = native_host?;
+        let plan = windows_browser_host_plan(app_data, native_host, configured_extension_id().ok()?).ok()?;
+        let (path, bytes) = if registration.firefox {
+            (plan.firefox_manifest_path, plan.firefox_manifest)
+        } else {
+            (plan.chromium_manifest_path, plan.chromium_manifest)
+        };
+        if !registered_path.as_os_str().eq_ignore_ascii_case(path.as_os_str()) {
+            return None;
+        }
+
+        // Read only the manifest at the app-owned path. A stale registry value
+        // must not make Doctor read an arbitrary file.
+        let actual: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        let expected: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let host_matches = actual["path"].as_str()?.eq_ignore_ascii_case(native_host.to_str()?);
+        (host_matches && ["name", "type", "allowed_origins", "allowed_extensions"]
+            .iter().all(|&field| actual[field] == expected[field]))
+            .then_some(())
+    })().is_some();
+    (valid, Some(registered_path.display().to_string()))
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_host_registration(key: &str) -> Option<PathBuf> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt, ptr::{null, null_mut}};
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    let key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+    let mut bytes = 0u32;
+    // Query the default value from the same registry view used by the installer.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER, key.as_ptr(), null(), RRF_RT_REG_SZ,
+            null_mut(), null_mut(), &mut bytes,
+        )
+    };
+    if status != 0 || !(2..=65536).contains(&bytes) || bytes % 2 != 0 {
+        return None;
+    }
+    let mut value = vec![0u16; bytes as usize / 2];
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER, key.as_ptr(), null(), RRF_RT_REG_SZ,
+            null_mut(), value.as_mut_ptr().cast(), &mut bytes,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let length = value.iter().position(|&unit| unit == 0)?;
+    (length > 0).then(|| PathBuf::from(OsString::from_wide(&value[..length])))
 }
 
 #[cfg(target_os = "windows")]
@@ -175,15 +284,11 @@ fn register_native_host_manifests(
         value.encode_wide().chain(Some(0)).collect()
     }
 
-    for (browser, manifest_path) in [
-        ("Google\\Chrome", chromium_manifest_path),
-        ("Microsoft\\Edge", chromium_manifest_path),
-        ("Mozilla", firefox_manifest_path),
-    ] {
+    for registration in WINDOWS_HOST_REGISTRATIONS {
+        let manifest_path = if registration.firefox { firefox_manifest_path } else { chromium_manifest_path };
         let manifest = wide(manifest_path.as_os_str());
-        let subkey = wide(OsStr::new(&format!(
-            r"Software\{browser}\NativeMessagingHosts\{BROWSER_HOST_NAME}"
-        )));
+        let registry_key = registration.registry_key();
+        let subkey = wide(OsStr::new(&registry_key));
         let mut key = std::ptr::null_mut();
         let status = unsafe {
             RegCreateKeyExW(
@@ -225,9 +330,10 @@ mod tests {
 
     #[test]
     fn windows_plan_binds_manifest_config_and_compiled_extension_identity() {
-        let app_data = Path::new("/Users/test/AppData/Roaming/com.vaultmesh.desktop");
-        let host = Path::new("/Users/test/AppData/Local/VaultMesh/vaultmesh-native-host.exe");
-        let plan = windows_browser_host_plan(app_data, host, DEFAULT_DEVELOPMENT_EXTENSION_ID)
+        let root = std::env::temp_dir();
+        let app_data = root.join("com.vaultmesh.desktop");
+        let host = root.join("VaultMesh").join("vaultmesh-native-host.exe");
+        let plan = windows_browser_host_plan(&app_data, &host, DEFAULT_DEVELOPMENT_EXTENSION_ID)
             .expect("plan");
         let config: serde_json::Value = serde_json::from_slice(&plan.config).expect("config");
         let chromium_manifest: serde_json::Value =
@@ -260,6 +366,46 @@ mod tests {
             firefox_manifest["allowed_extensions"],
             json!([FIREFOX_EXTENSION_ID])
         );
+    }
+
+    #[test]
+    fn ct_native_browser_001_windows_doctor_checks_each_registry_entry_and_manifest_identity() {
+        let root = std::env::temp_dir().join(format!("vaultmesh-doctor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let native_host = root.join("vaultmesh-native-host.exe");
+        let plan = windows_browser_host_plan(&root, &native_host, configured_extension_id().unwrap()).unwrap();
+        std::fs::write(&plan.chromium_manifest_path, &plan.chromium_manifest).unwrap();
+        std::fs::write(&plan.firefox_manifest_path, &plan.firefox_manifest).unwrap();
+
+        let inspect = |browser: &str, lookup: &dyn Fn(&str) -> Option<PathBuf>| {
+            inspect_windows_browser_registration(&root, Some(&native_host), browser, lookup)
+        };
+        // A present manifest does not imply any registration for this browser.
+        assert_eq!(inspect("chrome", &|_| None), (false, None));
+
+        let lookup = |key: &str| match key {
+            r"Software\Google\Chrome\NativeMessagingHosts\com.vaultmesh.browser" =>
+                Some(plan.chromium_manifest_path.clone()),
+            r"Software\Mozilla\NativeMessagingHosts\com.vaultmesh.browser" =>
+                Some(plan.firefox_manifest_path.clone()),
+            _ => None,
+        };
+        assert!(inspect("chrome", &lookup).0);
+        assert!(!inspect("edge", &lookup).0);
+        assert!(!inspect("brave", &lookup).0);
+        assert!(inspect("firefox", &lookup).0);
+        assert!(!inspect("firefox", &|_| Some(plan.chromium_manifest_path.clone())).0);
+
+        let mut stale: serde_json::Value = serde_json::from_slice(&plan.chromium_manifest).unwrap();
+        stale["allowed_origins"] = json!(["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"]);
+        std::fs::write(&plan.chromium_manifest_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(!inspect("chrome", &lookup).0);
+
+        let mut stale: serde_json::Value = serde_json::from_slice(&plan.chromium_manifest).unwrap();
+        stale["path"] = json!(root.join("old").join("vaultmesh-native-host.exe"));
+        std::fs::write(&plan.chromium_manifest_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(!inspect("chrome", &lookup).0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

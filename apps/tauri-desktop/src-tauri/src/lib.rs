@@ -106,6 +106,7 @@ mod keychain_share;
 mod macos_root_secret;
 use vaultmesh_lan_pairing as lan_pairing;
 mod passkey_service;
+mod pin_domain_adapter;
 mod pin_service;
 mod recovery_code_command;
 mod recovery_code_file;
@@ -115,6 +116,8 @@ mod ssh_host_setup;
 mod ssh_scan;
 mod ssh_service;
 mod ssh_tools;
+mod unlock_surface_adapter;
+mod window_layout_adapter;
 #[cfg(any(target_os = "windows", test))]
 mod windows_tray_theme;
 
@@ -157,7 +160,7 @@ use agent_ssh_runtime::{
 use agent_ssh_sessions::AgentSshSessionStore;
 use agent_tool_executor::{AgentToolContext, execute_agent_tool};
 use agent_unlock_window::{
-    BrowserAutofillUnlockQueue, DisplayedAgentUnlock, agent_unlock_biometric, agent_unlock_cancel,
+    BrowserUnlockQueue, DisplayedAgentUnlock, agent_unlock_biometric, agent_unlock_cancel,
     agent_unlock_password, agent_unlock_pin, agent_unlock_set_scope, agent_unlock_status,
 };
 use agent_vault_access::{AgentAccessSettings, AgentUnlockScope, AgentVaultAccess};
@@ -177,6 +180,10 @@ use electron_migration::{
 use email_otp::{EmailOtpService, EmailScanExecution, EmailScanPlan};
 use import_service::{ImportService, MAX_IMPORT_FILE_BYTES, validate_source};
 use lan_pairing::{LanPairingService, LanSyncService};
+use pin_domain_adapter::{
+    PinDomainAction, PinDomainFactory, PinDomainKind, disable_all_domain_pins,
+    execute_pin_domain_action_async,
+};
 use pin_service::PinQuickUnlockService;
 use recovery_code_command::import_recovery_code_file;
 use recovery_code_file::PreparedRecoveryCodeFile;
@@ -190,8 +197,9 @@ use ssh_service::{
 pub use browser_broker::BrowserBrokerUnixListener;
 pub use browser_broker::BrowserBrokerHttpListener;
 pub use browser_broker::{
-    BrowserBrokerCore, BrowserBrokerPlatform, BrowserPlatformError, OneShotUnlockRequest,
-    OneShotUnlockWaiter, OneShotUnlockedRuntime, TAURI_BROWSER_SLICE_OPERATIONS,
+    BrowserBrokerCore, BrowserBrokerPlatform, BrowserPlatformError, BrowserRepromptRequest,
+    BrowserRepromptWaiter, BrowserSessionUnlockRequest, BrowserSessionUnlockWaiter,
+    BrowserUnlockResolution, TAURI_BROWSER_SLICE_OPERATIONS,
 };
 #[cfg(target_os = "windows")]
 use browser_integration_windows::{BrowserIntegrationError, WindowsBrowserIntegration};
@@ -231,7 +239,7 @@ struct RuntimeState {
     agent_broker: Arc<Mutex<AgentBrokerCore>>,
     agent_pairing_window_request: Arc<Mutex<Option<String>>>,
     agent_unlock_window_request: Arc<Mutex<Option<DisplayedAgentUnlock>>>,
-    browser_autofill_unlocks: Arc<Mutex<BrowserAutofillUnlockQueue>>,
+    browser_unlocks: Arc<Mutex<BrowserUnlockQueue>>,
     agent_authorization_window_request: Arc<Mutex<Option<DisplayedAgentAuthorization>>>,
     agent_authorization_window_deadline: Arc<AtomicU64>,
     agent_resources: Arc<Mutex<AgentResourceStore>>,
@@ -244,6 +252,7 @@ struct RuntimeState {
     _agent_pipe_listener: Option<Arc<AgentBrokerWindowsListener>>,
     #[cfg(unix)]
     _browser_listener: Option<Arc<BrowserBrokerUnixListener>>,
+    #[cfg(unix)]
     _browser_http_listener: Option<Arc<BrowserBrokerHttpListener>>,
     #[cfg(unix)]
     _bitwarden_development_listener: Option<Arc<BrowserBrokerUnixListener>>,
@@ -267,6 +276,8 @@ struct RuntimeState {
     biometric: Arc<Mutex<BiometricQuickUnlockService>>,
     desktop_authentication: Arc<Mutex<desktop_authentication::Coordinator>>,
     pin: Arc<Mutex<PinQuickUnlockService>>,
+    browser_pin: Arc<Mutex<PinQuickUnlockService>>,
+    main_window_layout: Arc<Mutex<window_layout_adapter::MainWindowLayoutState>>,
     browser_preauth_preview: BrowserPreAuthPreviewStore,
     lan_pairing: Arc<Mutex<LanPairingService>>,
     lan_sync: Arc<Mutex<LanSyncService<DesktopRuntime>>>,
@@ -336,9 +347,9 @@ struct PinInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PinSetupInput {
-    pin: String,
-    failure_limit: u8,
+pub(crate) struct PinSetupInput {
+    pub(crate) pin: String,
+    pub(crate) failure_limit: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -560,7 +571,7 @@ async fn desktop_invoke(
                     .map(|status| json!({ "cancelled": false, "status": status }))
             })
             .await?;
-            with_pin(&state, |pin| pin.disable()).await?;
+            disable_all_domain_pins(&state).await?;
             disable_biometrics(&state).await?;
             Ok(result)
         }
@@ -587,7 +598,7 @@ async fn desktop_invoke(
                 runtime.execute("vault.change-password", input)
             })
             .await?;
-            with_pin(&state, |pin| pin.disable()).await?;
+            disable_all_domain_pins(&state).await?;
             disable_biometrics(&state).await?;
             Ok(result)
         }
@@ -650,45 +661,74 @@ async fn desktop_invoke(
             Ok(result)
         }
         "pin.status" => {
-            require_empty_object(&input)?;
-            with_pin(&state, |pin| Ok(json!(pin.status()))).await
+            execute_pin_domain_action_async(
+                &state,
+                PinDomainKind::Desktop,
+                PinDomainAction::Status,
+                input,
+            )
+            .await
         }
         "pin.enable" => {
-            let setup: PinSetupInput =
-                serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
-            let pin_value = Zeroizing::new(setup.pin);
-            let (vault_path, vault_key) =
-                with_runtime(&state, |runtime| runtime.quick_unlock_material())
-                    .await
-                    .map_err(|_| "请先在桌面端使用主密码解锁保险库。".to_owned())?;
-            with_pin(&state, move |pin| {
-                pin.enable(
-                    vault_path,
-                    vault_key.as_ref(),
-                    pin_value.as_str(),
-                    setup.failure_limit,
-                )
-                .map(|status| json!(status))
-            })
+            execute_pin_domain_action_async(
+                &state,
+                PinDomainKind::Desktop,
+                PinDomainAction::Enable,
+                input,
+            )
             .await
         }
         "pin.disable" => {
-            require_empty_object(&input)?;
-            let unlocked = with_runtime(&state, |runtime| Ok(runtime.status().unlocked)).await?;
-            if !unlocked {
-                return Err("请先在桌面端解锁保险库。".to_owned());
-            }
-            with_pin(&state, |pin| {
-                pin.disable()?;
-                Ok(json!(pin.status()))
-            })
+            execute_pin_domain_action_async(
+                &state,
+                PinDomainKind::Desktop,
+                PinDomainAction::Disable,
+                input,
+            )
+            .await
+        }
+        "browser.pin.status" => {
+            execute_pin_domain_action_async(
+                &state,
+                PinDomainKind::Browser,
+                PinDomainAction::Status,
+                input,
+            )
+            .await
+        }
+        "browser.pin.enable" => {
+            execute_pin_domain_action_async(
+                &state,
+                PinDomainKind::Browser,
+                PinDomainAction::Enable,
+                input,
+            )
+            .await
+        }
+        "browser.pin.disable" => {
+            execute_pin_domain_action_async(
+                &state,
+                PinDomainKind::Browser,
+                PinDomainAction::Disable,
+                input,
+            )
             .await
         }
         "pin.unlock" => {
             desktop_authentication::invalidate(&app, &state);
             let input: PinInput = serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
             let pin_value = Zeroizing::new(input.pin);
-            let credential = with_pin(&state, move |pin| pin.unlock(pin_value.as_str())).await?;
+            let adapter = PinDomainFactory::create_for(PinDomainKind::Desktop);
+            let pin_service = Arc::clone(adapter.service(&state));
+            let unavailable_error = adapter.unavailable_error();
+            let credential = tauri::async_runtime::spawn_blocking(move || {
+                pin_service
+                    .lock()
+                    .map_err(|_| unavailable_error.to_owned())?
+                    .unlock(pin_value.as_str())
+            })
+            .await
+            .map_err(|_| "PIN 快速解锁操作未能完成。".to_owned())??;
             let vault_path = credential.vault_path.clone();
             let result = with_runtime(&state, move |runtime| {
                 runtime

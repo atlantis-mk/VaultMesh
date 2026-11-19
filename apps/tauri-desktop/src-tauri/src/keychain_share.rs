@@ -333,7 +333,7 @@ pub const fn production_direct_keyring_allowed() -> bool {
 #[cfg(not(debug_assertions))]
 const _: () = assert!(!production_direct_keyring_allowed());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

@@ -1,14 +1,14 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { ArrowRightIcon, BotIcon, KeyRoundIcon, RefreshCwIcon, ShieldCheckIcon } from 'lucide-react';
-import { toast } from 'sonner';
+import { PinDomainSettingsForm } from '@/components/PinDomainSettingsForm';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
-import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { DEFAULT_SECURITY_SETTINGS } from '../../../shared/contracts';
+import { PinSettingsDomainFactory, type PinSettingsDomain, type PinSettingsDomainAdapter } from '@/lib/pin-settings-adapter';
+import { DEFAULT_SECURITY_SETTINGS, type PinStatus } from '../../../shared/contracts';
 import { AGENT_RISK_LABELS, formatAgentPermissionDisplay, formatAgentPermissionTarget, formatAgentToolType } from '../../../shared/agent-permission-display';
 import type { SecurityCenterModel } from './security-center-model';
 import { ConfirmAction, EmptyState, SecurityFeatureCard, formatDuration } from './security-center-ui';
@@ -80,12 +80,20 @@ function AgentManagementSurface({ busy, children, page, summary, onRefresh }: Ag
   );
 }
 
+function formatPinDomainSummary(adapter: PinSettingsDomainAdapter, status: PinStatus | null): string {
+  if (!status) return `${adapter.label}读取中`;
+  if (!status.enabled) return `${adapter.label}未启用`;
+  return status.locked
+    ? `${adapter.label}已锁定（${status.failureLimit} 次）`
+    : `${adapter.label}已启用（${status.failureLimit} 次）`;
+}
+
 export function SecurityCenterProtectionCards({ model, agentPage = false }: { model: SecurityCenterModel; agentPage?: boolean }) {
-  const { agentStatus, busy, confirmation, disablePin, pinConfirmation, pinFailureLimit, pinStatus, pinValue, reload, run, savePin, saveSecuritySettings, securityDraft, securitySettings, setAgentStatus, setPinConfirmation, setPinFailureLimit, setPinValue, setSecurityDraft, updateSecurityDraft } = model;
+  const { agentStatus, busy, pinStatuses, reload, run, saveSecuritySettings, securityDraft, securitySettings, setAgentStatus, setPinStatusForDomain, setSecurityDraft, updateSecurityDraft } = model;
   const pendingAgentActions = agentStatus?.permissionRequests.length ?? 0;
-  const [agentPin, setAgentPin] = useState('');
-  const [agentPinConfirmation, setAgentPinConfirmation] = useState('');
-  const [agentPinFailureLimit, setAgentPinFailureLimit] = useState(5);
+  const pinAdapters = PinSettingsDomainFactory.all();
+  const [selectedPinDomain, setSelectedPinDomain] = useState<PinSettingsDomain>('desktop');
+  const [pinDialogResetCount, setPinDialogResetCount] = useState(0);
   const [agentIdleTimeoutMs, setAgentIdleTimeoutMs] = useState(15 * 60_000);
   const [agentMaxUnlockDurationMs, setAgentMaxUnlockDurationMs] = useState<number | null>(8 * 60 * 60_000);
   const [agentUnlockScope, setAgentUnlockScope] = useState<'connection' | 'client'>('connection');
@@ -95,6 +103,7 @@ export function SecurityCenterProtectionCards({ model, agentPage = false }: { mo
     setAgentMaxUnlockDurationMs(agentStatus.access.settings.maxUnlockDurationMs);
     setAgentUnlockScope(agentStatus.access.settings.unlockScope);
   }, [agentStatus]);
+  const activePinAdapter = PinSettingsDomainFactory.createFor(selectedPinDomain);
   return <>
         <AgentManagementSurface
           page={agentPage}
@@ -119,48 +128,27 @@ export function SecurityCenterProtectionCards({ model, agentPage = false }: { mo
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <form className="grid gap-3" onSubmit={(event) => {
-                  event.preventDefault();
-                  if (agentPin !== agentPinConfirmation) {
-                    toast.error('两次输入的 Agent PIN 不一致。');
-                    return;
+                <PinDomainSettingsForm
+                  adapter={PinSettingsDomainFactory.createFor('agent')}
+                  status={pinStatuses.agent ?? agentStatus.pin}
+                  busy={busy}
+                  onStatusChange={(next) => setPinStatusForDomain('agent', next)}
+                  onRun={run}
+                  extraActions={
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      type="button"
+                      disabled={busy || agentStatus.access.activeLeaseCount === 0}
+                      onClick={() => void run(async () => {
+                        await window.vaultMesh.agent.lockAllAccess();
+                        setAgentStatus(await window.vaultMesh.agent.status());
+                      }, '所有 MCP 解锁租约和敏感会话均已清除。')}
+                    >
+                      锁定全部 MCP 连接
+                    </Button>
                   }
-                  void run(async () => {
-                    await window.vaultMesh.agent.enablePin({ pin: agentPin, failureLimit: agentPinFailureLimit });
-                    setAgentStatus(await window.vaultMesh.agent.status());
-                    setAgentPin('');
-                    setAgentPinConfirmation('');
-                  }, agentStatus.pin.enabled ? 'Agent PIN 已更新。' : 'Agent PIN 快速解锁已启用。');
-                }}>
-                  <FieldGroup className="grid gap-3 sm:grid-cols-3">
-                    <Field>
-                      <FieldLabel htmlFor="agent-pin">Agent PIN</FieldLabel>
-                      <Input id="agent-pin" type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="new-password" value={agentPin} onChange={(event) => setAgentPin(event.target.value)} placeholder="6 位数字" required />
-                    </Field>
-                    <Field>
-                      <FieldLabel htmlFor="agent-pin-confirmation">确认 PIN</FieldLabel>
-                      <Input id="agent-pin-confirmation" type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="new-password" value={agentPinConfirmation} onChange={(event) => setAgentPinConfirmation(event.target.value)} placeholder="再次输入" required />
-                    </Field>
-                    <Field>
-                      <FieldLabel htmlFor="agent-pin-limit">失败锁定</FieldLabel>
-                      <Select value={String(agentPinFailureLimit)} onValueChange={(value) => setAgentPinFailureLimit(Number(value))}>
-                        <SelectTrigger id="agent-pin-limit"><SelectValue /></SelectTrigger>
-                        <SelectContent><SelectGroup>{[3, 5, 7, 10].map((value) => <SelectItem key={value} value={String(value)}>{value} 次</SelectItem>)}</SelectGroup></SelectContent>
-                      </Select>
-                    </Field>
-                  </FieldGroup>
-                  <div className="flex flex-wrap gap-2">
-                    <Button size="sm" type="submit" disabled={busy}>{agentStatus.pin.enabled ? '更新 Agent PIN' : '启用 Agent PIN'}</Button>
-                    {agentStatus.pin.enabled ? <Button size="sm" variant="outline" type="button" disabled={busy} onClick={() => void run(async () => {
-                      await window.vaultMesh.agent.disablePin();
-                      setAgentStatus(await window.vaultMesh.agent.status());
-                    }, 'Agent PIN 快速解锁已关闭。')}>关闭 Agent PIN</Button> : null}
-                    <Button size="sm" variant="destructive" type="button" disabled={busy || agentStatus.access.activeLeaseCount === 0} onClick={() => void run(async () => {
-                      await window.vaultMesh.agent.lockAllAccess();
-                      setAgentStatus(await window.vaultMesh.agent.status());
-                    }, '所有 MCP 解锁租约和敏感会话均已清除。')}>锁定全部 MCP 连接</Button>
-                  </div>
-                </form>
+                />
               </CardContent>
             </Card>
           ) : null}
@@ -570,51 +558,51 @@ export function SecurityCenterProtectionCards({ model, agentPage = false }: { mo
 
         <SecurityFeatureCard
           icon={KeyRoundIcon}
-          title="桌面端 PIN 解锁"
-          description="PIN 只用于这台设备的桌面端，与浏览器插件的 PIN 完全独立。"
-          summary={pinStatus?.enabled
-            ? pinStatus.locked
-              ? `已锁定 · 达到 ${pinStatus.failureLimit} 次失败上限`
-              : `已启用 · 失败上限 ${pinStatus.failureLimit} 次`
-            : '默认关闭；启用并设置后，锁屏页会优先使用 PIN。'}
-          actionLabel={pinStatus?.enabled ? '管理桌面端 PIN' : '设置桌面端 PIN'}
+          title="PIN 快速解锁"
+          description="为桌面端、浏览器插件与本地 Agent 分别配置独立的 6 位 PIN；任一端输入错误次数达上限只会锁定对应端。"
+          summary={pinAdapters.map((adapter) => formatPinDomainSummary(adapter, pinStatuses[adapter.domain])).join(' · ')}
+          actionLabel="管理三端 PIN"
           fitDialogToContent
+          onOpenChange={(open) => {
+            if (!open) setPinDialogResetCount((count) => count + 1);
+          }}
         >
-          <form className="flex flex-col gap-4" onSubmit={(event) => void savePin(event)}>
-            {pinStatus?.locked ? (
-              <Card size="sm">
-                <CardHeader>
-                  <CardTitle>PIN 已锁定</CardTitle>
-                  <CardDescription>下次使用主密码成功解锁桌面端后，会恢复 PIN 尝试次数。</CardDescription>
-                </CardHeader>
-              </Card>
-            ) : null}
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="desktop-pin">{pinStatus?.enabled ? '新 6 位 PIN' : '6 位 PIN'}</FieldLabel>
-                <Input id="desktop-pin" type="password" inputMode="numeric" value={pinValue} minLength={6} maxLength={6} autoComplete="new-password" onChange={(event) => setPinValue(event.target.value.replace(/\D/g, '').slice(0, 6))} />
-              </Field>
-              <Field data-invalid={pinConfirmation.length > 0 && pinValue !== pinConfirmation}>
-                <FieldLabel htmlFor="desktop-pin-confirmation">确认 6 位 PIN</FieldLabel>
-                <Input id="desktop-pin-confirmation" type="password" inputMode="numeric" value={pinConfirmation} minLength={6} maxLength={6} autoComplete="new-password" aria-invalid={pinConfirmation.length > 0 && pinValue !== pinConfirmation} onChange={(event) => setPinConfirmation(event.target.value.replace(/\D/g, '').slice(0, 6))} />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="desktop-pin-limit">连续失败次数上限</FieldLabel>
-                <Select value={String(pinFailureLimit)} onValueChange={(value) => setPinFailureLimit(Number(value))}>
-                  <SelectTrigger id="desktop-pin-limit"><SelectValue /></SelectTrigger>
-                  <SelectContent><SelectGroup>
-                    {[3, 4, 5, 6, 7, 8, 9, 10].map((value) => <SelectItem key={value} value={String(value)}>{value} 次{value === 5 ? '（默认）' : ''}</SelectItem>)}
-                  </SelectGroup></SelectContent>
-                </Select>
-              </Field>
-              <div className="flex flex-wrap gap-2">
-                <Button type="submit" disabled={busy || pinValue.length !== 6 || pinValue !== pinConfirmation}>
-                  {pinStatus?.enabled ? '更新 PIN' : '启用 PIN 解锁'}
+          <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="选择 PIN 配置端">
+            {pinAdapters.map((adapter) => {
+              const domainStatus = pinStatuses[adapter.domain];
+              const active = selectedPinDomain === adapter.domain;
+              const statusSuffix = domainStatus?.locked ? '（已锁定）' : domainStatus?.enabled ? '（已启用）' : '';
+              return (
+                <Button
+                  key={adapter.domain}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  size="sm"
+                  variant={active ? 'default' : 'outline'}
+                  onClick={() => setSelectedPinDomain(adapter.domain)}
+                >
+                  {adapter.label}{statusSuffix}
                 </Button>
-                {pinStatus?.enabled ? <Button variant="destructive" type="button" disabled={busy} onClick={() => void disablePin()}>关闭桌面端 PIN</Button> : null}
-              </div>
-            </FieldGroup>
-          </form>
+              );
+            })}
+          </div>
+          <Card size="sm">
+            <CardHeader>
+              <CardTitle>{activePinAdapter.title}</CardTitle>
+              <CardDescription>{activePinAdapter.description}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <PinDomainSettingsForm
+                adapter={activePinAdapter}
+                status={pinStatuses[activePinAdapter.domain]}
+                busy={busy}
+                resetKey={pinDialogResetCount}
+                onStatusChange={(next) => setPinStatusForDomain(activePinAdapter.domain, next)}
+                onRun={run}
+              />
+            </CardContent>
+          </Card>
         </SecurityFeatureCard>
         </> : null}
   </>;

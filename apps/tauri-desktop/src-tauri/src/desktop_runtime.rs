@@ -24,22 +24,6 @@ where
     .map_err(|_| "保险库操作未能完成。".to_owned())?
 }
 
-pub(super) async fn with_pin<T, F>(state: &RuntimeState, operation: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce(&PinQuickUnlockService) -> Result<T, String> + Send + 'static,
-{
-    let pin = Arc::clone(&state.pin);
-    tauri::async_runtime::spawn_blocking(move || {
-        let pin = pin
-            .lock()
-            .map_err(|_| "PIN 快速解锁暂时不可用。".to_owned())?;
-        operation(&pin)
-    })
-    .await
-    .map_err(|_| "PIN 快速解锁操作未能完成。".to_owned())?
-}
-
 pub(super) async fn with_biometric<T, F>(state: &RuntimeState, operation: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -369,11 +353,16 @@ pub(super) async fn reconcile_quick_unlock_after_master_unlock(
     state: &RuntimeState,
     vault_path: PathBuf,
 ) -> Result<(), String> {
-    with_pin(state, move |pin| {
-        pin.disable_if_for_different_vault(&vault_path)?;
-        pin.reset_failures(&vault_path)
+    let pin_state = state.clone();
+    let pin_vault_path = vault_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::pin_domain_adapter::reconcile_pins_after_desktop_master_unlock(
+            &pin_state,
+            &pin_vault_path,
+        )
     })
-    .await?;
+    .await
+    .map_err(|_| "PIN 快速解锁状态同步未能完成。".to_owned())??;
     let vault_path = with_runtime(state, |runtime| Ok(runtime.current_path())).await?;
     with_biometric(state, move |biometric| {
         biometric.disable_if_for_different_vault(&vault_path)
@@ -426,7 +415,7 @@ pub(super) async fn restore_vault(
             .map(|status| json!({ "cancelled": false, "status": status }))
     })
     .await?;
-    with_pin(state, |pin| pin.disable()).await?;
+    crate::pin_domain_adapter::disable_all_domain_pins(state).await?;
     disable_biometrics(state).await?;
     Ok(result)
 }
@@ -632,7 +621,7 @@ pub(super) fn lock_runtime_on_window_blur(
 }
 
 pub(super) fn finish_policy_lock(app: &AppHandle, state: &RuntimeState) {
-    desktop_authentication::invalidate(app, state);
+    desktop_authentication::invalidate_window(app, state, "main");
     if let Ok(sync) = state.lan_sync.lock() {
         sync.lock_sensitive();
     }
@@ -665,7 +654,7 @@ pub(super) fn finish_agent_boundary_lock(state: &RuntimeState) {
     state.agent_vault_access.lock_all();
 }
 
-pub(super) fn prune_expired_agent_access(
+pub(crate) fn prune_expired_agent_access(
     state: &RuntimeState,
     now_millis: u64,
 ) -> Result<usize, String> {
