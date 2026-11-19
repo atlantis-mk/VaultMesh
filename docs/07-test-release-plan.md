@@ -43,6 +43,10 @@ pnpm typecheck
 `local:launch` 是明确的 Tauri aliases；浏览器 Host 卸载使用
 `pnpm tauri:macos:browser-host:uninstall`。
 
+- `CT-DESKTOP-AUTH-001` 必须验证桌面通过 PIN 或 Touch ID 解锁后无法启用任一端 PIN。
+- `CT-BROWSER-002` 必须验证锁定使已返回的解锁结果失效，以及锁定态的主密码重验只完成本次填充。
+- `CT-PASSKEY-002` 必须验证扩展将取消及网页期限传递给桌面、取消后的原生确认不写盘、旧版本回退原生，以及扩展备用弹窗提交用户明确选择的账号。
+
 ## 测试 ID 定位
 
 | Test family | 主要实现 |

@@ -69,6 +69,7 @@ pub(crate) struct BrowserUnlockSnapshot {
 #[derive(Default)]
 pub(crate) struct BrowserUnlockQueue {
     requests: Vec<PendingBrowserUnlock>,
+    passkey_waiters: std::collections::HashMap<Uuid, (String, u64)>,
     next_responder_id: u64,
 }
 
@@ -150,6 +151,20 @@ impl BrowserUnlockQueue {
         (unlock_ref, responder_id)
     }
 
+    pub fn track_passkey(&mut self, request_id: Uuid, unlock_ref: String, responder_id: u64) {
+        self.passkey_waiters.insert(request_id, (unlock_ref, responder_id));
+    }
+
+    pub fn finish_passkey(&mut self, request_id: Uuid) {
+        self.passkey_waiters.remove(&request_id);
+    }
+
+    pub fn cancel_passkey(&mut self, request_id: Uuid) -> Option<String> {
+        let (unlock_ref, responder_id) = self.passkey_waiters.remove(&request_id)?;
+        (self.remove_responder(&unlock_ref, responder_id) == RemoveResponderOutcome::EntryRemoved)
+            .then_some(unlock_ref)
+    }
+
     pub fn entry_expires_at(&self, unlock_ref: &str) -> Option<u64> {
         self.requests
             .iter()
@@ -224,6 +239,7 @@ impl BrowserUnlockQueue {
     }
 
     pub fn clear_all(&mut self) {
+        self.passkey_waiters.clear();
         for entry in self.requests.drain(..) {
             for (_, sender) in entry.responders {
                 let _ = sender.send(Err(BrowserPlatformError {
@@ -851,6 +867,7 @@ mod tests {
 
         let (ref1, id1) = queue.enqueue_session_or_merge(
             BrowserSessionUnlockRequest {
+                passkey_request: None,
                 vault_path: PathBuf::from("/tmp/vault.enc"),
                 source: BrowserUnlockSource::Popup,
                 origin: None,
@@ -864,6 +881,7 @@ mod tests {
         );
         let (ref2, id2) = queue.enqueue_session_or_merge(
             BrowserSessionUnlockRequest {
+                passkey_request: None,
                 vault_path: PathBuf::from("/tmp/vault.enc"),
                 source: BrowserUnlockSource::Passkey,
                 origin: Some("https://login.example".to_owned()),

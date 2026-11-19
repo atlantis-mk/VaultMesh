@@ -1,50 +1,9 @@
 import { createContentScriptMessageSender } from "@/lib/content-script-messaging";
 import { PasskeyBrowserFactory } from "@/lib/passkey-browser-adapter";
-import { createPasskeyDialog, type PasskeyPromptView } from "@/lib/passkey-dialog";
+import { createPasskeyDialog, parsePasskeyPrompt } from "@/lib/passkey-dialog";
 import { PASSKEY_CHANNEL } from "@/lib/passkey-shim";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Hand-rolled validation keeps this document_start script free of heavy dependencies.
-function parsePrompt(value: unknown): PasskeyPromptView | null {
-  if (!value || typeof value !== "object") return null;
-  const prompt = value as {
-    token?: unknown;
-    operation?: unknown;
-    origin?: unknown;
-    topOrigin?: unknown;
-    sameOriginWithAncestors?: unknown;
-    stage?: unknown;
-    candidates?: unknown;
-  };
-  if (typeof prompt.token !== "string" || !UUID.test(prompt.token)) return null;
-  if (prompt.operation !== "create" && prompt.operation !== "get") return null;
-  if (prompt.stage !== "choose" && prompt.stage !== "unlock" && prompt.stage !== "no-match") return null;
-  const candidates = Array.isArray(prompt.candidates)
-    ? prompt.candidates.flatMap((entry) => {
-        if (!entry || typeof entry !== "object") return [];
-        const c = entry as { itemId?: unknown; credentialId?: unknown; title?: unknown; account?: unknown };
-        if (typeof c.itemId !== "string" || !UUID.test(c.itemId) || typeof c.credentialId !== "string" || typeof c.title !== "string") {
-          return [];
-        }
-        return [{
-          itemId: c.itemId,
-          credentialId: c.credentialId.slice(0, 4096),
-          title: c.title.slice(0, 256),
-          account: typeof c.account === "string" ? c.account.slice(0, 256) : null,
-        }];
-      })
-    : undefined;
-  return {
-    token: prompt.token,
-    operation: prompt.operation,
-    origin: typeof prompt.origin === "string" ? prompt.origin.slice(0, 256) : null,
-    topOrigin: typeof prompt.topOrigin === "string" ? prompt.topOrigin.slice(0, 256) : null,
-    sameOriginWithAncestors: typeof prompt.sameOriginWithAncestors === "boolean" ? prompt.sameOriginWithAncestors : undefined,
-    stage: prompt.stage,
-    ...(candidates ? { candidates } : {}),
-  };
-}
 
 function parseMessage(data: unknown): { direction: "request" | "abort" | "note"; id: string; reason?: string; operation?: "create" | "get" | "availability"; options?: Record<string, unknown> } | null {
   if (!data || typeof data !== "object") return null;
@@ -95,7 +54,7 @@ export default defineContentScript({
         if (sender.id !== browser.runtime.id || sender.tab !== undefined || !message || typeof message !== "object") return undefined;
         const command = message as { kind?: unknown; prompt?: unknown; token?: unknown };
         if (command.kind === "vaultmesh.passkey-prompt.show") {
-          const prompt = parsePrompt(command.prompt);
+          const prompt = parsePasskeyPrompt(command.prompt);
           if (!prompt) return undefined;
           dialog.show(prompt);
           return Promise.resolve({ status: "shown" as const });

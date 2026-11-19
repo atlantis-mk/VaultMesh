@@ -164,11 +164,12 @@ pub(crate) fn execute_pin_domain_action(
             let setup: PinSetupInput =
                 serde_json::from_value(input).map_err(|_| "请求参数无效。")?;
             let pin_value = Zeroizing::new(setup.pin);
-            let (vault_path, vault_key) = state
+            let mut runtime = state
                 .runtime
                 .lock()
-                .map_err(|_| "保险库运行时暂时不可用。".to_owned())?
-                .quick_unlock_material()
+                .map_err(|_| "保险库运行时暂时不可用。".to_owned())?;
+            let (vault_path, vault_key) = runtime
+                .desktop_pin_setup_material()
                 .map_err(|_| "请先在桌面端使用主密码解锁保险库。".to_owned())?;
             let pin = adapter
                 .service(state)
@@ -469,6 +470,33 @@ mod tests {
                 )
                 .is_err()
             );
+        }
+
+        let (_, quick_key) = {
+            let mut runtime = state.runtime.lock().unwrap();
+            runtime.unlock(password.to_owned()).unwrap();
+            let material = runtime.quick_unlock_material().unwrap();
+            runtime.lock();
+            material
+        };
+        for biometric in [false, true] {
+            let mut runtime = state.runtime.lock().unwrap();
+            if biometric {
+                runtime.unlock_with_biometric_key(vault_path.clone(), quick_key.as_slice()).unwrap();
+            } else {
+                runtime.unlock_with_quick_key(vault_path.clone(), quick_key.as_slice()).unwrap();
+            }
+            drop(runtime);
+            for adapter in PinDomainFactory::all() {
+                let result = execute_pin_domain_action(
+                    &state,
+                    adapter,
+                    PinDomainAction::Enable,
+                    json!({ "pin": "111111", "failureLimit": 5 }),
+                );
+                assert_eq!(result.unwrap_err(), "请先在桌面端使用主密码解锁保险库。");
+            }
+            state.runtime.lock().unwrap().lock();
         }
 
         // Unlock desktop and configure distinct PINs for all 3 domains.

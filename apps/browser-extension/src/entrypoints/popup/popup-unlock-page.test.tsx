@@ -84,7 +84,7 @@ describe("CT-SEC-002/CT-BROWSER-001 streamlined popup unlock page", () => {
     expect(seenBusy).toBe(true);
     expect(unlockButton()).toBeDefined();
     expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith({ kind: "vaultmesh.browser-unlock.request" });
+    expect(sendMessage).toHaveBeenCalledWith({ kind: "vaultmesh.browser-unlock.request", automatic: true });
   });
 
   it("calls onUnlocked when desktop unlock request resolves unlocked", async () => {

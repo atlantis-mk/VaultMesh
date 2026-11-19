@@ -20,7 +20,7 @@ vi.mock("@/lib/desktop-rpc", async (importOriginal) => {
 });
 
 import { getSitePasskeyMode, setSitePasskeyMode } from "@/lib/passkey-preferences";
-import { PopupApp } from "./popup-app";
+import { PasskeyUnlockNotice, PopupApp } from "./popup-app";
 import { SettingsPanel } from "./settings-panel";
 
 const workspace = {
@@ -84,6 +84,38 @@ describe("site Passkey rule migration from PopupApp to SettingsPanel", () => {
       await act(async () => root.unmount());
       container.remove();
       querySpy.mockRestore();
+      sendMessage.mockRestore();
+    }
+  });
+
+  it("sends the account the user picks in the fallback Passkey popup", async () => {
+    const token = crypto.randomUUID();
+    const personal = { itemId: crypto.randomUUID(), credentialId: "personal", title: "Personal", account: "ada@example.test" };
+    const work = { itemId: crypto.randomUUID(), credentialId: "work", title: "Work", account: "work@example.test" };
+    const sendMessage = vi.spyOn(browser.runtime, "sendMessage").mockImplementation(async (message: unknown) => {
+      if ((message as { kind: string }).kind === "vaultmesh.passkey-unlock.get") {
+        return { token, operation: "get", origin: "https://example.test", stage: "choose", candidates: [personal, work] };
+      }
+      return { status: "chosen" };
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => root.render(createElement(PasskeyUnlockNotice)));
+      const accountButtons = container.querySelectorAll<HTMLButtonElement>('[aria-label="选择通行密钥账号"] button');
+      expect(Array.from(accountButtons, (button) => button.textContent)).toEqual([
+        "Personal · ada@example.test",
+        "Work · work@example.test",
+      ]);
+      await act(async () => accountButtons[1]!.click());
+      expect(sendMessage).toHaveBeenCalledWith({
+        kind: "vaultmesh.passkey-choice", token, choice: "vaultmesh", remember: false, itemId: work.itemId,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
       sendMessage.mockRestore();
     }
   });

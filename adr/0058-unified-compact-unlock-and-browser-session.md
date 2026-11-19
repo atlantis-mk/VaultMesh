@@ -39,14 +39,14 @@
 1. 浏览器解锁由单次临时解锁改为会话持久解锁：锁定态下的 `browser.unlock.request`、网页点击 `browser.autofill.execute`、`passkeys.create` / `passkeys.get` 经统一解锁窗验证后，在 `BrowserBrokerCore` 中持久化解锁，直至 `PluginSecurityPolicy`（空闲时长、系统锁定、浏览器重启）、`vault.lock`、撤销或桌面锁定规则触发自动/手动锁定。
 2. 已解锁期间，非支付卡且 `masterPasswordReprompt == false` 的 Login/身份/SSH/Secret 填充零弹窗；支付卡与 `masterPasswordReprompt: true` 条目仍必须通过 `MasterPasswordReprompt` 解锁窗重验主密码，验证后不改写解锁状态，也不得借用 PIN 或 Touch ID。
 3. Passkey 无论解锁前还是已解锁，每次创建与登录仍必须保留一次桌面系统原生确认 `confirm_passkey`；确认必须在 `Mutex<BrowserBrokerCore>` 锁外执行，批准后重新检查撤销、解锁态、磁盘状态与请求有效期再提交；拒绝确认只取消该请求，不修改 Vault，已完成的会话解锁不回滚。
-4. 多个并发浏览器会话解锁请求必须合并到同一展示窗口并延长剩余等待，不得在合并时提前关窗或销毁已有输入；唤醒后必须重检撤销、解锁态与过期。无平台等待者且未解锁时必须 fail closed 返回 `unlock-required`。
+4. 多个并发浏览器会话解锁请求必须合并到同一展示窗口并延长剩余等待，不得在合并时提前关窗或销毁已有输入；唤醒后必须重检撤销、解锁态、过期与解锁发起时的会话代次。主动锁定或系统锁定必须推进该代次。无平台等待者且未解锁时必须 fail closed 返回 `unlock-required`。
 5. 浏览器会话解锁不授予桌面主窗口或 Agent 授权；桌面主窗口与 Agent 解锁同样不授予浏览器。三端授权继续独立。
 6. `vault-ffi` 提供 `unlock_for_browser_with_verified_key`，使统一解锁窗已验证的 Vault Key 在浏览器 runtime 中打开 Vault 而不重复运行 KDF；该 Key 不得经 Browser RPC、日志或扩展 storage 传递。
 
 ### 4. 三端独立 PIN 与桌面统一管理
 
 1. 桌面（`state.pin`）、浏览器（`state.browser_pin`）、Agent（`state.agent_pin`）保持独立存储、独立失败计数与锁定；浏览器解锁窗读取的是 `browser_pin` 而非桌面 PIN；桌面主密码解锁只重置桌面 PIN 失败计数。`TauriBrowserPlatform` 与 `RuntimeState` 共享同一个浏览器 PIN 服务实例，使扩展设置页与桌面端实时同步（实验身份 `into_bitwarden_development` 保持独立隔离）。
-2. 桌面安全中心提供统一的 “PIN 快速解锁” 入口，集中管理三端各自的 6 位 PIN。新增桌面 operation `browser.pin.status` / `browser.pin.enable` / `browser.pin.disable` 与 `agent.pin.status`，与既有 `pin.*`、`agent.pin.enable/disable` 一起委托共享辅助函数；启用任一端 PIN 都要求桌面已用主密码解锁并取得快速解锁材料，关闭要求桌面已解锁。扩展既有 `pin.status/enable/disable` RPC 保持兼容。
+2. 桌面安全中心提供统一的 “PIN 快速解锁” 入口，集中管理三端各自的 6 位 PIN。新增桌面 operation `browser.pin.status` / `browser.pin.enable` / `browser.pin.disable` 与 `agent.pin.status`，与既有 `pin.*`、`agent.pin.enable/disable` 一起委托共享辅助函数；启用任一端 PIN 都要求桌面当前会话由主密码认证并取得快速解锁材料，认证因子必须由 Rust runtime 保存和验证；关闭要求桌面已解锁。扩展既有 `pin.status/enable/disable` RPC 保持兼容。
 3. `vault.create`、`vault.change-password`、`vault.restore` 必须同步关闭三端全部 PIN；主密码解锁后对三端执行 “PIN 属于不同 Vault 则关闭”。Touch ID 继续依据 `ADR-0051` 统一跟随桌面配置，不新增扩展或 Agent 独立生物识别开关。
 
 ### 5. Factory + Adapter 架构约束

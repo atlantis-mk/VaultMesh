@@ -411,6 +411,7 @@ pub fn record_agent_audit(
         let _guard = mutation_lock.lock().map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
         write_vault(&self.path, canonical.as_slice())
             .map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
+        let master_password_verified = matches!(unlock_source, UnlockEventSource::Desktop);
         session
             .record_unlock_event(unlock_source)
             .map_err(map_runtime_core_error)?;
@@ -420,6 +421,7 @@ pub fn record_agent_audit(
         self.relay.invalidate();
         drop(_guard);
         self.replace(session, canonical.as_slice());
+        self.desktop_master_password_verified = master_password_verified;
         Ok(self.status())
     }
 

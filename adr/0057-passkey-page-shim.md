@@ -30,6 +30,12 @@ Chromium `chrome.webAuthenticationProxy` 面向远程桌面设计：attach 后�
 10. 能力查询 `isUserVerifyingPlatformAuthenticatorAvailable` 与 `getClientCapabilities` 只在浏览器自己回答“没有平台认证器”且 VaultMesh 可用（接管开启、权限策略与帧链允许、桌面端已配对可达）时由 shim 补位为可用，浏览器已回答“有”时不得改写，以免网站在发起创建前就判定设备不支持而绕过 VaultMesh。
 11. 用户明确取消属于取消，返回 `NotAllowedError`；改用浏览器/系统、桌面不可用、无匹配回退均属于回退，不得返回错误。
 
+### 跨进程取消与兼容
+
+扩展后台必须为每次桌面 Passkey 操作生成独立 RPC UUID，使用 `passkeys.cancel` 取消该请求，并将网页模态期限收紧到 RPC 的 `expiresAt`。该取消操作必须通过既有配对鉴权，允许锁定态调用，无用户手势或确认要求。桌面须在原生确认前后重验该 UUID 的取消状态、有效期和浏览器会话代次。
+
+桌面通过 `vault.status.passkeyCancellation` 声明支持此协议，扩展通过创建或断言输入的 `cancellable: true` 声明能够取消。混用缺少任一声明的版本时回退浏览器或系统实现。其余 Browser RPC 操作与 `passkeys.probe` 保持兼容。
+
 ## 原因
 
 - 页面级包装是能够实现逐请求回退与条件式 UI 接管的唯一路径，且回退发生在同一次 `navigator.credentials` 调用内，无全局状态与重试窗口副作用。

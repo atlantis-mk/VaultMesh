@@ -1,4 +1,4 @@
-import { backgroundDesktopRpc, DesktopRpcError } from '@/lib/desktop-rpc';
+import { backgroundDesktopRpc, DesktopRpcError, type DesktopRpcTiming } from '@/lib/desktop-rpc';
 import { rememberedLoginSelection } from '@/lib/autofill-preferences';
 import { resolveFrameAncestry, type FrameAncestry, type FrameLike } from '@/lib/frame-origin';
 import {
@@ -17,7 +17,8 @@ import type { PasskeyDefaultMode } from '@/lib/plugin-security-policy';
 
 export { PASSKEY_PROMPT_WAIT_MS };
 
-type BrokerOperation = 'vault.status' | 'passkeys.probe' | 'passkeys.create' | 'passkeys.get';
+type PasskeyRpcOperation = 'passkeys.create' | 'passkeys.get';
+type BrokerOperation = 'vault.status' | 'passkeys.probe' | 'passkeys.cancel' | PasskeyRpcOperation;
 
 export type PasskeyPage = { tabId: number; frameId: number; origin: string; pageUrl?: string };
 export type PasskeyRequest = { id: string; operation: PasskeyOperation; optionsJson: string };
@@ -33,7 +34,7 @@ export type PasskeyChoice = 'vaultmesh' | 'native' | 'cancel';
 export type ConditionalPasskeyCandidate = PasskeyPromptCandidate & { requestId: string };
 
 export type PasskeyBrokerOptions = {
-  rpc?: (operation: BrokerOperation, input?: Record<string, unknown>) => Promise<unknown>;
+  rpc?: (operation: BrokerOperation, input?: Record<string, unknown>, timing?: DesktopRpcTiming) => Promise<unknown>;
   isEnabled: () => boolean;
   isSupported?: () => boolean;
   defaultMode?: (operation: PasskeyOperation) => PasskeyDefaultMode;
@@ -56,6 +57,7 @@ type Active = {
   aborted: boolean;
   promptOpened: boolean;
   cancelPrompt: (() => void) | null;
+  cancelDesktop: (() => void) | null;
 };
 type PendingPrompt = PasskeyPrompt & {
   active: Active;
@@ -68,6 +70,7 @@ type PendingConditional = {
   page: PasskeyPage;
   ancestry: FrameAncestry;
   requestDetailsJson: string;
+  active: Active;
   candidates: PasskeyPromptCandidate[];
   resolving: boolean;
   settle: (outcome: PasskeyOutcome) => void;
@@ -83,7 +86,8 @@ const FALLBACK: PasskeyOutcome = { status: 'fallback' };
  * path that VaultMesh cannot or should not serve resolves to `fallback`, which
  * makes the page call the browser's own authenticator in the same call. */
 export function createPasskeyBroker(options: PasskeyBrokerOptions) {
-  const rpc = options.rpc ?? backgroundDesktopRpc;
+  const rpc: NonNullable<PasskeyBrokerOptions['rpc']> = options.rpc ?? ((operation, input, timing) =>
+    backgroundDesktopRpc(operation, input, undefined, timing));
   const unlockPollMs = options.unlockPollMs ?? 1_000;
   const openPrompt = options.openPrompt ?? (async () => undefined);
   const isSupported = options.isSupported ?? (() => true);
@@ -105,7 +109,8 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
   const conditionalKey = (tabId: number, frameId: number) => `${tabId}:${frameId}`;
 
   async function handle(request: PasskeyRequest, page: PasskeyPage): Promise<PasskeyOutcome> {
-    const active: Active = { key: `${page.tabId}:${page.frameId}:${request.id}`, page, aborted: false, promptOpened: false, cancelPrompt: null };
+    const active: Active = { key: `${page.tabId}:${page.frameId}:${request.id}`, page, aborted: false, promptOpened: false, cancelPrompt: null, cancelDesktop: null };
+    if (actives.has(active.key)) return cancelled(page, request.operation, 'duplicate-request', '通行密钥请求已在处理。');
     actives.set(active.key, active);
     try {
       const outcome = await run(request, page, active);
@@ -119,6 +124,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
   }
 
   async function run(request: PasskeyRequest, page: PasskeyPage, active: Active): Promise<PasskeyOutcome> {
+    const startedAt = Date.now();
     const op = request.operation;
     if (!isSupported()) return fallback(page, op, 'firefox-unsupported');
     if (!options.isEnabled()) return fallback(page, op, 'takeover-disabled');
@@ -138,7 +144,8 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
 
     // Anything but a healthy, paired desktop leaves the browser in charge.
     try {
-      await rpc('vault.status');
+      const status = await rpc('vault.status') as { passkeyCancellation?: unknown };
+      if (status.passkeyCancellation !== true) return fallback(page, op, 'desktop-update-required');
     } catch (error) {
       return fallback(page, op, error instanceof DesktopRpcError ? `desktop-${error.code}` : 'desktop-unreachable');
     }
@@ -160,7 +167,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     const requestWaitMs = typeof rawOptions.timeout === 'number' && Number.isSafeInteger(rawOptions.timeout) && rawOptions.timeout > 0
       ? Math.min(Math.max(rawOptions.timeout, 1_000), PASSKEY_PROMPT_WAIT_MS)
       : PASSKEY_PROMPT_WAIT_MS;
-    const deadlineAt = Date.now() + requestWaitMs;
+    const deadlineAt = startedAt + requestWaitMs;
 
     let probe: ParsedProbe = { status: 'unknown', candidates: [] };
     if (op === 'get') {
@@ -204,9 +211,8 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
       if (choice.result !== 'vaultmesh') return cancelled(page, op, 'user-cancelled-choice', '已取消通行密钥请求。');
       log(`[VaultMesh Passkey] ${op} ${ancestry.origin} -> VaultMesh (chose-vaultmesh)`);
       if (choice.remember) await rememberPasskeyChoice(op, ancestry, 'vaultmesh').catch(() => undefined);
-      if (op === 'get' && probe.candidates.length > 0) {
-        selectedCandidate = (choice.itemId ? probe.candidates.find((candidate) => candidate.itemId === choice.itemId) : undefined)
-          ?? probe.candidates[0];
+      if (op === 'get' && choice.itemId) {
+        selectedCandidate = probe.candidates.find((candidate) => candidate.itemId === choice.itemId);
       }
     } else if (preference.reason) {
       log(`[VaultMesh Passkey] ${op} ${ancestry.origin} -> VaultMesh (${preference.reason})`);
@@ -236,6 +242,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     const previous = conditionals.get(frameKey);
     if (previous) {
       conditionals.delete(frameKey);
+      previous.active.cancelDesktop?.();
       previous.settle({ status: 'cancelled', message: '已被新的条件式通行密钥请求替代。' });
     }
     return new Promise((resolve) => {
@@ -252,6 +259,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
         page,
         ancestry,
         requestDetailsJson,
+        active,
         candidates,
         resolving: false,
         settle,
@@ -262,8 +270,33 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     });
   }
 
+  async function requestDesktopPasskey(
+    operation: PasskeyRpcOperation,
+    input: Record<string, unknown>,
+    active: Active,
+    deadlineAt?: number,
+  ): Promise<{ responseJson?: unknown }> {
+    if (active.aborted) throw new DesktopRpcError('cancelled', '通行密钥请求已取消。');
+    if (deadlineAt !== undefined && deadlineAt <= Date.now()) {
+      throw new DesktopRpcError('request-expired', 'VaultMesh 通行密钥请求已超时。');
+    }
+    const requestId = crypto.randomUUID();
+    const cancellation = new Promise<never>((_, reject) => {
+      active.cancelDesktop = () => {
+        active.cancelDesktop = null;
+        void rpc('passkeys.cancel', { requestId }).catch(() => undefined);
+        reject(new DesktopRpcError('cancelled', '通行密钥请求已取消。'));
+      };
+    });
+    try {
+      return await Promise.race([rpc(operation, { ...input, cancellable: true }, { requestId, deadlineAt }), cancellation]) as { responseJson?: unknown };
+    } finally {
+      active.cancelDesktop = null;
+    }
+  }
+
   async function invoke(
-    operation: 'passkeys.create' | 'passkeys.get',
+    operation: PasskeyRpcOperation,
     input: Record<string, unknown>,
     active: Active,
     page: PasskeyPage,
@@ -274,7 +307,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     const origin = ancestry.origin;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const response = await rpc(operation, input) as { responseJson?: unknown };
+        const response = await requestDesktopPasskey(operation, input, active, deadlineAt);
         if (active.aborted) return cancelled(page, promptOperation, 'page-aborted-or-navigated', '通行密钥请求已取消。');
         if (typeof response.responseJson !== 'string' || response.responseJson.length > MAX_PASSKEY_RESPONSE_CHARS) {
           throw new Error('Invalid Passkey response');
@@ -298,6 +331,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
   function fallbackOrError(error: unknown, operation: PasskeyOperation, page: PasskeyPage): PasskeyOutcome {
     if (error instanceof DesktopRpcError) {
       if (['passkey-unavailable', 'unpaired', 'desktop-unavailable', 'unlock-required'].includes(error.code)) return fallback(page, operation, `desktop-${error.code}`);
+      if (error.code === 'request-expired') return cancelled(page, operation, 'request-timed-out', 'VaultMesh 通行密钥请求已超时。');
       if (error.code === 'cancelled') return cancelled(page, operation, 'desktop-confirmation-declined', '已取消 VaultMesh 通行密钥请求。');
     }
     const failure = domException(error);
@@ -395,8 +429,8 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     const frames = await options.frames(page.tabId).catch(() => null);
     if (!frames || !resolveFrameAncestry(frames, page.frameId, page.origin)) return false;
     try {
-      await rpc('vault.status');
-      return true;
+      const status = await rpc('vault.status') as { passkeyCancellation?: unknown };
+      return status.passkeyCancellation === true;
     } catch (error) {
       log(`[VaultMesh Passkey] availability ${page.origin} -> unavailable (${error instanceof DesktopRpcError ? `desktop-${error.code}` : 'desktop-unreachable'})`);
       return false;
@@ -421,6 +455,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     }
     if (action.action === 'native') {
       conditionals.delete(frameKey);
+      pending.active.cancelDesktop?.();
       log(`[VaultMesh Passkey] get ${pending.ancestry.origin} -> browser (user-chose-browser)`);
       pending.settle(FALLBACK);
       return { status: 'fallback' };
@@ -436,11 +471,11 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     }
     pending.resolving = true;
     try {
-      const response = await rpc('passkeys.get', {
+      const response = await requestDesktopPasskey('passkeys.get', {
         requestDetailsJson: pending.requestDetailsJson,
         itemId: candidate.itemId,
         credentialId: candidate.credentialId,
-      }) as { responseJson?: unknown };
+      }, pending.active);
       if (conditionals.get(frameKey) !== pending) {
         return { status: 'cancelled', message: '通行密钥请求已取消。' };
       }
@@ -456,7 +491,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
         return { status: 'cancelled', message: '通行密钥请求已取消。' };
       }
       if (error instanceof DesktopRpcError) {
-        if (error.code === 'cancelled') {
+        if (error.code === 'cancelled' || error.code === 'request-expired') {
           log(`[VaultMesh Passkey] get ${pending.ancestry.origin} -> pending (conditional-confirmation-declined)`);
           return { status: 'cancelled', message: error.message };
         }
@@ -491,42 +526,31 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     }
   }
 
+  function cancelActive(active: Active) {
+    active.aborted = true;
+    active.cancelDesktop?.();
+    active.cancelPrompt?.();
+  }
+
   function abort(page: PasskeyPage, id: string) {
     const active = actives.get(`${page.tabId}:${page.frameId}:${id}`);
-    if (active) {
-      active.aborted = true;
-      active.cancelPrompt?.();
-    }
-    const frameKey = conditionalKey(page.tabId, page.frameId);
-    const pending = conditionals.get(frameKey);
-    if (pending && pending.id === id) {
-      conditionals.delete(frameKey);
-      pending.settle(cancelled(page, 'get', 'page-aborted-or-navigated', '通行密钥请求已取消。'));
-    }
+    if (active?.page.origin === page.origin) cancelActive(active);
   }
 
   /** Navigation, reload or tab close ends every request owned by that document. */
   function cancelPage(tabId: number, frameId?: number) {
     for (const active of actives.values()) {
       if (active.page.tabId !== tabId || (frameId !== undefined && active.page.frameId !== frameId)) continue;
-      active.aborted = true;
-      active.cancelPrompt?.();
-    }
-    for (const [frameKey, pending] of [...conditionals.entries()]) {
-      if (pending.page.tabId !== tabId || (frameId !== undefined && pending.page.frameId !== frameId)) continue;
-      conditionals.delete(frameKey);
-      pending.settle(cancelled(pending.page, 'get', 'page-aborted-or-navigated', '通行密钥请求已取消。'));
+      cancelActive(active);
     }
   }
 
-  /** Cancels conditional requests only when history navigation changes route (`origin + pathname`) for that tab+frame. */
+  /** History navigation retains the document, but a different route ends its pending requests. */
   function cancelHistoryNavigation(tabId: number, frameId: number, nextUrl: string) {
-    const frameKey = conditionalKey(tabId, frameId);
-    const pending = conditionals.get(frameKey);
-    if (!pending) return;
-    if (!shouldCancelForHistoryUrl(pending.page.pageUrl, pending.ancestry.origin, nextUrl)) return;
-    conditionals.delete(frameKey);
-    pending.settle(cancelled(pending.page, 'get', 'page-aborted-or-navigated', '通行密钥请求已取消。'));
+    for (const active of actives.values()) {
+      if (active.page.tabId !== tabId || active.page.frameId !== frameId) continue;
+      if (shouldCancelForHistoryUrl(active.page.pageUrl, active.page.origin, nextUrl)) cancelActive(active);
+    }
   }
 
   function currentPrompt(): PasskeyPrompt | null {
@@ -551,6 +575,9 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     if (fromTabId !== undefined && pending.active.page.tabId !== fromTabId) return false;
     if (pending.stage === 'unlock' && choice === 'vaultmesh') return false;
     if (pending.stage === 'no-match' && choice === 'vaultmesh') return false;
+    const candidates = pending.candidates ?? [];
+    if (choice === 'vaultmesh' && (itemId !== undefined || candidates.length > 1)
+        && !candidates.some((candidate) => candidate.itemId === itemId)) return false;
     const canRemember =
       pending.stage === 'no-match'
       || (pending.stage === 'choose' && !(pending.operation === 'create' && pending.sameOriginWithAncestors === false));

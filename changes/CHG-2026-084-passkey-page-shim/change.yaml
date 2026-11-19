@@ -26,7 +26,7 @@ related_changes:
   - "CHG-2026-083-passkey-intercept-fallback"
 boundaries:
   - "浏览器信任模型：移除 webAuthenticationProxy 权限，新增 MAIN world content script、隔离世界 PermissionsPolicy 门禁与可信帧树校验"
-  - "Browser RPC 不新增操作；origin、sameOriginWithAncestors 与 topOrigin 只能由 background 依据 sender 与 resolveFrameAncestry 帧树写入"
+  - "Browser RPC 新增受既有配对鉴权的 passkeys.cancel；origin、sameOriginWithAncestors 与 topOrigin 只能由 background 依据 sender 与 resolveFrameAncestry 帧树写入"
   - "协议校验、clientDataJSON（含 topOrigin）与 ES256 签名归属 crates/vault-core 与 crates/vault-ffi；扩展本地策略与站点模式保留在 browser-extension"
   - "Firefox 范围不变，FirefoxPasskeyAdapter 保持 disabled 且不注入 Passkey shim"
 risks:

@@ -302,6 +302,7 @@ fn is_broker_operation(operation: &str) -> bool {
             | "passkeys.create"
             | "passkeys.probe"
             | "passkeys.get"
+            | "passkeys.cancel"
     )
 }
 

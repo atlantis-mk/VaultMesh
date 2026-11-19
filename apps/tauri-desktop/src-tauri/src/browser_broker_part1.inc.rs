@@ -87,6 +87,7 @@ pub const TAURI_BROWSER_SLICE_OPERATIONS: &[&str] = &[
     "passkeys.create",
     "passkeys.probe",
     "passkeys.get",
+    "passkeys.cancel",
     "confirmation.request",
     "items.list",
     "items.detail",
@@ -174,6 +175,7 @@ fn requires_unlock(operation: &str) -> bool {
         "vault.status"
             | "vault.create"
             | "vault.unlock"
+            | "vault.lock"
             | "vault.unlock-history"
             | "biometric.status"
             | "biometric.unlock"
@@ -190,6 +192,7 @@ fn requires_unlock(operation: &str) -> bool {
             | "passkeys.create"
             | "passkeys.probe"
             | "passkeys.get"
+            | "passkeys.cancel"
             | "confirmation.request"
     )
 }
@@ -220,6 +223,7 @@ fn requires_gesture(operation: &str) -> bool {
             | "passkeys.create"
             | "passkeys.probe"
             | "passkeys.get"
+            | "passkeys.cancel"
             | "items.list"
             | "items.trash.list"
             | "items.history.list"
@@ -308,6 +312,7 @@ pub struct BrowserUnlockResolution {
 }
 
 pub struct BrowserSessionUnlockRequest {
+    pub passkey_request: Option<(Uuid, i64)>,
     pub vault_path: PathBuf,
     pub source: BrowserUnlockSource,
     pub origin: Option<String>,
@@ -378,7 +383,16 @@ pub struct PasskeyConfirmationRequest {
 
 pub struct DeferredBrokerExecution {
     pub(crate) envelope_request_id: String,
+    validity: DeferredBrowserRequest,
     work: DeferredBrokerWork,
+}
+
+#[derive(Clone, Copy)]
+struct DeferredBrowserRequest {
+    id: Uuid,
+    generation: u64,
+    expires_at_millis: i64,
+    passkey: bool,
 }
 
 enum DeferredBrokerWork {
@@ -430,80 +444,77 @@ pub enum BrokerLineOutcome {
 
 impl DeferredBrokerExecution {
     pub fn wait_and_finish(self, broker: &Arc<Mutex<BrowserBrokerCore>>) -> Value {
-        let envelope_request_id = self.envelope_request_id;
+        let request_id = self.envelope_request_id.as_str();
+        let validity = self.validity;
+
         match self.work {
             DeferredBrokerWork::BrowserSessionUnlock { waiter } => {
                 let resolution = waiter.wait();
-                let Ok(mut guard) = broker.lock() else {
-                    return host_status("desktop-unavailable", Some(&envelope_request_id));
-                };
-                guard.finish_browser_session_unlock(
-                    &envelope_request_id,
-                    resolution,
-                    Utc::now().timestamp_millis(),
-                )
+                Self::with_valid_broker(broker, request_id, validity, |guard, now| {
+                    guard.finish_browser_session_unlock(request_id, resolution, now)
+                })
             }
             DeferredBrokerWork::AutofillSessionUnlock { input, waiter } => {
                 let resolution = waiter.wait();
-                let Ok(mut guard) = broker.lock() else {
-                    return host_status("desktop-unavailable", Some(&envelope_request_id));
-                };
-                guard.finish_autofill_session_unlock(
-                    &envelope_request_id,
-                    &input,
-                    resolution,
-                    Utc::now().timestamp_millis(),
-                )
+                Self::with_valid_broker(broker, request_id, validity, |guard, now| {
+                    guard.finish_autofill_session_unlock(request_id, &input, resolution, now)
+                })
             }
             DeferredBrokerWork::AutofillReprompt { input, waiter } => {
                 let password = waiter.wait();
-                let Ok(mut guard) = broker.lock() else {
-                    return host_status("desktop-unavailable", Some(&envelope_request_id));
-                };
-                guard.finish_autofill_reprompt(
-                    &envelope_request_id,
-                    &input,
-                    password,
-                    Utc::now().timestamp_millis(),
-                )
+                Self::with_valid_broker(broker, request_id, validity, |guard, now| {
+                    guard.finish_autofill_reprompt(request_id, &input, password, now)
+                })
             }
             DeferredBrokerWork::Passkey(mut work) => {
                 if let Some(waiter) = work.unlock_waiter.take() {
                     let resolution = waiter.wait();
-                    let Ok(mut guard) = broker.lock() else {
-                        return host_status("desktop-unavailable", Some(&envelope_request_id));
-                    };
-                    if let Err(response) = guard.commit_browser_passkey_unlock(
-                        &envelope_request_id,
-                        &mut work,
-                        resolution,
-                        Utc::now().timestamp_millis(),
-                    ) {
-                        return response;
+                    let result = Self::with_valid_broker(broker, request_id, validity, |guard, now| {
+                        guard.commit_browser_passkey_unlock(request_id, &mut work, resolution, now)
+                            .err().unwrap_or(Value::Null)
+                    });
+                    if !result.is_null() {
+                        return result;
                     }
                 }
+                let valid = Self::with_valid_broker(broker, request_id, validity, |_, _| Value::Null);
+                if !valid.is_null() {
+                    return valid;
+                }
                 let prepared = match confirm_passkey_outside_lock(
-                    &envelope_request_id,
+                    request_id,
                     work,
                     || Utc::now().timestamp_millis(),
                 ) {
                     Ok(prepared) => prepared,
                     Err(response) => return response,
                 };
-                let Ok(mut guard) = broker.lock() else {
-                    return host_status("desktop-unavailable", Some(&envelope_request_id));
-                };
-                guard.finish_passkey(
-                    &envelope_request_id,
-                    prepared,
-                    Utc::now().timestamp_millis(),
-                )
+                Self::with_valid_broker(broker, request_id, validity, |guard, now| {
+                    guard.finish_passkey(request_id, prepared, now)
+                })
             }
         }
     }
 
+    fn with_valid_broker(
+        broker: &Arc<Mutex<BrowserBrokerCore>>,
+        request_id: &str,
+        validity: DeferredBrowserRequest,
+        finish: impl FnOnce(&mut BrowserBrokerCore, i64) -> Value,
+    ) -> Value {
+        let Ok(mut guard) = broker.lock() else {
+            return host_status("desktop-unavailable", Some(request_id));
+        };
+        let now = Utc::now().timestamp_millis();
+        guard.validate_deferred(request_id, validity, now)
+            .unwrap_or_else(|| finish(&mut guard, now))
+    }
+
     fn finish_sync_at(self, broker: &mut BrowserBrokerCore, now_millis: i64) -> Value {
         let envelope_request_id = self.envelope_request_id;
+        if let Some(failure) = broker.validate_deferred(&envelope_request_id, self.validity, now_millis) {
+            return failure;
+        }
         match self.work {
             DeferredBrokerWork::BrowserSessionUnlock { waiter } => {
                 let resolution = waiter.wait();
@@ -604,6 +615,8 @@ pub trait BrowserBrokerPlatform: Send + Sync {
         None
     }
 
+    fn cancel_passkey_unlock(&self, _request_id: Uuid) {}
+
     fn cancel_authentication(&self) {}
     fn preauth_preview_store(
         &self,
@@ -674,6 +687,8 @@ pub struct BrowserBrokerCore {
     runtime: DesktopRuntime,
     pairing_secret: Zeroizing<[u8; 32]>,
     seen_request_ids: HashMap<Uuid, i64>,
+    cancelled_passkey_requests: HashMap<Uuid, i64>,
+    access_generation: u64,
     events: Vec<BrowserEvent>,
     event_sequence: u64,
     sync_merge_generation: u64,
@@ -687,11 +702,43 @@ pub struct BrowserBrokerCore {
 
 impl BrowserBrokerCore {
     pub(crate) fn lock_for_system(&mut self) {
-        self.runtime.lock();
+        self.lock_browser_session(Utc::now().timestamp_millis());
+    }
+
+    fn lock_browser_session(&mut self, now_millis: i64) -> Value {
+        let status = self.runtime.lock();
+        self.invalidate_deferred();
+        self.record_event("vault-locked", now_millis);
+        json!(status)
+    }
+
+    fn invalidate_deferred(&mut self) {
+        self.access_generation = self.access_generation.wrapping_add(1);
         self.platform.clear();
         self.confirmations.clear();
         self.fill.clear();
-        self.record_event("vault-locked", Utc::now().timestamp_millis());
+    }
+
+    fn validate_deferred(
+        &self,
+        envelope_request_id: &str,
+        request: DeferredBrowserRequest,
+        now_millis: i64,
+    ) -> Option<Value> {
+        if self.revoked {
+            return Some(host_status("unpaired", None));
+        }
+        if request.expires_at_millis <= now_millis {
+            return Some(rpc_failure(
+                envelope_request_id, "request-expired", "插件请求已过期，请重试。",
+            ));
+        }
+        if request.generation != self.access_generation
+            || request.passkey && self.cancelled_passkey_requests.contains_key(&request.id)
+        {
+            return Some(rpc_failure(envelope_request_id, "cancelled", "操作已取消。"));
+        }
+        None
     }
     pub fn new(
         vault_path: PathBuf,
@@ -716,6 +763,8 @@ impl BrowserBrokerCore {
             runtime: DesktopRuntime::new(vault_path)?,
             pairing_secret,
             seen_request_ids: HashMap::new(),
+            cancelled_passkey_requests: HashMap::new(),
+            access_generation: 0,
             events: Vec::new(),
             event_sequence: 0,
             sync_merge_generation: 0,
@@ -931,6 +980,33 @@ impl BrowserBrokerCore {
                 "该插件操作不被允许。",
             ));
         }
+        self.cancelled_passkey_requests.retain(|_, expires| *expires > now_millis);
+        if request.operation == "passkeys.cancel" {
+            let Ok(Some(target)) = parse_optional_uuid(&request.input, "requestId") else {
+                return BrokerLineOutcome::Immediate(rpc_failure(
+                    envelope_request_id, "invalid-request", "通行密钥请求编号无效。",
+                ));
+            };
+            // Keep cancellations that race ahead of the original request until
+            // even the latest valid envelope for that request would expire.
+            self.cancelled_passkey_requests.insert(
+                target,
+                now_millis.saturating_add(MAX_LIFETIME_MILLIS + MAX_CLOCK_SKEW_MILLIS),
+            );
+            self.platform.cancel_passkey_unlock(target);
+            return BrokerLineOutcome::Immediate(rpc_success(envelope_request_id, json!({})));
+        }
+        let validity = DeferredBrowserRequest {
+            id: request_id,
+            generation: self.access_generation,
+            expires_at_millis: expires_at,
+            passkey: matches!(request.operation.as_str(), "passkeys.create" | "passkeys.get"),
+        };
+        if validity.passkey
+            && let Some(failure) = self.validate_deferred(envelope_request_id, validity, now_millis)
+        {
+            return BrokerLineOutcome::Immediate(failure);
+        }
         if self.runtime.is_unlocked()
             && let Err(error) = self.runtime.refresh_from_disk()
         {
@@ -992,6 +1068,7 @@ impl BrowserBrokerCore {
                 self.platform
                     .begin_browser_session_unlock(BrowserSessionUnlockRequest {
                         vault_path: self.runtime.current_path(),
+                        passkey_request: None,
                         source: BrowserUnlockSource::Popup,
                         origin: None,
                         item_title: None,
@@ -1001,6 +1078,7 @@ impl BrowserBrokerCore {
             {
                 return BrokerLineOutcome::Deferred(DeferredBrokerExecution {
                     envelope_request_id: envelope_request_id.to_owned(),
+                    validity,
                     work: DeferredBrokerWork::BrowserSessionUnlock { waiter },
                 });
             }
@@ -1019,20 +1097,22 @@ impl BrowserBrokerCore {
                 now_millis,
             ) {
                 Ok(Some(prepared)) => {
-                    if prepared.requires_session_unlock {
+                    if prepared.requires_session_unlock && !prepared.master_password_reprompt {
                         if let Some(waiter) =
                             self.platform
                                 .begin_browser_session_unlock(BrowserSessionUnlockRequest {
                                     vault_path: self.runtime.current_path(),
+                                    passkey_request: None,
                                     source: BrowserUnlockSource::Autofill,
                                     origin: Some(prepared.origin),
                                     item_title: Some(prepared.item_title),
                                     item_kind: Some(prepared.item_kind),
-                                    master_password_reprompt: prepared.master_password_reprompt,
+                                    master_password_reprompt: false,
                                 })
                         {
                             return BrokerLineOutcome::Deferred(DeferredBrokerExecution {
                                 envelope_request_id: envelope_request_id.to_owned(),
+                                validity,
                                 work: DeferredBrokerWork::AutofillSessionUnlock {
                                     input: request.input,
                                     waiter,
@@ -1056,6 +1136,7 @@ impl BrowserBrokerCore {
                     {
                         return BrokerLineOutcome::Deferred(DeferredBrokerExecution {
                             envelope_request_id: envelope_request_id.to_owned(),
+                            validity,
                             work: DeferredBrokerWork::AutofillReprompt {
                                 input: request.input,
                                 waiter,
@@ -1089,12 +1170,19 @@ impl BrowserBrokerCore {
             }
         }
 
-        if matches!(request.operation.as_str(), "passkeys.create" | "passkeys.get") {
+        if validity.passkey {
+            if request.input.get("cancellable").and_then(Value::as_bool) != Some(true) {
+                return BrokerLineOutcome::Immediate(rpc_failure(
+                    envelope_request_id,
+                    "passkey-unavailable",
+                    "请更新浏览器插件以支持可取消的 VaultMesh 通行密钥请求。",
+                ));
+            }
             return self.prepare_passkey_broker_outcome(
                 envelope_request_id,
                 &request.operation,
                 &request.input,
-                expires_at,
+                validity,
             );
         }
 
@@ -1113,7 +1201,11 @@ impl BrowserBrokerCore {
     ) -> Value {
 
         match request.operation.as_str() {
-            "vault.status" => rpc_success(envelope_request_id, json!(self.runtime.status())),
+            "vault.status" => {
+                let mut status = json!(self.runtime.status());
+                status["passkeyCancellation"] = json!(true);
+                rpc_success(envelope_request_id, status)
+            }
             "vault.workspace" => {
                 let result = self.workspace_snapshot();
                 match result {
@@ -1136,6 +1228,7 @@ impl BrowserBrokerCore {
                 };
                 match self.runtime.create_for_browser(password.to_owned()) {
                     Ok(status) => {
+                        self.invalidate_deferred();
                         if let Err(error) = self.platform.after_master_unlock(&mut self.runtime) {
                             self.runtime.lock();
                             return rpc_failure(envelope_request_id, error.code, &error.message);
@@ -1180,13 +1273,7 @@ impl BrowserBrokerCore {
                 }
             }
             "vault.unlock-history" => rpc_success(envelope_request_id, self.unlock_history.clone()),
-            "vault.lock" => {
-                let status = self.runtime.lock();
-                self.platform.clear();
-                self.fill.clear();
-                self.record_event("vault-locked", now_millis);
-                rpc_success(envelope_request_id, json!(status))
-            }
+            "vault.lock" => rpc_success(envelope_request_id, self.lock_browser_session(now_millis)),
             "events.poll" => {
                 let after = request
                     .input
@@ -1387,6 +1474,9 @@ impl BrowserBrokerCore {
                 {
                     Ok(result) => {
                         if is_runtime_mutation(operation) {
+                            if operation == "vault.change-password" {
+                                self.invalidate_deferred();
+                            }
                             if let Err(error) = self.platform.after_runtime_mutation(operation) {
                                 return rpc_failure(
                                     envelope_request_id,
@@ -1417,6 +1507,7 @@ impl BrowserBrokerCore {
                         || (operation == "biometric.authentication.poll"
                             && result.get("phase").and_then(Value::as_str) == Some("unlocked"));
                     if is_master_unlock {
+                        self.invalidate_deferred();
                         if let Err(error) = self.platform.after_master_unlock(&mut self.runtime) {
                             self.runtime.lock();
                             return rpc_failure(envelope_request_id, error.code, &error.message);
@@ -1465,8 +1556,9 @@ impl BrowserBrokerCore {
         envelope_request_id: &str,
         operation: &str,
         input: &Map<String, Value>,
-        expires_at_millis: i64,
+        validity: DeferredBrowserRequest,
     ) -> BrokerLineOutcome {
+        let expires_at_millis = validity.expires_at_millis;
         let Some(request_json) = input
             .get("requestDetailsJson")
             .and_then(Value::as_str)
@@ -1580,7 +1672,7 @@ impl BrowserBrokerCore {
                         ));
                     }
                 };
-                let Some(selected) = candidates.into_iter().find(|candidate| {
+                let Some(selected) = select_passkey_candidate(candidates, |candidate| {
                     requested_item_id.is_none_or(|id| candidate.item_id == id)
                         && requested_credential_id
                             .as_deref()
@@ -1600,6 +1692,7 @@ impl BrowserBrokerCore {
 
             return BrokerLineOutcome::Deferred(DeferredBrokerExecution {
                 envelope_request_id: envelope_request_id.to_owned(),
+                validity,
                 work: DeferredBrokerWork::Passkey(DeferredPasskeyWork {
                     kind,
                     request_json: request_json.to_owned(),
@@ -1647,6 +1740,7 @@ impl BrowserBrokerCore {
         let Some(waiter) = self.platform.begin_browser_session_unlock(
             BrowserSessionUnlockRequest {
                 vault_path,
+                passkey_request: Some((validity.id, validity.expires_at_millis)),
                 source: BrowserUnlockSource::Passkey,
                 origin: Some(origin.clone()),
                 item_title: Some(effective_title),
@@ -1663,6 +1757,7 @@ impl BrowserBrokerCore {
 
         BrokerLineOutcome::Deferred(DeferredBrokerExecution {
             envelope_request_id: envelope_request_id.to_owned(),
+            validity,
             work: DeferredBrokerWork::Passkey(DeferredPasskeyWork {
                 kind,
                 request_json: request_json.to_owned(),
@@ -1741,6 +1836,9 @@ impl BrowserBrokerCore {
         if let Err(error) = unlock_result {
             return Err(runtime_failure(envelope_request_id, error));
         }
+        if !self.runtime.is_unlocked() {
+            return Err(rpc_failure(envelope_request_id, "unlock-required", "保险库已锁定。"));
+        }
         let hook_result = match resolution.factor {
             BrowserUnlockFactor::MasterPassword => self.platform.after_master_unlock(&mut self.runtime),
             BrowserUnlockFactor::Pin | BrowserUnlockFactor::Biometric => {
@@ -1786,7 +1884,7 @@ impl BrowserBrokerCore {
                 .runtime
                 .matching_passkeys(&work.request_json)
                 .map_err(|error| passkey_runtime_failure(envelope_request_id, error, &work.rp_id))?;
-            let Some(selected) = candidates.into_iter().find(|candidate| {
+            let Some(selected) = select_passkey_candidate(candidates, |candidate| {
                 work.requested_item_id.is_none_or(|id| candidate.item_id == id)
                     && work
                         .requested_credential_id
@@ -1898,7 +1996,8 @@ impl BrowserBrokerCore {
     }
 
     fn execute_autofill_with_optional_password(
-        &mut self,
+        fill: &mut BrowserFillService,
+        runtime: &mut DesktopRuntime,
         envelope_request_id: &str,
         input: &Map<String, Value>,
         password: Option<Zeroizing<String>>,
@@ -1913,9 +2012,7 @@ impl BrowserBrokerCore {
                 Value::String(password.as_str().to_owned()),
             );
         }
-        let result = self
-            .fill
-            .execute(&mut self.runtime, &effective_input, now_millis);
+        let result = fill.execute(runtime, &effective_input, now_millis);
         if let Some(Value::String(mut removed)) = effective_input.remove("masterPassword") {
             removed.zeroize();
         }
@@ -1944,7 +2041,9 @@ impl BrowserBrokerCore {
         {
             return response;
         }
-        self.execute_autofill_with_optional_password(
+        Self::execute_autofill_with_optional_password(
+            &mut self.fill,
+            &mut self.runtime,
             envelope_request_id,
             input,
             resolution.master_password.take(),
@@ -1962,22 +2061,24 @@ impl BrowserBrokerCore {
         if self.revoked {
             return host_status("unpaired", None);
         }
-        if !self.runtime.is_unlocked() {
-            return rpc_failure(
-                envelope_request_id,
-                "unlock-required",
-                "请先在 VaultMesh 插件中单独解锁。",
-            );
-        }
         let password = match password {
             Ok(password) => password,
             Err(error) => return rpc_failure(envelope_request_id, error.code, &error.message),
         };
-        self.execute_autofill_with_optional_password(
-            envelope_request_id,
-            input,
-            Some(password),
-            now_millis,
+        if self.runtime.is_unlocked() {
+            return Self::execute_autofill_with_optional_password(
+                &mut self.fill, &mut self.runtime, envelope_request_id, input, Some(password), now_millis,
+            );
+        }
+        let mut temporary = match DesktopRuntime::new(self.runtime.current_path()) {
+            Ok(runtime) => runtime,
+            Err(error) => return runtime_failure(envelope_request_id, error),
+        };
+        if let Err(error) = temporary.unlock_for_agent(password.as_str().to_owned()) {
+            return runtime_failure(envelope_request_id, error);
+        }
+        Self::execute_autofill_with_optional_password(
+            &mut self.fill, &mut temporary, envelope_request_id, input, Some(password), now_millis,
         )
     }
 
@@ -2099,6 +2200,14 @@ impl Drop for BrowserBrokerCore {
         self.fill.clear();
         self.unlock_history = json!([]);
     }
+}
+
+fn select_passkey_candidate(
+    candidates: Vec<vaultmesh_core::PasskeyCandidate>,
+    matches: impl Fn(&vaultmesh_core::PasskeyCandidate) -> bool,
+) -> Option<vaultmesh_core::PasskeyCandidate> {
+    let mut matching = candidates.into_iter().filter(matches);
+    matching.next().filter(|_| matching.next().is_none())
 }
 
 fn confirm_passkey_outside_lock(

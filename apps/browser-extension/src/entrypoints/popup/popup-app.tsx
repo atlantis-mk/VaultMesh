@@ -1,5 +1,5 @@
 import { DeviceAssistPanel } from "./device-assist-panel";
-import { passkeyPromptText } from "@/lib/passkey-dialog";
+import { parsePasskeyPrompt, passkeyPromptText, type PasskeyPromptView } from "@/lib/passkey-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PopupUnlockPage } from "./popup-unlock-page";
 import { PopupUnlockFactory } from "@/lib/popup-unlock-adapter";
@@ -835,62 +835,34 @@ function saveFailureReason(code?: string, message?: string): string {
   return code ? `桌面端返回错误 ${code}，请重试。` : "请重试。";
 }
 
-type PasskeyUnlockPrompt = {
-  token: string;
-  operation: "create" | "get";
-  origin: string | null;
-  topOrigin?: string | null;
-  sameOriginWithAncestors?: boolean;
-  stage: "choose" | "unlock" | "no-match";
-};
-
-export function parsePasskeyUnlockPrompt(value: unknown): PasskeyUnlockPrompt | null {
-  if (!value || typeof value !== "object") return null;
-  const prompt = value as {
-    token?: unknown;
-    operation?: unknown;
-    origin?: unknown;
-    topOrigin?: unknown;
-    sameOriginWithAncestors?: unknown;
-    stage?: unknown;
-  };
-  if (typeof prompt.token !== "string" || (prompt.operation !== "create" && prompt.operation !== "get")) return null;
-  return {
-    token: prompt.token,
-    operation: prompt.operation,
-    origin: typeof prompt.origin === "string" ? prompt.origin : null,
-    topOrigin: typeof prompt.topOrigin === "string" ? prompt.topOrigin : null,
-    sameOriginWithAncestors: typeof prompt.sameOriginWithAncestors === "boolean" ? prompt.sameOriginWithAncestors : undefined,
-    stage: prompt.stage === "unlock" || prompt.stage === "no-match" ? prompt.stage : "choose",
-  };
-}
-
 /** Shown while a page's WebAuthn call waits for the user. Choosing the browser
  * hands that same call to the browser's own authenticator. */
-function PasskeyUnlockNotice({ disabled = false }: { disabled?: boolean }) {
-  const [prompt, setPrompt] = useState<PasskeyUnlockPrompt | null>(null);
+export function PasskeyUnlockNotice({ disabled = false }: { disabled?: boolean }) {
+  const [prompt, setPrompt] = useState<PasskeyPromptView | null>(null);
   const [remember, setRemember] = useState(false);
 
   useEffect(() => {
     let active = true;
     const refresh = () => browser.runtime.sendMessage({ kind: "vaultmesh.passkey-unlock.get" }).then((response) => {
-      if (active) setPrompt(parsePasskeyUnlockPrompt(response));
+      if (active) setPrompt(parsePasskeyPrompt(response));
     }).catch(() => undefined);
     void refresh();
     const timer = setInterval(() => void refresh(), 1_000);
     return () => { active = false; clearInterval(timer); };
   }, []);
 
-  async function choose(choice: "vaultmesh" | "native" | "cancel") {
+  async function choose(choice: "vaultmesh" | "native" | "cancel", itemId?: string) {
     if (!prompt || disabled) return;
     const canRemember = prompt.stage === "no-match"
       || (prompt.stage === "choose" && !(prompt.operation === "create" && prompt.sameOriginWithAncestors === false));
-    await browser.runtime.sendMessage({
+    const result = await browser.runtime.sendMessage({
       kind: "vaultmesh.passkey-choice",
       token: prompt.token,
       choice,
       remember: remember && canRemember && choice !== "cancel",
-    }).catch(() => undefined);
+      ...(itemId ? { itemId } : {}),
+    }).catch(() => undefined) as { status?: string } | undefined;
+    if (result?.status !== "chosen") return;
     setPrompt(null);
     setRemember(false);
     if (choice !== "vaultmesh") window.close();
@@ -905,8 +877,19 @@ function PasskeyUnlockNotice({ disabled = false }: { disabled?: boolean }) {
       {canRemember ? (
         <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />记住此网站的选择</label>
       ) : null}
+      {prompt.stage === "choose" && prompt.candidates && prompt.candidates.length > 1 ? (
+        <div className="flex max-h-32 flex-col gap-1 overflow-y-auto" role="group" aria-label="选择通行密钥账号">
+          {prompt.candidates.map((candidate) => (
+            <Button key={candidate.itemId} size="sm" variant="outline" disabled={disabled} onClick={() => void choose("vaultmesh", candidate.itemId)}>
+              {candidate.account ? `${candidate.title} · ${candidate.account}` : candidate.title}
+            </Button>
+          ))}
+        </div>
+      ) : null}
       <div className="flex flex-wrap gap-2">
-        {prompt.stage === "choose" ? <Button size="sm" disabled={disabled} onClick={() => void choose("vaultmesh")}>使用 VaultMesh</Button> : null}
+        {prompt.stage === "choose" && (prompt.candidates?.length ?? 0) < 2
+          ? <Button size="sm" disabled={disabled} onClick={() => void choose("vaultmesh")}>使用 VaultMesh</Button>
+          : null}
         <Button size="sm" variant="outline" disabled={disabled} onClick={() => void choose("native")}>{prompt.stage === "unlock" ? "不解锁，改用浏览器/系统" : "使用浏览器/系统"}</Button>
         <Button size="sm" variant="ghost" disabled={disabled} onClick={() => void choose("cancel")}>取消</Button>
       </div>

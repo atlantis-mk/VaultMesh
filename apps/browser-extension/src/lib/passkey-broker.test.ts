@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { DesktopRpcError } from './desktop-rpc';
+import { DesktopRpcError, type DesktopRpcTiming } from './desktop-rpc';
 import { buildRequestDetails, createPasskeyBroker, PASSKEY_PROMPT_WAIT_MS, type PasskeyPage, type PasskeyRequest } from './passkey-broker';
 import { rememberPasskeyChoice, setSitePasskeyMode } from './passkey-preferences';
 import { rememberLoginSelection } from './autofill-preferences';
@@ -39,12 +39,12 @@ function make(
   const hidden: string[] = [];
   const shown: unknown[] = [];
   const logs: string[] = [];
-  const calls: Array<{ operation: string; input?: Record<string, unknown> }> = [];
-  const rpc = vi.fn(async (operation: string, input?: Record<string, unknown>) => {
-    calls.push({ operation, input });
+  const calls: Array<{ operation: string; input?: Record<string, unknown>; timing?: DesktopRpcTiming }> = [];
+  const rpc = vi.fn(async (operation: string, input?: Record<string, unknown>, timing?: DesktopRpcTiming) => {
+    calls.push({ operation, input, timing });
     const handler = handlers[operation];
     if (handler) return handler(input);
-    if (operation === 'vault.status') return { unlocked: true };
+    if (operation === 'vault.status') return { unlocked: true, passkeyCancellation: true };
     if (operation === 'passkeys.probe') {
       return {
         status: 'available',
@@ -54,6 +54,7 @@ function make(
       };
     }
     if (operation === 'passkeys.get' || operation === 'passkeys.create') return { responseJson: '{"id":"x"}' };
+    if (operation === 'passkeys.cancel') return {};
     throw new Error(`unexpected ${operation}`);
   });
   const openPrompt = vi.fn(async () => undefined);
@@ -213,7 +214,7 @@ describe('fallback matrix & trusted frame ancestry', () => {
 
   it('shows minimal no-match dialog when probe is unavailable and handles native (remember) and cancel without password-login', async () => {
     const probeUnavailable = {
-      'vault.status': () => ({ unlocked: false }),
+      'vault.status': () => ({ unlocked: false, passkeyCancellation: true }),
       'passkeys.probe': () => ({ status: 'unavailable', rpId: 'example.test', origin, candidates: [], hasLoginCandidates: true }),
     };
 
@@ -295,6 +296,9 @@ describe('VaultMesh serving', () => {
     const prompt = broker.currentPrompt()!;
     expect(prompt.stage).toBe('choose');
     expect(prompt.candidates).toHaveLength(2);
+    expect(broker.choose(prompt.token, 'vaultmesh')).toBe(false);
+    expect(broker.choose(prompt.token, 'vaultmesh', false, undefined, crypto.randomUUID())).toBe(false);
+    expect(broker.currentPrompt()?.token).toBe(prompt.token);
     expect(broker.choose(prompt.token, 'vaultmesh', false, undefined, item2)).toBe(true);
     await expect(pending).resolves.toEqual({ status: 'ok', responseJson: '{"id":"x"}' });
     const call = calls.find((entry) => entry.operation === 'passkeys.get')!;
@@ -367,7 +371,7 @@ describe('locked vault & one-shot desktop unlock', () => {
   it('calls passkeys.get directly while locked so desktop Touch ID/PIN one-shot unlock can handle it without extension unlock prompt', async () => {
     await rememberPasskeyChoice('get', origin, 'vaultmesh');
     const { broker, calls, openPrompt } = make({
-      'vault.status': () => ({ unlocked: false }),
+      'vault.status': () => ({ unlocked: false, passkeyCancellation: true }),
       'passkeys.get': () => ({ responseJson: '{"id":"one-shot"}' }),
     });
     await expect(broker.handle(getRequest, page)).resolves.toEqual({ status: 'ok', responseJson: '{"id":"one-shot"}' });
@@ -380,7 +384,7 @@ describe('locked vault & one-shot desktop unlock', () => {
     await rememberPasskeyChoice('get', origin, 'vaultmesh');
     let unlocked = false;
     const { broker, openPrompt } = make({
-      'vault.status': () => ({ unlocked }),
+      'vault.status': () => ({ unlocked, passkeyCancellation: true }),
       'passkeys.get': () => {
         if (!unlocked) throw new DesktopRpcError('unlock-required', 'locked');
         return { responseJson: '{"id":"x"}' };
@@ -400,7 +404,7 @@ describe('locked vault & one-shot desktop unlock', () => {
   it('opens the prompt only once when a choice is followed by an unlock-required fallback', async () => {
     let unlocked = false;
     const { broker, openPrompt } = make({
-      'vault.status': () => ({ unlocked }),
+      'vault.status': () => ({ unlocked, passkeyCancellation: true }),
       'passkeys.get': () => {
         if (!unlocked) throw new DesktopRpcError('unlock-required', 'locked');
         return { responseJson: '{"id":"x"}' };
@@ -420,7 +424,7 @@ describe('locked vault & one-shot desktop unlock', () => {
   it('lets the user skip unlocking and use the browser instead', async () => {
     await rememberPasskeyChoice('get', origin, 'vaultmesh');
     const { broker } = make({
-      'vault.status': () => ({ unlocked: false }),
+      'vault.status': () => ({ unlocked: false, passkeyCancellation: true }),
       'passkeys.get': () => { throw new DesktopRpcError('unlock-required', 'locked'); },
     });
     const pending = broker.handle(getRequest, page);
@@ -433,7 +437,7 @@ describe('locked vault & one-shot desktop unlock', () => {
   it('expires an unanswered unlock as a cancel after five minutes', async () => {
     await rememberPasskeyChoice('get', origin, 'vaultmesh');
     const { broker } = make({
-      'vault.status': () => ({ unlocked: false }),
+      'vault.status': () => ({ unlocked: false, passkeyCancellation: true }),
       'passkeys.get': () => { throw new DesktopRpcError('unlock-required', 'locked'); },
     });
     vi.useFakeTimers();
@@ -447,7 +451,7 @@ describe('locked vault & one-shot desktop unlock', () => {
 describe('conditional mediation', () => {
   it('suspends only when enabled, allowed, non-native and probe has candidates, then resolves on inline selection', async () => {
     const { broker, openPrompt, calls, logs } = make({
-      'vault.status': () => ({ unlocked: false }),
+      'vault.status': () => ({ unlocked: false, passkeyCancellation: true }),
       'passkeys.probe': () => ({
         status: 'available',
         rpId: 'example.test',
@@ -607,7 +611,7 @@ describe('in-page prompt', () => {
   it('shows the unlock stage in the page after the user chose VaultMesh when desktop falls back to unlock-required', async () => {
     let unlocked = false;
     const { broker, shown, openPrompt } = make({
-      'vault.status': () => ({ unlocked }),
+      'vault.status': () => ({ unlocked, passkeyCancellation: true }),
       'passkeys.get': () => {
         if (!unlocked) throw new DesktopRpcError('unlock-required', 'locked');
         return { responseJson: '{"id":"x"}' };
@@ -626,6 +630,30 @@ describe('in-page prompt', () => {
 });
 
 describe('cancel and failure reasons are attributable', () => {
+  it.each(['abort', 'navigation'] as const)('cancels the authenticated desktop request on %s', async (reason) => {
+    let finishDesktop!: (result: unknown) => void;
+    const { broker, calls } = make({
+      'passkeys.create': () => new Promise((resolve) => { finishDesktop = resolve; }),
+    }, { defaultMode: () => 'vaultmesh' });
+    const optionsJson = JSON.stringify({ ...JSON.parse(createRequest.optionsJson), timeout: 5_000 });
+    const pending = broker.handle({ ...createRequest, optionsJson }, page);
+    await flush();
+    const rpc = calls.find(({ operation }) => operation === 'passkeys.create');
+    expect(rpc?.timing).toMatchObject({ requestId: expect.any(String), deadlineAt: expect.any(Number) });
+    expect(rpc!.timing!.deadlineAt).toBeLessThanOrEqual(Date.now() + 5_000);
+    if (reason === 'abort') broker.abort(page, createRequest.id);
+    else broker.cancelPage(page.tabId);
+    await expect(pending).resolves.toMatchObject({ status: 'cancelled' });
+    expect(calls.find(({ operation }) => operation === 'passkeys.cancel')?.input).toEqual({ requestId: rpc!.timing!.requestId });
+    finishDesktop({ responseJson: '{"id":"late"}' });
+  });
+
+  it('falls back before requesting a desktop that cannot cancel pending operations', async () => {
+    const { broker, calls } = make({ 'vault.status': () => ({ unlocked: true }) });
+    await expect(broker.handle(getRequest, page)).resolves.toEqual({ status: 'fallback' });
+    expect(calls.map(({ operation }) => operation)).toEqual(['vault.status']);
+  });
+
   it('logs why a request ended as a cancel', async () => {
     const choice = make();
     const pending = choice.broker.handle(createRequest, page);
@@ -653,7 +681,7 @@ describe('cancel and failure reasons are attributable', () => {
   it('logs an unlock timeout separately from a user cancel', async () => {
     await rememberPasskeyChoice('get', origin, 'vaultmesh');
     const { broker, logs } = make({
-      'vault.status': () => ({ unlocked: false }),
+      'vault.status': () => ({ unlocked: false, passkeyCancellation: true }),
       'passkeys.get': () => { throw new DesktopRpcError('unlock-required', 'locked'); },
     });
     vi.useFakeTimers();
@@ -668,11 +696,11 @@ describe('cancel and failure reasons are attributable', () => {
 
 describe('availability', () => {
   it('is available for a same-origin or verified cross-origin page with a paired desktop, even while locked', async () => {
-    const same = make({ 'vault.status': () => ({ unlocked: false }) });
+    const same = make({ 'vault.status': () => ({ unlocked: false, passkeyCancellation: true }) });
     await expect(same.broker.availability(page)).resolves.toBe(true);
 
     const cross = make(
-      { 'vault.status': () => ({ unlocked: false }) },
+      { 'vault.status': () => ({ unlocked: false, passkeyCancellation: true }) },
       { frames: [{ frameId: 0, parentFrameId: -1, url: 'https://other.test/' }, { frameId: 4, parentFrameId: 0, url: `${origin}/inner` }] },
     );
     await expect(cross.broker.availability({ ...page, frameId: 4 })).resolves.toBe(true);

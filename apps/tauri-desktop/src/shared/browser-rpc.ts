@@ -56,6 +56,7 @@ export const BrowserRpcOperationSchema = z.enum([
   'passkeys.create',
   'passkeys.probe',
   'passkeys.get',
+  'passkeys.cancel',
   'confirmation.request',
   'items.list',
   'items.detail',

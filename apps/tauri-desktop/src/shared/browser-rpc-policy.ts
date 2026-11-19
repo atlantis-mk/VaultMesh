@@ -23,7 +23,7 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   'vault.create': mutationWhileLocked(true),
   'vault.unlock': mutationWhileLocked(),
   'vault.unlock-history': metadata(false),
-  'vault.lock': mutation(),
+  'vault.lock': { ...mutation(), requiresUnlock: false },
   'vault.backup': systemDialog(true, true),
   'vault.restore': systemDialog(true, true),
   'vault.change-password': mutation(true),
@@ -68,6 +68,7 @@ export const BROWSER_RPC_POLICIES: Record<BrowserRpcOperation, BrowserRpcPolicy>
   // material to the extension.
   'passkeys.create': { capability: 'mutation', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false },
   'passkeys.probe': metadata(false),
+  'passkeys.cancel': { capability: 'mutation', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false },
   'passkeys.get': { capability: 'page-disclosure', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false },
   // The target policy is checked when the token is created. This helper must
   // remain callable while locked so `vault.create` can obtain its required

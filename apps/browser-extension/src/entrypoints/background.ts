@@ -476,6 +476,7 @@ export default defineBackground(() => {
       // The popup may close as soon as the desktop unlock window takes focus, so
       // this worker (not the popup) owns the in-flight request.
       if (!isTrustedExtensionPage(sender)) return { status: "unsupported-page" as const };
+      if (parsed.data.automatic && passkeyBroker.currentPrompt()) return { status: "passkey-prompt" as const };
       return requestBrowserUnlock();
     }
     const page = trustedPage(sender);

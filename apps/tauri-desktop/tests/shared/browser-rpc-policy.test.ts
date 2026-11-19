@@ -104,10 +104,16 @@ describe('browser RPC command authorization', () => {
     expect(BROWSER_RPC_POLICIES['passkeys.probe']).toEqual({ capability: 'metadata', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false });
     expect(BROWSER_RPC_POLICIES['passkeys.create']).toEqual({ capability: 'mutation', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false });
     expect(BROWSER_RPC_POLICIES['passkeys.get']).toEqual({ capability: 'page-disclosure', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false });
-    for (const op of ['passkeys.probe', 'passkeys.create', 'passkeys.get'] as const) {
+    expect(BROWSER_RPC_POLICIES['passkeys.cancel']).toEqual({ capability: 'mutation', requiresUnlock: false, requiresGesture: false, requiresConfirmation: false });
+    for (const op of ['passkeys.probe', 'passkeys.create', 'passkeys.get', 'passkeys.cancel'] as const) {
       expect(authorizeBrowserRpc(request(op), false).authorized).toBe(true);
       expect(authorizeBrowserRpc(request(op), true).authorized).toBe(true);
     }
+  });
+
+  it('can invalidate pending unlock work even if the vault is already locked', () => {
+    expect(BROWSER_RPC_POLICIES['vault.lock']).toMatchObject({ requiresUnlock: false, requiresGesture: true });
+    expect(authorizeBrowserRpc(request('vault.lock', { userGestureId: crypto.randomUUID() }), false).authorized).toBe(true);
   });
 
   it('requires a user gesture for browser.unlock.request while allowing locked invocation', () => {

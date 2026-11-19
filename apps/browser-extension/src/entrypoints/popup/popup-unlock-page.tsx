@@ -55,7 +55,7 @@ export function PopupUnlockPage({
     }
   }
 
-  async function requestDesktopUnlock() {
+  async function requestDesktopUnlock(automatic = false) {
     if (!adapter.canTriggerDesktopUnlock || requestInFlightRef.current || completedRef.current) return;
     requestInFlightRef.current = true;
     setBusy(true);
@@ -63,8 +63,13 @@ export function PopupUnlockPage({
     try {
       const response = (await browser.runtime.sendMessage({
         kind: "vaultmesh.browser-unlock.request",
+        ...(automatic ? { automatic: true } : {}),
       })) as UnlockRequestResponse | null | undefined;
       if (!mountedRef.current) return;
+      if (response?.status === "passkey-prompt") {
+        setBusy(false);
+        return;
+      }
       if (response?.status === "unlocked") {
         await completeUnlock();
         return;
@@ -108,7 +113,7 @@ export function PopupUnlockPage({
     setStatusMessage(null);
     if (adapter.shouldAutoRequestDesktopUnlock && !autoRequestedRef.current) {
       autoRequestedRef.current = true;
-      void requestDesktopUnlock();
+      void requestDesktopUnlock(true);
     }
   }, [adapter]);
 

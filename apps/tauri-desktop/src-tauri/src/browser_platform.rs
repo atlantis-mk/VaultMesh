@@ -1028,23 +1028,42 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
         let queue = Arc::clone(self.browser_unlocks.as_ref()?);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let now = crate::unix_millis();
-        let expires_at =
-            now.saturating_add(crate::agent_unlock_window::TEMPORARY_UNLOCK_WAIT_MILLIS);
+        let passkey = request.passkey_request;
+        let passkey_deadline = passkey.map(|(_, deadline)| deadline.max(0) as u64);
+        let expires_at = now.saturating_add(crate::agent_unlock_window::TEMPORARY_UNLOCK_WAIT_MILLIS)
+            .min(passkey_deadline.unwrap_or(u64::MAX));
+        if expires_at <= now {
+            return Some(BrowserSessionUnlockWaiter::new(|| Err(BrowserPlatformError {
+                code: "request-expired",
+                message: "插件请求已过期，请重试。".to_owned(),
+            })));
+        }
         let (unlock_ref, responder_id) = {
             let mut guard = queue.lock().ok()?;
-            guard.enqueue_session_or_merge(request, now, expires_at, sender)
+            let (unlock_ref, responder_id) = guard.enqueue_session_or_merge(request, now, expires_at, sender);
+            if let Some((request_id, _)) = passkey {
+                guard.track_passkey(request_id, unlock_ref.clone(), responder_id);
+            }
+            (unlock_ref, responder_id)
         };
         crate::agent_unlock_window::show_agent_unlock_window(&self.app);
         let app = self.app.clone();
         Some(BrowserSessionUnlockWaiter::new(move || {
-            wait_for_queued_unlock(
+            let result = wait_for_queued_unlock(
                 app,
-                queue,
+                Arc::clone(&queue),
                 unlock_ref,
                 responder_id,
                 receiver,
+                passkey_deadline,
                 "浏览器解锁已超时，请重试。",
-            )
+            );
+            if let Some((request_id, _)) = passkey
+                && let Ok(mut guard) = queue.lock()
+            {
+                guard.finish_passkey(request_id);
+            }
+            result
         }))
     }
 
@@ -1070,6 +1089,7 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                 unlock_ref,
                 responder_id,
                 receiver,
+                None,
                 "主密码确认已超时。",
             )?;
             resolution.master_password.ok_or_else(|| BrowserPlatformError {
@@ -1077,6 +1097,17 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                 message: "此条目受主密码保护，请使用主密码确认填充。".to_owned(),
             })
         }))
+    }
+
+    fn cancel_passkey_unlock(&self, request_id: Uuid) {
+        let expired = self.browser_unlocks.as_ref()
+            .and_then(|queue| queue.lock().ok()?.cancel_passkey(request_id));
+        if let Some(reference) = expired {
+            let app = self.app.clone();
+            let _ = self.app.run_on_main_thread(move || {
+                crate::agent_unlock_window::expire_agent_unlock_window(&app, &reference);
+            });
+        }
     }
 
     fn cancel_authentication(&self) {
@@ -1191,6 +1222,7 @@ fn wait_for_queued_unlock(
     unlock_ref: String,
     responder_id: u64,
     receiver: std::sync::mpsc::Receiver<Result<BrowserUnlockResolution, BrowserPlatformError>>,
+    deadline: Option<u64>,
     timeout_message: &str,
 ) -> Result<BrowserUnlockResolution, BrowserPlatformError> {
     loop {
@@ -1198,7 +1230,7 @@ fn wait_for_queued_unlock(
             .lock()
             .ok()
             .and_then(|guard| guard.entry_expires_at(&unlock_ref))
-            .map(|expires_at| expires_at.saturating_sub(crate::unix_millis()))
+            .map(|expires_at| expires_at.min(deadline.unwrap_or(u64::MAX)).saturating_sub(crate::unix_millis()))
             .unwrap_or(0);
 
         if wait_millis == 0 {

@@ -22,6 +22,49 @@ export type PasskeyPromptView = {
   candidates?: PasskeyPromptCandidate[];
 };
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Hand-rolled validation keeps this document_start script free of heavy dependencies.
+export function parsePasskeyPrompt(value: unknown): PasskeyPromptView | null {
+  if (!value || typeof value !== "object") return null;
+  const prompt = value as {
+    token?: unknown;
+    operation?: unknown;
+    origin?: unknown;
+    topOrigin?: unknown;
+    sameOriginWithAncestors?: unknown;
+    stage?: unknown;
+    candidates?: unknown;
+  };
+  if (typeof prompt.token !== "string" || !UUID.test(prompt.token)) return null;
+  if (prompt.operation !== "create" && prompt.operation !== "get") return null;
+  if (prompt.stage !== "choose" && prompt.stage !== "unlock" && prompt.stage !== "no-match") return null;
+  const candidates = Array.isArray(prompt.candidates)
+    ? prompt.candidates.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const c = entry as { itemId?: unknown; credentialId?: unknown; title?: unknown; account?: unknown };
+        if (typeof c.itemId !== "string" || !UUID.test(c.itemId) || typeof c.credentialId !== "string" || typeof c.title !== "string") {
+          return [];
+        }
+        return [{
+          itemId: c.itemId,
+          credentialId: c.credentialId.slice(0, 4096),
+          title: c.title.slice(0, 256),
+          account: typeof c.account === "string" ? c.account.slice(0, 256) : null,
+        }];
+      })
+    : undefined;
+  return {
+    token: prompt.token,
+    operation: prompt.operation,
+    origin: typeof prompt.origin === "string" ? prompt.origin.slice(0, 256) : null,
+    topOrigin: typeof prompt.topOrigin === "string" ? prompt.topOrigin.slice(0, 256) : null,
+    sameOriginWithAncestors: typeof prompt.sameOriginWithAncestors === "boolean" ? prompt.sameOriginWithAncestors : undefined,
+    stage: prompt.stage,
+    ...(candidates ? { candidates } : {}),
+  };
+}
+
 export type PasskeyDialogChoice = 'vaultmesh' | 'native' | 'cancel';
 
 export type PasskeyDialogHandlers = {
