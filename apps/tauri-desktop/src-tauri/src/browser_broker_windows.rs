@@ -489,8 +489,32 @@ pub(crate) fn test_pipe_round_trip(pipe_name: &str, request: &[u8]) -> Value {
         0,
     );
     assert_eq!(written as usize, line.len());
-    let response = read_line(handle.0, &AtomicBool::new(false)).expect("read response");
-    serde_json::from_slice(&response).expect("parse response")
+    // Read directly: peeking can report a disconnect before delivering a
+    // response the server already wrote.
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        let mut read = 0u32;
+        let result = unsafe {
+            ReadFile(
+                handle.0,
+                chunk.as_mut_ptr(),
+                chunk.len() as u32,
+                &mut read,
+                null_mut(),
+            )
+        };
+        assert_ne!(result, 0, "read response: {}", io::Error::last_os_error());
+        assert_ne!(read, 0, "pipe closed before completing the response");
+        let chunk = &chunk[..read as usize];
+        if let Some(end) = chunk.iter().position(|&byte| byte == b'\n') {
+            response.extend_from_slice(&chunk[..end]);
+            assert!(response.len() <= MAX_RESPONSE_BYTES);
+            return serde_json::from_slice(&response).expect("parse response");
+        }
+        response.extend_from_slice(chunk);
+        assert!(response.len() <= MAX_RESPONSE_BYTES);
+    }
 }
 
 #[cfg(test)]

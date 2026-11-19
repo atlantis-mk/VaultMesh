@@ -3,6 +3,7 @@
 
 use std::io;
 use std::net::{TcpListener, TcpStream};
+use std::sync::Weak;
 use std::sync::atomic::AtomicUsize;
 
 pub const HTTP_PORT_RANGE_START: u16 = 42800;
@@ -35,9 +36,7 @@ pub struct BrowserBrokerHttpListener {
     stopping: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
     active_deferred: Arc<AtomicUsize>,
-    // Strong reference: on Windows there is no Unix-socket listener thread
-    // keeping the broker alive, and this listener is the sole long-lived owner.
-    broker: Arc<Mutex<BrowserBrokerCore>>,
+    broker: Weak<Mutex<BrowserBrokerCore>>,
 }
 
 impl BrowserBrokerHttpListener {
@@ -72,7 +71,7 @@ impl BrowserBrokerHttpListener {
         let worker_stopping = Arc::clone(&stopping);
         let active_deferred = Arc::new(AtomicUsize::new(0));
         let active_clients = Arc::new(AtomicUsize::new(0));
-        let owned_broker = Arc::clone(&broker);
+        let owned_broker = Arc::downgrade(&broker);
 
         let thread_deferred = Arc::clone(&active_deferred);
         let thread = thread::spawn(move || {
@@ -146,7 +145,9 @@ impl BrowserBrokerHttpListener {
     }
 
     pub fn lock_vault(&self) {
-        if let Ok(mut broker) = self.broker.lock() {
+        if let Some(broker) = self.broker.upgrade()
+            && let Ok(mut broker) = broker.lock()
+        {
             broker.lock_for_system();
         }
     }
