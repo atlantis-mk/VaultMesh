@@ -118,7 +118,19 @@ export function useSecurityCenterModel() {
     if (domain === 'desktop') {
       useVaultStore.setState({ pin: next });
     } else if (domain === 'agent') {
-      setAgentStatus((current) => (current ? { ...current, pin: next } : current));
+      setAgentStatus((current) =>
+        current
+          ? {
+              ...current,
+              pin: next,
+              access: {
+                ...current.access,
+                clientUnlocked: false,
+                activeLeaseCount: 0,
+              },
+            }
+          : current,
+      );
     }
   };
 
@@ -191,11 +203,10 @@ export function useSecurityCenterModel() {
     }
     await run(async () => {
       await window.vaultMesh.vault.changeMasterPassword({ currentPassword, newPassword });
-      await refreshPinStatuses();
       setCurrentPassword('');
       setNewPassword('');
       setConfirmation('');
-    }, '主密码已更新；快速解锁已关闭。');
+    }, '主密码已更新，所有端已锁定，请重新解锁。');
   };
 
   const saveSecuritySettings = async (): Promise<void> => {

@@ -3,7 +3,7 @@
 pub struct DesktopRuntime {
     path: PathBuf,
     vault: Option<VaultmeshVault>,
-    desktop_master_password_verified: bool,
+    ephemeral_readonly: bool,
     relay: std::sync::Arc<crate::sync_relay::RelayHub>,
 }
 
@@ -19,7 +19,7 @@ impl DesktopRuntime {
             relay: crate::sync_relay::RelayHub::for_path(&path),
             path,
             vault: None,
-            desktop_master_password_verified: false,
+            ephemeral_readonly: false,
         })
     }
 
@@ -77,7 +77,6 @@ impl DesktopRuntime {
         let session = VaultSession::create(&master_password).map_err(map_runtime_core_error);
         master_password.zeroize();
         let mut session = session?;
-        let master_password_verified = matches!(unlock_source, UnlockEventSource::Desktop);
         session
             .record_unlock_event(unlock_source)
             .map_err(map_runtime_core_error)?;
@@ -86,7 +85,6 @@ impl DesktopRuntime {
         write_vault(&self.path, encrypted.as_slice())
             .map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
         self.replace(session, encrypted.as_slice());
-        self.desktop_master_password_verified = master_password_verified;
         Ok(self.status())
     }
 
@@ -179,13 +177,11 @@ impl DesktopRuntime {
         let unlocked = unlock_current_format(&path, &master_password, matches!(source, UnlockEventSource::Desktop));
         master_password.zeroize();
         let (mut session, encrypted) = unlocked?;
-        let master_password_verified = matches!(source, UnlockEventSource::Desktop);
         session
             .record_unlock_event(source)
             .map_err(map_runtime_core_error)?;
         self.path = path;
         self.replace(session, encrypted.as_slice());
-        self.desktop_master_password_verified = master_password_verified;
         Ok(self.status())
     }
 
@@ -206,16 +202,43 @@ impl DesktopRuntime {
         Ok((self.path.clone(), key))
     }
 
-    /// Preparing a new PIN in desktop settings requires this desktop session
-    /// to have authenticated with the master password.
-    pub fn desktop_pin_setup_material(
+    /// Opens a read-only ephemeral session using a verified Vault Key without
+    /// recording an unlock-history event or triggering sync relay.
+    pub fn open_ephemeral_with_key(
         &mut self,
-    ) -> Result<(PathBuf, Zeroizing<[u8; 32]>), DesktopRuntimeError> {
-        self.refresh_from_disk()?;
-        if !self.desktop_master_password_verified {
-            return Err(VAULTMESH_STATUS_REAUTH_REQUIRED.into());
+        path: PathBuf,
+        vault_key: &[u8],
+    ) -> Result<DesktopRuntimeStatus, DesktopRuntimeError> {
+        if path.as_os_str().is_empty() || path.file_name().is_none() {
+            return Err(VAULTMESH_STATUS_INVALID_ARGUMENT.into());
         }
-        self.quick_unlock_material()
+        let encrypted = Zeroizing::new(
+            read_vault(&path).map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?,
+        );
+        let session = VaultSession::unlock_with_vault_key(vault_key, encrypted.as_slice())
+            .map_err(map_runtime_core_error)?;
+        self.path = path;
+        self.replace_ephemeral(session, encrypted.as_slice());
+        Ok(self.status())
+    }
+
+    /// Opens a read-only ephemeral session using the master password without
+    /// recording an unlock-history event or triggering sync relay.
+    pub fn open_ephemeral_with_password(
+        &mut self,
+        path: PathBuf,
+        mut master_password: String,
+    ) -> Result<DesktopRuntimeStatus, DesktopRuntimeError> {
+        if path.as_os_str().is_empty() || path.file_name().is_none() {
+            master_password.zeroize();
+            return Err(VAULTMESH_STATUS_INVALID_ARGUMENT.into());
+        }
+        let unlocked = unlock_current_format(&path, &master_password, false);
+        master_password.zeroize();
+        let (session, encrypted) = unlocked?;
+        self.path = path;
+        self.replace_ephemeral(session, encrypted.as_slice());
+        Ok(self.status())
     }
 
     /// Unlocks with a Vault Key released by a privileged platform adapter and
@@ -293,7 +316,7 @@ impl DesktopRuntime {
     }
 
     pub fn lock(&mut self) -> DesktopRuntimeStatus {
-        self.desktop_master_password_verified = false;
+        self.ephemeral_readonly = false;
         if let Some(mut vault) = self.vault.take() {
             vault.session.lock();
         }
@@ -308,9 +331,11 @@ impl DesktopRuntime {
             return Err(VAULTMESH_STATUS_LOCKED.into());
         }
         self.refresh_vault_file()?;
-        if let Some(vault) = self.vault.as_mut().filter(|v| !v.session.is_locked()) {
-            // Invalid/oversized network updates fail sync, not ordinary Vault use.
-            let _ = crate::sync_relay::pump(vault);
+        if !self.ephemeral_readonly {
+            if let Some(vault) = self.vault.as_mut().filter(|v| !v.session.is_locked()) {
+                // Invalid/oversized network updates fail sync, not ordinary Vault use.
+                let _ = crate::sync_relay::pump(vault);
+            }
         }
         Ok(())
     }
@@ -735,6 +760,219 @@ mod verified_key_tests {
         assert_eq!(events[0]["source"], "extension-master-password");
 
         browser.lock();
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn quick_unlock_material_succeeds_across_all_desktop_unlock_methods() {
+        let dir = std::env::temp_dir().join(format!("vaultmesh-quick-material-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("test.vault");
+        let password = "correct horse battery staple";
+
+        let mut runtime = DesktopRuntime::new(path.clone()).expect("runtime");
+        runtime.create(password.into()).expect("create");
+        let (_, created_key) = runtime.quick_unlock_material().expect("create key");
+        runtime.lock();
+
+        runtime.unlock(password.into()).expect("password unlock");
+        assert_eq!(runtime.quick_unlock_material().expect("pw key").1, created_key);
+        runtime.lock();
+
+        runtime
+            .unlock_with_quick_key(path.clone(), created_key.as_slice())
+            .expect("pin unlock");
+        assert_eq!(runtime.quick_unlock_material().expect("pin key").1, created_key);
+        runtime.lock();
+
+        runtime
+            .unlock_with_biometric_key(path.clone(), created_key.as_slice())
+            .expect("biometric unlock");
+        assert_eq!(runtime.quick_unlock_material().expect("bio key").1, created_key);
+        runtime.lock();
+
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn ephemeral_open_and_fill_protected_values_skip_events_and_sync_relay_and_batch_reprompt() {
+        let dir = std::env::temp_dir().join(format!("vaultmesh-ephemeral-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("source.vault");
+        let ephemeral_path = dir.join("ephemeral.vault");
+        let password = "correct horse battery staple";
+
+        let mut creator = DesktopRuntime::new(path.clone()).expect("creator");
+        creator.create(password.into()).expect("create");
+        let login = creator
+            .execute(
+                "items.add",
+                json!({
+                    "title": "Reprompt Login",
+                    "username": "ada",
+                    "password": "login-secret",
+                    "url": "https://example.test",
+                    "notes": null,
+                    "folder": null,
+                    "favorite": false,
+                    "totpSecret": "JBSWY3DPEHPK3PXP",
+                    "recoveryCodes": [],
+                    "additionalUrls": [],
+                    "autofillOnPageLoad": false,
+                    "masterPasswordReprompt": true,
+                    "customFields": []
+                }),
+            )
+            .expect("login");
+        let card = creator
+            .execute(
+                "cards.add",
+                json!({
+                    "title": "Card",
+                    "cardholderName": "Ada",
+                    "cardNumber": "4111111111111111",
+                    "expirationMonth": 12,
+                    "expirationYear": 2030,
+                    "securityCode": "777",
+                    "pin": "4321",
+                    "issuer": null,
+                    "network": null,
+                    "billingAddress": null,
+                    "notes": null,
+                    "folder": null,
+                    "favorite": false,
+                    "masterPasswordReprompt": false
+                }),
+            )
+            .expect("card");
+        let history_before = creator
+            .execute("vault.unlock-history", json!({}))
+            .expect("history")
+            .as_array()
+            .expect("history array")
+            .len();
+        let (_, key) = creator.quick_unlock_material().expect("key");
+        creator.lock();
+
+        std::fs::copy(&path, &ephemeral_path).expect("copy vault");
+
+        let mut ephemeral = DesktopRuntime::new(ephemeral_path.clone()).expect("ephemeral");
+        assert_eq!(
+            ephemeral
+                .open_ephemeral_with_key(ephemeral_path.clone(), &[0_u8; 32])
+                .expect_err("wrong key")
+                .status(),
+            crate::VAULTMESH_STATUS_AUTH_FAILED
+        );
+        ephemeral
+            .open_ephemeral_with_key(ephemeral_path.clone(), key.as_slice())
+            .expect("open ephemeral with key");
+        ephemeral.refresh_from_disk().expect("refresh");
+        assert!(!ephemeral.sync_relay().matches_vault());
+        assert!(!ephemeral.sync_relay().failed());
+
+        let history_after = ephemeral
+            .execute("vault.unlock-history", json!({}))
+            .expect("history")
+            .as_array()
+            .expect("history array")
+            .len();
+        assert_eq!(history_after, history_before);
+
+        let login_id = login["id"].as_str().expect("login id");
+        let card_id = card["id"].as_str().expect("card id");
+        assert_eq!(
+            ephemeral
+                .fill_protected_values(
+                    crate::VAULTMESH_ITEM_KIND_LOGIN,
+                    &[
+                        crate::VAULTMESH_PROTECTED_FIELD_LOGIN_PASSWORD,
+                        crate::VAULTMESH_PROTECTED_FIELD_LOGIN_TOTP,
+                    ],
+                    login_id,
+                    true,
+                    None,
+                )
+                .expect_err("reprompt requires password")
+                .status(),
+            crate::VAULTMESH_STATUS_REAUTH_REQUIRED
+        );
+        assert_eq!(
+            ephemeral
+                .fill_protected_values(
+                    crate::VAULTMESH_ITEM_KIND_PAYMENT_CARD,
+                    &[
+                        crate::VAULTMESH_PROTECTED_FIELD_CARD_NUMBER,
+                        crate::VAULTMESH_PROTECTED_FIELD_CARD_SECURITY_CODE,
+                        crate::VAULTMESH_PROTECTED_FIELD_CARD_PIN,
+                    ],
+                    card_id,
+                    true,
+                    Some("wrong"),
+                )
+                .expect_err("wrong password must fail")
+                .status(),
+            crate::VAULTMESH_STATUS_AUTH_FAILED
+        );
+
+        let login_values = ephemeral
+            .fill_protected_values(
+                crate::VAULTMESH_ITEM_KIND_LOGIN,
+                &[
+                    crate::VAULTMESH_PROTECTED_FIELD_LOGIN_PASSWORD,
+                    crate::VAULTMESH_PROTECTED_FIELD_LOGIN_TOTP,
+                ],
+                login_id,
+                true,
+                Some(password),
+            )
+            .expect("login batch values");
+        assert_eq!(login_values.len(), 2);
+        assert_eq!(login_values[0].0, crate::VAULTMESH_PROTECTED_FIELD_LOGIN_PASSWORD);
+        assert_eq!(login_values[0].1.as_str(), "login-secret");
+        assert_eq!(login_values[1].0, crate::VAULTMESH_PROTECTED_FIELD_LOGIN_TOTP);
+        assert_eq!(login_values[1].1.len(), 6);
+
+        let card_values = ephemeral
+            .fill_protected_values(
+                crate::VAULTMESH_ITEM_KIND_PAYMENT_CARD,
+                &[
+                    crate::VAULTMESH_PROTECTED_FIELD_CARD_NUMBER,
+                    crate::VAULTMESH_PROTECTED_FIELD_CARD_SECURITY_CODE,
+                    crate::VAULTMESH_PROTECTED_FIELD_CARD_PIN,
+                ],
+                card_id,
+                true,
+                Some(password),
+            )
+            .expect("card batch values");
+        assert_eq!(card_values[0].1.as_str(), "4111111111111111");
+        assert_eq!(card_values[1].1.as_str(), "777");
+        assert_eq!(card_values[2].1.as_str(), "4321");
+        ephemeral.lock();
+
+        assert_eq!(
+            ephemeral
+                .open_ephemeral_with_password(ephemeral_path.clone(), "wrong".into())
+                .expect_err("wrong password")
+                .status(),
+            crate::VAULTMESH_STATUS_AUTH_FAILED
+        );
+        ephemeral
+            .open_ephemeral_with_password(ephemeral_path, password.into())
+            .expect("open ephemeral with password");
+        ephemeral.refresh_from_disk().expect("refresh");
+        assert!(!ephemeral.sync_relay().matches_vault());
+        assert!(!ephemeral.sync_relay().failed());
+        let history_after_pw = ephemeral
+            .execute("vault.unlock-history", json!({}))
+            .expect("history")
+            .as_array()
+            .expect("history array")
+            .len();
+        assert_eq!(history_after_pw, history_before);
+        ephemeral.lock();
+
         std::fs::remove_dir_all(dir).expect("cleanup");
     }
 }

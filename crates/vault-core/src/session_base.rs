@@ -237,20 +237,55 @@ impl VaultSession {
         }
         Ok(())
     }
+}
+
+/// Borrow-scoped proof that the caller verified the master password against a
+/// specific `VaultSession`. Cannot outlive the session borrow or be forged.
+pub struct VerifiedMasterPassword<'a>(&'a VaultSession);
+
+impl VaultSession {
+    pub fn verify_master_password_for_access(
+        &self,
+        master_password: &str,
+    ) -> Result<VerifiedMasterPassword<'_>, VaultError> {
+        self.verify_master_password(master_password)?;
+        Ok(VerifiedMasterPassword(self))
+    }
+
+    pub(super) fn find_card(&self, id: Uuid) -> Result<&PaymentCardItem, VaultError> {
+        self.payload()?
+            .cards
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or(VaultError::ItemNotFound)
+    }
 
     pub(super) fn card_for_access(
         &self,
         id: Uuid,
         master_password: Option<&str>,
     ) -> Result<&PaymentCardItem, VaultError> {
-        let item = self
-            .payload()?
-            .cards
-            .iter()
-            .find(|item| item.id == id)
-            .ok_or(VaultError::ItemNotFound)?;
+        let item = self.find_card(id)?;
         self.enforce_reprompt(item.master_password_reprompt, master_password)?;
         Ok(item)
+    }
+
+    pub(super) fn card_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&VerifiedMasterPassword<'_>>,
+    ) -> Result<&PaymentCardItem, VaultError> {
+        let item = self.find_card(id)?;
+        self.enforce_reprompt_with_proof(item.master_password_reprompt, proof)?;
+        Ok(item)
+    }
+
+    pub(super) fn find_ssh(&self, id: Uuid) -> Result<&SshCredentialItem, VaultError> {
+        self.payload()?
+            .ssh_items
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or(VaultError::ItemNotFound)
     }
 
     pub(super) fn ssh_for_access(
@@ -258,13 +293,18 @@ impl VaultSession {
         id: Uuid,
         master_password: Option<&str>,
     ) -> Result<&SshCredentialItem, VaultError> {
-        let item = self
-            .payload()?
-            .ssh_items
-            .iter()
-            .find(|item| item.id == id)
-            .ok_or(VaultError::ItemNotFound)?;
+        let item = self.find_ssh(id)?;
         self.enforce_reprompt(item.master_password_reprompt, master_password)?;
+        Ok(item)
+    }
+
+    pub(super) fn ssh_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&VerifiedMasterPassword<'_>>,
+    ) -> Result<&SshCredentialItem, VaultError> {
+        let item = self.find_ssh(id)?;
+        self.enforce_reprompt_with_proof(item.master_password_reprompt, proof)?;
         Ok(item)
     }
 
@@ -286,5 +326,238 @@ impl VaultSession {
         }
         let password = master_password.ok_or(VaultError::MasterPasswordRequired)?;
         self.verify_master_password(password)
+    }
+
+    pub(super) fn enforce_reprompt_with_proof(
+        &self,
+        required: bool,
+        proof: Option<&VerifiedMasterPassword<'_>>,
+    ) -> Result<(), VaultError> {
+        if !required {
+            return Ok(());
+        }
+        let proof = proof.ok_or(VaultError::MasterPasswordRequired)?;
+        if !std::ptr::eq(proof.0, self) {
+            return Err(VaultError::UnlockFailed);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod verified_password_tests {
+    use super::*;
+    use crate::SecretItemKind;
+
+    #[test]
+    fn verify_master_password_for_access_checks_credentials_and_batches_reprompt_access() {
+        let password = "correct horse battery staple";
+        let mut session = VaultSession::create(password).unwrap();
+
+        let reprompt_login = session
+            .add_item(NewLoginItem {
+                title: "Reprompt Login".into(),
+                username: "ada@example.test".into(),
+                password: "login-secret".into(),
+                url: Some("https://example.test".into()),
+                notes: None,
+                folder: None,
+                favorite: false,
+                totp_secret: Some("JBSWY3DPEHPK3PXP".into()),
+                recovery_codes: Vec::new(),
+                additional_urls: Vec::new(),
+                autofill_on_page_load: false,
+                master_password_reprompt: true,
+                custom_fields: Vec::new(),
+            })
+            .unwrap();
+        let plain_login = session
+            .add_item(NewLoginItem {
+                title: "Plain Login".into(),
+                username: "plain@example.test".into(),
+                password: "plain-secret".into(),
+                url: Some("https://plain.example.test".into()),
+                notes: None,
+                folder: None,
+                favorite: false,
+                totp_secret: Some("JBSWY3DPEHPK3PXP".into()),
+                recovery_codes: Vec::new(),
+                additional_urls: Vec::new(),
+                autofill_on_page_load: false,
+                master_password_reprompt: false,
+                custom_fields: Vec::new(),
+            })
+            .unwrap();
+        let reprompt_card = session
+            .add_card(NewPaymentCardItem {
+                title: "Reprompt Card".into(),
+                cardholder_name: "Ada Lovelace".into(),
+                card_number: "4111111111111111".into(),
+                expiration_month: 12,
+                expiration_year: 2030,
+                security_code: Some("999".into()),
+                pin: Some("1234".into()),
+                issuer: None,
+                network: None,
+                billing_address: None,
+                notes: None,
+                folder: None,
+                favorite: false,
+                master_password_reprompt: true,
+            })
+            .unwrap();
+        let reprompt_secret = session
+            .add_secret(NewSecretItem {
+                title: "Reprompt Secret".into(),
+                kind: SecretItemKind::ApiKey,
+                provider: None,
+                account: None,
+                secret: "api-token-value".into(),
+                environment: None,
+                scopes: Vec::new(),
+                expires_at: None,
+                website: None,
+                notes: None,
+                folder: None,
+                favorite: false,
+                master_password_reprompt: true,
+            })
+            .unwrap();
+        let reprompt_ssh = session
+            .add_ssh_credential(NewSshCredentialItem {
+                title: "Reprompt SSH".into(),
+                host: Some("ssh.example.test".into()),
+                port: 22,
+                username: "ada".into(),
+                password: Some("ssh-pw".into()),
+                public_key: Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGV4YW1wbGU=".into()),
+                private_key: Some("-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----".into()),
+                key_passphrase: Some("key-pass".into()),
+                notes: None,
+                folder: None,
+                favorite: false,
+                master_password_reprompt: true,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            session.verify_master_password_for_access("wrong password"),
+            Err(VaultError::UnlockFailed)
+        ));
+
+        // Non-reprompt item succeeds with no proof.
+        assert_eq!(
+            session
+                .password_for_access_with_proof(plain_login.id, None)
+                .unwrap(),
+            "plain-secret"
+        );
+        assert!(
+            session
+                .totp_code_for_access_with_proof(plain_login.id, 1_700_000_000, None)
+                .is_ok()
+        );
+
+        // Reprompt items reject None proof and keep public *_for_access strictness intact.
+        assert_eq!(
+            session.password_for_access(reprompt_login.id, None),
+            Err(VaultError::MasterPasswordRequired)
+        );
+        assert_eq!(
+            session.password_for_access_with_proof(reprompt_login.id, None),
+            Err(VaultError::MasterPasswordRequired)
+        );
+        assert_eq!(
+            session
+                .totp_code_for_access_with_proof(reprompt_login.id, 1_700_000_000, None)
+                .err(),
+            Some(VaultError::MasterPasswordRequired)
+        );
+        assert_eq!(
+            session.card_number_for_access_with_proof(reprompt_card.id, None),
+            Err(VaultError::MasterPasswordRequired)
+        );
+        assert_eq!(
+            session.secret_value_for_access_with_proof(reprompt_secret.id, None),
+            Err(VaultError::MasterPasswordRequired)
+        );
+        assert_eq!(
+            session.ssh_password_for_access_with_proof(reprompt_ssh.id, None),
+            Err(VaultError::MasterPasswordRequired)
+        );
+
+        // Forging a proof from another session is rejected fail-closed.
+        let other_session = VaultSession::create(password).unwrap();
+        let other_proof = other_session
+            .verify_master_password_for_access(password)
+            .unwrap();
+        assert_eq!(
+            session.password_for_access_with_proof(reprompt_login.id, Some(&other_proof)),
+            Err(VaultError::UnlockFailed)
+        );
+
+        // One verified proof unlocks all fields across Login, Card, Secret, SSH.
+        let proof = session.verify_master_password_for_access(password).unwrap();
+        assert_eq!(
+            session
+                .password_for_access_with_proof(reprompt_login.id, Some(&proof))
+                .unwrap(),
+            "login-secret"
+        );
+        assert!(
+            session
+                .totp_code_for_access_with_proof(reprompt_login.id, 1_700_000_000, Some(&proof))
+                .is_ok()
+        );
+        assert_eq!(
+            session
+                .card_number_for_access_with_proof(reprompt_card.id, Some(&proof))
+                .unwrap(),
+            "4111111111111111"
+        );
+        assert_eq!(
+            session
+                .card_security_code_for_access_with_proof(reprompt_card.id, Some(&proof))
+                .unwrap(),
+            "999"
+        );
+        assert_eq!(
+            session
+                .card_pin_for_access_with_proof(reprompt_card.id, Some(&proof))
+                .unwrap(),
+            "1234"
+        );
+        assert_eq!(
+            session
+                .secret_value_for_access_with_proof(reprompt_secret.id, Some(&proof))
+                .unwrap()
+                .as_str(),
+            "api-token-value"
+        );
+        assert_eq!(
+            session
+                .ssh_password_for_access_with_proof(reprompt_ssh.id, Some(&proof))
+                .unwrap(),
+            "ssh-pw"
+        );
+        assert!(
+            session
+                .ssh_private_key_for_access_with_proof(reprompt_ssh.id, Some(&proof))
+                .unwrap()
+                .contains("OPENSSH PRIVATE KEY")
+        );
+        assert_eq!(
+            session
+                .ssh_key_passphrase_for_access_with_proof(reprompt_ssh.id, Some(&proof))
+                .unwrap(),
+            "key-pass"
+        );
+
+        drop(proof);
+        session.lock();
+        assert!(matches!(
+            session.verify_master_password_for_access(password),
+            Err(VaultError::Locked)
+        ));
     }
 }

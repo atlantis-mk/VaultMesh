@@ -25,9 +25,9 @@ export class DesktopPinSettingsAdapter implements PinSettingsDomainAdapter {
   readonly description = '仅用于此台设备的桌面端主窗口锁屏解锁，与浏览器插件和 Agent PIN 完全独立。';
   readonly lockedDescription = '下次使用主密码成功解锁桌面端后，会恢复 PIN 尝试次数。';
   readonly idPrefix = 'desktop-pin';
-  readonly enableSuccessMessage = '桌面端 PIN 解锁已启用。';
-  readonly updateSuccessMessage = '桌面端 PIN 已更新。';
-  readonly disableSuccessMessage = '桌面端 PIN 解锁已关闭。';
+  readonly enableSuccessMessage = '桌面端 PIN 解锁已启用，所有端已锁定，请重新解锁。';
+  readonly updateSuccessMessage = '桌面端 PIN 已更新，所有端已锁定，请重新解锁。';
+  readonly disableSuccessMessage = '桌面端 PIN 解锁已关闭，所有端已锁定，请重新解锁。';
   readonly disableButtonLabel = '关闭桌面端 PIN';
 
   getStatus(): Promise<PinStatus> {
@@ -50,9 +50,9 @@ export class BrowserPinSettingsAdapter implements PinSettingsDomainAdapter {
   readonly description = '仅用于浏览器插件会话解锁，与桌面端和 Agent PIN 相互独立；插件设置页也会实时同步此状态。';
   readonly lockedDescription = '请在浏览器插件解锁时改用主密码，或在此重新设置浏览器插件 PIN。';
   readonly idPrefix = 'browser-pin';
-  readonly enableSuccessMessage = '浏览器插件 PIN 解锁已启用。';
-  readonly updateSuccessMessage = '浏览器插件 PIN 已更新。';
-  readonly disableSuccessMessage = '浏览器插件 PIN 解锁已关闭。';
+  readonly enableSuccessMessage = '浏览器插件 PIN 解锁已启用，浏览器插件已锁定。';
+  readonly updateSuccessMessage = '浏览器插件 PIN 已更新，浏览器插件已锁定。';
+  readonly disableSuccessMessage = '浏览器插件 PIN 解锁已关闭，浏览器插件已锁定。';
   readonly disableButtonLabel = '关闭浏览器插件 PIN';
 
   getStatus(): Promise<PinStatus> {
@@ -75,9 +75,9 @@ export class AgentPinSettingsAdapter implements PinSettingsDomainAdapter {
   readonly description = '仅用于本地 MCP 工具解锁，与桌面端和浏览器插件 PIN 相互独立。';
   readonly lockedDescription = '请在 Agent 解锁时改用主密码，或在此重新设置 Agent PIN。';
   readonly idPrefix = 'agent-pin';
-  readonly enableSuccessMessage = 'Agent PIN 快速解锁已启用。';
-  readonly updateSuccessMessage = 'Agent PIN 已更新。';
-  readonly disableSuccessMessage = 'Agent PIN 快速解锁已关闭。';
+  readonly enableSuccessMessage = 'Agent PIN 快速解锁已启用，Agent 已锁定。';
+  readonly updateSuccessMessage = 'Agent PIN 已更新，Agent 已锁定。';
+  readonly disableSuccessMessage = 'Agent PIN 快速解锁已关闭，Agent 已锁定。';
   readonly disableButtonLabel = '关闭 Agent PIN';
 
   getStatus(): Promise<PinStatus> {

@@ -113,9 +113,20 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
 
   async function savePin() {
     if (pin.length !== 6 || pin !== confirmation) return;
-    await run(() => desktopRpc("pin.enable", { pin, failureLimit }), pinStatus?.enabled ? "插件 PIN 已更新。" : "插件 PIN 解锁已启用。");
+    const ok = await run(
+      () => desktopRpc("pin.enable", { pin, failureLimit }),
+      pinStatus?.enabled ? "插件 PIN 已更新。" : "插件 PIN 解锁已启用。",
+      false,
+    );
     setPin("");
     setConfirmation("");
+    if (ok) onLocked();
+  }
+
+  async function disablePin() {
+    if (await run(() => desktopRpc("pin.disable"), "插件 PIN 解锁已关闭。", false)) {
+      onLocked();
+    }
   }
 
   async function saveSecurityPolicy() {
@@ -212,7 +223,7 @@ export function SettingsPanel({ fillHistory, recoveryTargets, onRecoveryChanged,
           <div className="flex flex-col gap-1 text-xs"><span id="pin-failure-limit-label">连续失败次数上限</span><div className="grid grid-cols-4 gap-1.5" role="group" aria-labelledby="pin-failure-limit-label">{[3, 4, 5, 6, 7, 8, 9, 10].map((value) => <Button key={value} type="button" size="sm" className="w-full px-1 text-xs" variant={failureLimit === value ? "default" : "outline"} aria-pressed={failureLimit === value} onClick={() => setFailureLimit(value)}>{value} 次{value === 5 ? "（默认）" : ""}</Button>)}</div></div>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" disabled={busy || pin.length !== 6 || pin !== confirmation} onClick={() => void savePin()}>{pinStatus?.enabled ? "更新 PIN" : "启用 PIN"}</Button>
-            {pinStatus?.enabled ? <Button size="sm" variant="destructive" disabled={busy} onClick={() => void run(() => desktopRpc("pin.disable"), "插件 PIN 解锁已关闭。")}>关闭 PIN</Button> : null}
+            {pinStatus?.enabled ? <Button size="sm" variant="destructive" disabled={busy} onClick={() => void disablePin()}>关闭 PIN</Button> : null}
           </div>
         </CardContent>
       </Card>

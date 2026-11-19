@@ -198,8 +198,8 @@ pub use browser_broker::BrowserBrokerUnixListener;
 pub use browser_broker::BrowserBrokerHttpListener;
 pub use browser_broker::{
     BrowserBrokerCore, BrowserBrokerPlatform, BrowserPlatformError, BrowserRepromptRequest,
-    BrowserRepromptWaiter, BrowserSessionUnlockRequest, BrowserSessionUnlockWaiter,
-    BrowserUnlockResolution, TAURI_BROWSER_SLICE_OPERATIONS,
+    BrowserRepromptResolution, BrowserRepromptWaiter, BrowserSessionUnlockRequest,
+    BrowserSessionUnlockWaiter, BrowserUnlockResolution, TAURI_BROWSER_SLICE_OPERATIONS,
 };
 #[cfg(target_os = "windows")]
 use browser_integration_windows::{BrowserIntegrationError, WindowsBrowserIntegration};
@@ -518,7 +518,7 @@ async fn desktop_invoke(
     let input = request.input;
 
     if operation.starts_with("agent.") {
-        return handle_agent_admin(&state, &operation, input);
+        return handle_agent_admin(Some(&app), &state, &operation, input);
     }
     if operation.starts_with("lan.") {
         return handle_lan_pairing(&state, &operation, input);
@@ -598,8 +598,7 @@ async fn desktop_invoke(
                 runtime.execute("vault.change-password", input)
             })
             .await?;
-            disable_all_domain_pins(&state).await?;
-            disable_biometrics(&state).await?;
+            lock_all_sessions(Some(&app), &state);
             Ok(result)
         }
         "biometric.status" => {
@@ -670,22 +669,26 @@ async fn desktop_invoke(
             .await
         }
         "pin.enable" => {
-            execute_pin_domain_action_async(
+            let result = execute_pin_domain_action_async(
                 &state,
                 PinDomainKind::Desktop,
                 PinDomainAction::Enable,
                 input,
             )
-            .await
+            .await?;
+            lock_all_sessions(Some(&app), &state);
+            Ok(result)
         }
         "pin.disable" => {
-            execute_pin_domain_action_async(
+            let result = execute_pin_domain_action_async(
                 &state,
                 PinDomainKind::Desktop,
                 PinDomainAction::Disable,
                 input,
             )
-            .await
+            .await?;
+            lock_all_sessions(Some(&app), &state);
+            Ok(result)
         }
         "browser.pin.status" => {
             execute_pin_domain_action_async(
@@ -697,22 +700,26 @@ async fn desktop_invoke(
             .await
         }
         "browser.pin.enable" => {
-            execute_pin_domain_action_async(
+            let result = execute_pin_domain_action_async(
                 &state,
                 PinDomainKind::Browser,
                 PinDomainAction::Enable,
                 input,
             )
-            .await
+            .await?;
+            lock_production_browser_sessions(&state);
+            Ok(result)
         }
         "browser.pin.disable" => {
-            execute_pin_domain_action_async(
+            let result = execute_pin_domain_action_async(
                 &state,
                 PinDomainKind::Browser,
                 PinDomainAction::Disable,
                 input,
             )
-            .await
+            .await?;
+            lock_production_browser_sessions(&state);
+            Ok(result)
         }
         "pin.unlock" => {
             desktop_authentication::invalidate(&app, &state);

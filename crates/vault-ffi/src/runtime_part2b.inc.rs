@@ -209,6 +209,31 @@ pub fn record_agent_audit(
             .map_err(|_| VAULTMESH_STATUS_CORE_ERROR.into())
     }
 
+    pub fn fill_protected_values(
+        &self,
+        item_kind: u32,
+        protected_fields: &[u32],
+        item_id: &str,
+        require_reprompt: bool,
+        master_password: Option<&str>,
+    ) -> Result<Vec<(u32, Zeroizing<String>)>, DesktopRuntimeError> {
+        let vault = self
+            .vault
+            .as_ref()
+            .ok_or(DesktopRuntimeError::from(VAULTMESH_STATUS_LOCKED))?;
+        let id = Uuid::parse_str(item_id)
+            .map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_INVALID_ARGUMENT))?;
+        crate::privileged::protected_values(
+            vault,
+            item_kind,
+            protected_fields,
+            id,
+            require_reprompt,
+            master_password,
+        )
+        .map_err(map_runtime_core_error)
+    }
+
     pub fn totp_value(
         &self,
         item_id: &str,
@@ -411,7 +436,6 @@ pub fn record_agent_audit(
         let _guard = mutation_lock.lock().map_err(|_| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
         write_vault(&self.path, canonical.as_slice())
             .map_err(|()| DesktopRuntimeError::from(VAULTMESH_STATUS_IO_ERROR))?;
-        let master_password_verified = matches!(unlock_source, UnlockEventSource::Desktop);
         session
             .record_unlock_event(unlock_source)
             .map_err(map_runtime_core_error)?;
@@ -421,7 +445,6 @@ pub fn record_agent_audit(
         self.relay.invalidate();
         drop(_guard);
         self.replace(session, canonical.as_slice());
-        self.desktop_master_password_verified = master_password_verified;
         Ok(self.status())
     }
 
@@ -486,18 +509,37 @@ pub fn record_agent_audit(
         VAULTMESH_ITEM_KIND_SECRET
     }
 
-    fn replace(&mut self, mut session: VaultSession, encrypted: &[u8]) {
+    fn replace(&mut self, session: VaultSession, encrypted: &[u8]) {
+        self.replace_with_sync(session, encrypted, false);
+    }
+
+    fn replace_ephemeral(&mut self, session: VaultSession, encrypted: &[u8]) {
+        self.replace_with_sync(session, encrypted, true);
+    }
+
+    fn replace_with_sync(
+        &mut self,
+        mut session: VaultSession,
+        encrypted: &[u8],
+        ephemeral_readonly: bool,
+    ) {
         self.lock();
         self.relay = crate::sync_relay::RelayHub::for_path(&self.path);
-        if crate::sync_relay::system_locked() { session.lock(); return; }
+        if crate::sync_relay::system_locked() {
+            session.lock();
+            return;
+        }
+        self.ephemeral_readonly = ephemeral_readonly;
         self.vault = Some(VaultmeshVault {
             session,
             path: self.path.clone(),
             persisted_fingerprint: vault_fingerprint(encrypted),
         });
-        if let Some(vault) = self.vault.as_mut() {
-            crate::sync_relay::publish(vault);
-            let _ = crate::sync_relay::pump(vault);
+        if !ephemeral_readonly {
+            if let Some(vault) = self.vault.as_mut() {
+                crate::sync_relay::publish(vault);
+                let _ = crate::sync_relay::pump(vault);
+            }
         }
     }
 }

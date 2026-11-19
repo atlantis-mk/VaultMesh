@@ -126,10 +126,7 @@ describe('Unified 3-domain PIN settings in Security Center and Agent Management'
             return desktopPin;
           }),
           changeMasterPassword: vi.fn(async () => {
-            desktopPin = makePinStatus({ enabled: false });
-            browserPin = makePinStatus({ enabled: false });
-            agentPin = makePinStatus({ enabled: false });
-            return { hasVault: true, unlocked: true, itemCount: 0 };
+            return { hasVault: true, unlocked: false, itemCount: 0 };
           }),
         },
         browser: {
@@ -254,7 +251,7 @@ describe('Unified 3-domain PIN settings in Security Center and Agent Management'
     expect((screen.getByLabelText('6 位 PIN') as HTMLInputElement).value).toBe('');
   });
 
-  it('refreshes all three domain PIN statuses after changing master password', async () => {
+  it('preserves quick unlock PIN statuses without refreshing after changing master password', async () => {
     browserPin = makePinStatus({ enabled: true, failureLimit: 5, remainingAttempts: 5 });
     render(<SecurityCenterPage />);
 
@@ -266,15 +263,25 @@ describe('Unified 3-domain PIN settings in Security Center and Agent Management'
     fireEvent.click(screen.getByRole('button', { name: '更新主密码' }));
 
     await waitFor(() => expect(window.vaultMesh.vault.changeMasterPassword).toHaveBeenCalledOnce());
-    await waitFor(() => expect(screen.getByText(/桌面端未启用.*浏览器插件未启用.*Agent 工具未启用/)).toBeTruthy());
-    expect(toast.success).toHaveBeenCalledWith('主密码已更新；快速解锁已关闭。');
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('主密码已更新，所有端已锁定，请重新解锁。'));
+    expect(window.vaultMesh.vault.pinStatus).toHaveBeenCalledOnce();
+    expect(window.vaultMesh.browser.pinStatus).toHaveBeenCalledOnce();
+    expect(window.vaultMesh.agent.pinStatus).toHaveBeenCalledOnce();
+    expect(screen.getByText(/桌面端已启用.*浏览器插件已启用.*Agent 工具已锁定/)).toBeTruthy();
   });
 
-  it('reuses PinDomainSettingsForm inside AgentManagementPage without duplicate form logic', async () => {
+  it('reuses PinDomainSettingsForm inside AgentManagementPage without duplicate form logic and zeroes leases on agent PIN change', async () => {
+    vi.mocked(window.vaultMesh.agent.status).mockResolvedValueOnce({
+      ...baseAgentStatus,
+      pin: agentPin,
+      access: { ...baseAgentStatus.access, clientUnlocked: true, activeLeaseCount: 2 },
+    });
     render(<AgentManagementPage />);
 
     expect(await screen.findByText('独立 MCP 解锁')).toBeTruthy();
     expect(screen.getByText('Agent PIN已锁定')).toBeTruthy();
+    const lockAllButton = screen.getByRole('button', { name: '锁定全部 MCP 连接' }) as HTMLButtonElement;
+    expect(lockAllButton.disabled).toBe(false);
 
     const pinInput = screen.getByLabelText('新 6 位 PIN') as HTMLInputElement;
     const confirmInput = screen.getByLabelText('确认 6 位 PIN') as HTMLInputElement;
@@ -286,6 +293,8 @@ describe('Unified 3-domain PIN settings in Security Center and Agent Management'
       pin: '246810',
       failureLimit: 3,
     }));
-    expect(screen.getByRole('button', { name: '锁定全部 MCP 连接' })).toBeTruthy();
+    await waitFor(() => expect(lockAllButton.disabled).toBe(true));
+    expect(screen.getByText(/0 条 MCP 解锁租约/)).toBeTruthy();
+    expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Agent 已锁定。'));
   });
 });

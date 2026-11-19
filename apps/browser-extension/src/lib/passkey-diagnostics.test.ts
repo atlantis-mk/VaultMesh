@@ -52,6 +52,7 @@ describe('explaining diagnostic lines', () => {
     ['[VaultMesh Passkey] create https://github.com -> browser (desktop-desktop-unavailable)', '连接不上 VaultMesh 桌面端'],
     ['[VaultMesh Passkey] create https://github.com -> cancelled (unlock-timed-out)', '5 分钟内没有解锁'],
     ['[VaultMesh Passkey] create https://github.com -> cancelled (desktop-confirmation-declined)', '原生确认框里点了取消'],
+    ['[VaultMesh Passkey] get https://github.com -> cancelled (desktop-session-locked)', 'VaultMesh 会话已锁定，通行密钥请求已取消。'],
     ['[VaultMesh Passkey] https://github.com -> browser (unsupported-extension:prf, decided in page)', '不支持的扩展（prf）'],
     ['[VaultMesh Passkey] get https://github.com -> browser (permissions-policy-denied, decided in page)', 'Permissions Policy'],
     ['[VaultMesh Passkey] get https://github.com -> browser (site-mode-native)', '系统'],

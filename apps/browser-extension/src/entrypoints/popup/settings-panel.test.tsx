@@ -276,4 +276,114 @@ describe("CT-BROWSER-003 popup plugin security settings", () => {
       createSpy.mockRestore();
     }
   });
+
+  it("calls onLocked without reloading settings when enabling or disabling plugin PIN succeeds, and keeps session on failure", async () => {
+    let pinEnabled = false;
+    let rejectPinMutation = false;
+    desktopRpc.mockImplementation(async (operation: string) => {
+      if (operation === "pin.status") return { enabled: pinEnabled, locked: false, failureLimit: 5, remainingAttempts: 5 };
+      if (operation === "biometric.status") return { available: false, enabled: false };
+      if (operation === "browser.pairing.status") return { paired: true };
+      if (operation === "security.settings.get") return desktopSettings;
+      if (operation === "pin.enable") {
+        if (rejectPinMutation) throw new Error("启用 PIN 失败");
+        pinEnabled = true;
+        return { enabled: true, locked: false, failureLimit: 5, remainingAttempts: 5 };
+      }
+      if (operation === "pin.disable") {
+        if (rejectPinMutation) throw new Error("关闭 PIN 失败");
+        pinEnabled = false;
+        return { enabled: false, locked: false, failureLimit: 5, remainingAttempts: 5 };
+      }
+      throw new Error(`Unexpected operation: ${operation}`);
+    });
+
+    const onNotice = vi.fn();
+    const onLocked = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    let root = createRoot(container);
+
+    try {
+      await act(async () => root.render(createElement(SettingsPanel, {
+        fillHistory: [], recoveryTargets: [], onRecoveryChanged: vi.fn(), onNotice, onLocked,
+      })));
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("插件 PIN 解锁"))!.click());
+
+      const setInputValue = (input: HTMLInputElement, value: string) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+        setter.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+
+      const inputs = Array.from(container.querySelectorAll('input[type="password"]')) as HTMLInputElement[];
+      await act(async () => {
+        setInputValue(inputs[0]!, "123456");
+        setInputValue(inputs[1]!, "123456");
+      });
+
+      // Failed pin.enable keeps session open without calling onLocked or reloading.
+      rejectPinMutation = true;
+      const callsBeforeFailedEnable = desktopRpc.mock.calls.length;
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "启用 PIN")!.click());
+      expect(desktopRpc.mock.calls.slice(callsBeforeFailedEnable).map(([op]) => op)).toEqual(["pin.enable"]);
+      expect(onNotice).toHaveBeenCalledWith("启用 PIN 失败", "error");
+      expect(onLocked).not.toHaveBeenCalled();
+
+      // Successful pin.enable skips reload and immediately calls onLocked.
+      rejectPinMutation = false;
+      onNotice.mockClear();
+      await act(async () => {
+        setInputValue(inputs[0]!, "123456");
+        setInputValue(inputs[1]!, "123456");
+      });
+      const callsBeforeEnable = desktopRpc.mock.calls.length;
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "启用 PIN")!.click());
+      expect(desktopRpc).toHaveBeenCalledWith("pin.enable", { pin: "123456", failureLimit: 5 });
+      expect(desktopRpc.mock.calls.slice(callsBeforeEnable).map(([op]) => op)).toEqual(["pin.enable"]);
+      expect(onNotice).toHaveBeenCalledWith("插件 PIN 解锁已启用。", "success");
+      expect(onLocked).toHaveBeenCalledTimes(1);
+
+      // Re-mount with PIN enabled to test update PIN + disable PIN success and failure paths.
+      onNotice.mockClear();
+      onLocked.mockClear();
+      desktopRpc.mockClear();
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await act(async () => root.render(createElement(SettingsPanel, {
+        fillHistory: [], recoveryTargets: [], onRecoveryChanged: vi.fn(), onNotice, onLocked,
+      })));
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("插件 PIN 解锁"))!.click());
+
+      const enabledInputs = Array.from(container.querySelectorAll('input[type="password"]')) as HTMLInputElement[];
+      await act(async () => {
+        setInputValue(enabledInputs[0]!, "654321");
+        setInputValue(enabledInputs[1]!, "654321");
+      });
+      const callsBeforeUpdate = desktopRpc.mock.calls.length;
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "更新 PIN")!.click());
+      expect(desktopRpc.mock.calls.slice(callsBeforeUpdate).map(([op]) => op)).toEqual(["pin.enable"]);
+      expect(onNotice).toHaveBeenCalledWith("插件 PIN 已更新。", "success");
+      expect(onLocked).toHaveBeenCalledTimes(1);
+
+      onNotice.mockClear();
+      onLocked.mockClear();
+      rejectPinMutation = true;
+      const callsBeforeFailedDisable = desktopRpc.mock.calls.length;
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "关闭 PIN")!.click());
+      expect(desktopRpc.mock.calls.slice(callsBeforeFailedDisable).map(([op]) => op)).toEqual(["pin.disable"]);
+      expect(onNotice).toHaveBeenCalledWith("关闭 PIN 失败", "error");
+      expect(onLocked).not.toHaveBeenCalled();
+
+      rejectPinMutation = false;
+      const callsBeforeDisable = desktopRpc.mock.calls.length;
+      await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "关闭 PIN")!.click());
+      expect(desktopRpc.mock.calls.slice(callsBeforeDisable).map(([op]) => op)).toEqual(["pin.disable"]);
+      expect(onNotice).toHaveBeenCalledWith("插件 PIN 解锁已关闭。", "success");
+      expect(onLocked).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });

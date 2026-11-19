@@ -62,7 +62,7 @@ pub use passkey::{
     PASSKEY_PROVIDER, PASSKEY_SCOPE, PasskeyCandidate, PasskeyError, PasskeyGetRequestView,
     PasskeyRequestSummary, describe_passkey_request, get_passkey_request_view,
 };
-pub use session::VaultSession;
+pub use session::{VerifiedMasterPassword, VaultSession};
 pub use totp::{TotpCode, normalize_totp_secret};
 
 /// Compatibility helper for imports and test fixtures. Applications should

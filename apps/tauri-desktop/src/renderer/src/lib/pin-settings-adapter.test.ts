@@ -57,6 +57,16 @@ describe('PinSettingsDomainFactory & PinSettingsDomainAdapter variants', () => {
     expect(browser).toBeInstanceOf(BrowserPinSettingsAdapter);
     expect(agent).toBeInstanceOf(AgentPinSettingsAdapter);
 
+    expect(desktop.enableSuccessMessage).toContain('所有端已锁定，请重新解锁。');
+    expect(desktop.updateSuccessMessage).toContain('所有端已锁定，请重新解锁。');
+    expect(desktop.disableSuccessMessage).toContain('所有端已锁定，请重新解锁。');
+    expect(browser.enableSuccessMessage).toContain('浏览器插件已锁定。');
+    expect(browser.updateSuccessMessage).toContain('浏览器插件已锁定。');
+    expect(browser.disableSuccessMessage).toContain('浏览器插件已锁定。');
+    expect(agent.enableSuccessMessage).toContain('Agent 已锁定。');
+    expect(agent.updateSuccessMessage).toContain('Agent 已锁定。');
+    expect(agent.disableSuccessMessage).toContain('Agent 已锁定。');
+
     await expect(desktop.getStatus()).resolves.toEqual(desktopPinStatus);
     await desktop.enable({ pin: '111111', failureLimit: 5 });
     await desktop.disable();

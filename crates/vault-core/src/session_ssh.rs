@@ -497,6 +497,17 @@ impl VaultSession {
             .ok_or(VaultError::SshSecretUnavailable)
     }
 
+    pub fn ssh_password_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&crate::VerifiedMasterPassword<'_>>,
+    ) -> Result<&str, VaultError> {
+        self.ssh_for_access_with_proof(id, proof)?
+            .password
+            .as_deref()
+            .ok_or(VaultError::SshSecretUnavailable)
+    }
+
     pub fn ssh_public_key_for_access(&self, id: Uuid) -> Result<&str, VaultError> {
         self.payload()?
             .ssh_items
@@ -519,12 +530,34 @@ impl VaultSession {
             .ok_or(VaultError::SshSecretUnavailable)
     }
 
+    pub fn ssh_private_key_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&crate::VerifiedMasterPassword<'_>>,
+    ) -> Result<&str, VaultError> {
+        self.ssh_for_access_with_proof(id, proof)?
+            .private_key
+            .as_deref()
+            .ok_or(VaultError::SshSecretUnavailable)
+    }
+
     pub fn ssh_key_passphrase_for_access(
         &self,
         id: Uuid,
         master_password: Option<&str>,
     ) -> Result<&str, VaultError> {
         self.ssh_for_access(id, master_password)?
+            .key_passphrase
+            .as_deref()
+            .ok_or(VaultError::SshSecretUnavailable)
+    }
+
+    pub fn ssh_key_passphrase_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&crate::VerifiedMasterPassword<'_>>,
+    ) -> Result<&str, VaultError> {
+        self.ssh_for_access_with_proof(id, proof)?
             .key_passphrase
             .as_deref()
             .ok_or(VaultError::SshSecretUnavailable)

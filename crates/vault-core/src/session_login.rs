@@ -277,29 +277,38 @@ impl VaultSession {
             .ok_or(VaultError::ItemNotFound)
     }
 
+    fn find_login_item(&self, id: Uuid) -> Result<&crate::LoginItem, VaultError> {
+        self.payload()?
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or(VaultError::ItemNotFound)
+    }
+
     pub fn password_for_access(
         &self,
         id: Uuid,
         master_password: Option<&str>,
     ) -> Result<&str, VaultError> {
-        let item = self
-            .payload()?
-            .items
-            .iter()
-            .find(|item| item.id == id)
-            .ok_or(VaultError::ItemNotFound)?;
+        let item = self.find_login_item(id)?;
         self.enforce_reprompt(item.master_password_reprompt, master_password)?;
+        Ok(item.password.as_str())
+    }
+
+    pub fn password_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&crate::VerifiedMasterPassword<'_>>,
+    ) -> Result<&str, VaultError> {
+        let item = self.find_login_item(id)?;
+        self.enforce_reprompt_with_proof(item.master_password_reprompt, proof)?;
         Ok(item.password.as_str())
     }
 
     /// Produces a current TOTP code without returning the long-lived seed.
     pub fn totp_code(&self, id: Uuid, unix_time: u64) -> Result<TotpCode, VaultError> {
         let secret = self
-            .payload()?
-            .items
-            .iter()
-            .find(|item| item.id == id)
-            .ok_or(VaultError::ItemNotFound)?
+            .find_login_item(id)?
             .totp_secret
             .as_deref()
             .ok_or(VaultError::TotpUnavailable)?;
@@ -312,13 +321,23 @@ impl VaultSession {
         unix_time: u64,
         master_password: Option<&str>,
     ) -> Result<TotpCode, VaultError> {
-        let item = self
-            .payload()?
-            .items
-            .iter()
-            .find(|item| item.id == id)
-            .ok_or(VaultError::ItemNotFound)?;
+        let item = self.find_login_item(id)?;
         self.enforce_reprompt(item.master_password_reprompt, master_password)?;
+        let secret = item
+            .totp_secret
+            .as_deref()
+            .ok_or(VaultError::TotpUnavailable)?;
+        crate::totp::generate_totp(secret, unix_time)
+    }
+
+    pub fn totp_code_for_access_with_proof(
+        &self,
+        id: Uuid,
+        unix_time: u64,
+        proof: Option<&crate::VerifiedMasterPassword<'_>>,
+    ) -> Result<TotpCode, VaultError> {
+        let item = self.find_login_item(id)?;
+        self.enforce_reprompt_with_proof(item.master_password_reprompt, proof)?;
         let secret = item
             .totp_secret
             .as_deref()

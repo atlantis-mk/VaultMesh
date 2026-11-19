@@ -24,7 +24,7 @@
    - Linux（GTK 3）：`LinuxWindowChromeAdapter` 顶栏内嵌增量为 `0.0`、`requires_temporary_resizable_for_resize() == true`，`agent-unlock` 冷启高 `440.0`，紧凑态调整尺寸若不可缩放则临时 `SetResizable(true)` → `SetMinSize` → `SetSize` → `SetResizable(false)`，避免 GTK 3 忽略 `gtk_window_resize`；
    - `main` 进入 `/vault` 或 `/setup` 后必须立即恢复保存的常规尺寸（无顶栏补偿叠加）与 `resizable(true)`，消除启动大窗口闪现。
    - **三端无竞态窗口居中**：`tauri.conf.json` 为 `main` 启用 `"center": true`；`WindowChromeAdapter::centered_position` 结合当前显示器 `work_area`、`scale_factor`、目标内框尺寸与外框 Chrome 差值 `WindowFrameDelta`（`outer - inner` 钳制在 `[0..64, 0..128]`）计算并钳制工作区内居中坐标（macOS/Linux 输出 `Position::Logical`，Windows 按 DPI 换算输出 `Position::Physical`），绝不调用内置 `window.center()`。`MainWindowLayoutAdapter` 在 `compact <-> normal` 跨模式切换时设置 `recenter = true`，由 `plan_resize_steps` 在 `SetSize` 后执行 `SetPosition`；`agent-unlock`（含隐藏态更新紧凑高度）与 `agent-authorization` 在从隐藏态重新显示（`!was_visible`）前按当前显示器 `work_area` 重新居中。
-3. 浏览器 Popup 锁定态只显示精简锁定页，不再收集 PIN、主密码或轮询 Touch ID；正常打开自动唤起桌面统一解锁窗，用户在设置中主动「立即锁定」后不立即重弹，仅显示手动解锁入口。Popup 关闭或失焦不得取消桌面解锁窗。
+3. 浏览器 Popup 锁定态只显示精简锁定页，不再收集 PIN、主密码或轮询 Touch ID；正常打开自动唤起桌面统一解锁窗，用户在设置中主动「立即锁定」或启用/更新/关闭插件 PIN 后不立即重弹，仅显示手动解锁入口。Popup 关闭或失焦不得取消桌面解锁窗。
 4. 新增 Browser RPC `browser.unlock.request` 作为 Popup 唤起统一解锁窗的唯一通道（`requiresUnlock: false`、`requiresGesture: true`、`requiresConfirmation: false`）。既有 `vault.unlock`、`pin.unlock`、`biometric.authentication.*` 保持向后兼容，不在本 ADR 内删除。
 
 ### 2. 多窗口 `LAAuthenticationView` 安全边界
@@ -46,8 +46,8 @@
 ### 4. 三端独立 PIN 与桌面统一管理
 
 1. 桌面（`state.pin`）、浏览器（`state.browser_pin`）、Agent（`state.agent_pin`）保持独立存储、独立失败计数与锁定；浏览器解锁窗读取的是 `browser_pin` 而非桌面 PIN；桌面主密码解锁只重置桌面 PIN 失败计数。`TauriBrowserPlatform` 与 `RuntimeState` 共享同一个浏览器 PIN 服务实例，使扩展设置页与桌面端实时同步（实验身份 `into_bitwarden_development` 保持独立隔离）。
-2. 桌面安全中心提供统一的 “PIN 快速解锁” 入口，集中管理三端各自的 6 位 PIN。新增桌面 operation `browser.pin.status` / `browser.pin.enable` / `browser.pin.disable` 与 `agent.pin.status`，与既有 `pin.*`、`agent.pin.enable/disable` 一起委托共享辅助函数；启用任一端 PIN 都要求桌面当前会话由主密码认证并取得快速解锁材料，认证因子必须由 Rust runtime 保存和验证；关闭要求桌面已解锁。扩展既有 `pin.status/enable/disable` RPC 保持兼容。
-3. `vault.create`、`vault.change-password`、`vault.restore` 必须同步关闭三端全部 PIN；主密码解锁后对三端执行 “PIN 属于不同 Vault 则关闭”。Touch ID 继续依据 `ADR-0051` 统一跟随桌面配置，不新增扩展或 Agent 独立生物识别开关。
+2. 桌面安全中心提供统一的 “PIN 快速解锁” 入口，集中管理三端各自的 6 位 PIN。新增桌面 operation `browser.pin.status` / `browser.pin.enable` / `browser.pin.disable` 与 `agent.pin.status`，与既有 `pin.*`、`agent.pin.enable/disable` 一起委托共享辅助函数；任一解锁方式（主密码、PIN 或 Touch ID）在已解锁态下均可启用、更新或关闭桌面、浏览器与 Agent 三端 PIN（均经 Rust runtime 验证解锁状态并取得快速解锁材料 `quick_unlock_material`）。扩展既有 `pin.status/enable/disable` RPC 保持兼容。修改（启用/更新/关闭）任一端 PIN 后必须按所属安全域立即锁定：桌面 PIN 锁定全部端（桌面、全部浏览器 broker 与 Agent）；桌面端 `browser.pin.*` 仅锁定生产浏览器会话（不含独立开发监听，桌面与 Agent 保持解锁）；扩展端 `pin.enable/disable` 仅锁定当前浏览器会话并清理扩展缓存、填充确认与轮询（桌面与 Agent 保持解锁）；Agent PIN 仅锁定 Agent 会话与访问租约（保护 `BrowserUnlock` 窗口且不停止 `lan_sync`，桌面与浏览器保持解锁）。
+3. `vault.create` 与 `vault.restore`（替换 `vault_key`）必须同步关闭三端全部 PIN 与 Touch ID；`vault.change-password`（仅用新密码重包 header，不替换 `vault_key`）保留三端 PIN 与 Touch ID，并在变更后立即锁定全部端（桌面 + 全部浏览器 broker + Agent，其中扩展入口先同步预览/历史/事件再按锁外顺序锁定桌面、Agent 与当前浏览器会话以避免互斥锁死锁）；主密码解锁后对三端执行 “PIN 属于不同 Vault 则关闭”。Touch ID 继续依据 `ADR-0051` 统一跟随桌面配置，不新增扩展或 Agent 独立生物识别开关。
 
 ### 5. Factory + Adapter 架构约束
 
@@ -77,8 +77,8 @@
 
 ## 验证
 
-- `CT-DESKTOP-AUTH-001`：`desktop_authentication` 协调器的多窗口抢占、仅 `main` + `agent-unlock`、取消/迟到回调、`DesktopAuthPlatformFactory` 全平台适配器，以及 `UnlockSurfaceFactory`、`PinDomainFactory`、`WindowLayoutFactory` 与前端 `UnlockSurfaceUiFactory`、`PlatformAuthBridgeFactory`、`PinSettingsDomainFactory` 全变体单测。
-- `CT-BROWSER-002`：`browser.unlock.request` 的 Rust/TypeScript 路由、policy 与 parity；`ct_browser_002_persistent_session_unlock_and_zero_popup_subsequent_autofill` 持久会话解锁与后续零弹窗填充。
-- `CT-PASSKEY-002`：`browser_broker_tests.rs` 中会话解锁后锁外 `confirm_passkey`、拒绝确认与确认前后过期不改写 Vault 的回归。
+- `CT-DESKTOP-AUTH-001`：`desktop_authentication` 协调器的多窗口抢占、仅 `main` + `agent-unlock`、取消/迟到回调、`DesktopAuthPlatformFactory` 全平台适配器，以及 `UnlockSurfaceFactory`、`PinDomainFactory`（含主密码/PIN/Touch ID 任意已解锁方式均可管理三端 PIN、改主密码保留快速解锁并锁定全部、三端 PIN 按对应锁域独立锁定且 Agent 锁定不停止 `lan_sync` 或误伤 `BrowserUnlock` 窗口）、`WindowLayoutFactory` 与前端 `UnlockSurfaceUiFactory`、`PlatformAuthBridgeFactory`、`PinSettingsDomainFactory` 全变体单测。
+- `CT-BROWSER-002`：`browser.unlock.request` 的 Rust/TypeScript 路由、policy 与 parity；`ct_browser_002_persistent_session_unlock_and_zero_popup_subsequent_autofill` 持久会话解锁与后续零弹窗填充；锁定态 `finish_autofill_reprompt` 通过 `ephemeral_readonly` 短时 runtime（优先复用 `vault_key` 零外层 KDF、跳过 `sync_relay`、缺失时重建无秘密 `preauth_preview`）与整次 `execute` 最多 1 次 Argon2 批量重验；以及 `vault.change-password` / `pin.enable` / `pin.disable` 锁域隔离（无死锁）与扩展端缓存/提示/轮询清理。
+- `CT-PASSKEY-002`：`browser_broker_tests.rs` 中会话解锁后锁外 `confirm_passkey`、拒绝确认与确认前后过期不改写 Vault 的回归，以及三态候选匹配（`passkey-selection-required`）、锁定态 `preauth_preview` 多候选免弹解锁直拒、扩展解锁后重探选号闭环、`onSiteModeChanged('native')` 发送 `passkeys.cancel` 与 `desktop-session-locked` 诊断区分。
 - `CT-BROWSER-001`：`PopupUnlockFactory` 锁定页自动/手动锁行为与 Popup 关闭不取消桌面解锁窗，`CT-BROWSER-003` 的插件 PIN 同步。
 - `AT-DESKTOP-AUTH-001`、`AT-AGENT-UNLOCK-001`、`AT-BROWSER-001`：在真实签名 macOS 包上验收三端紧凑解锁窗、嵌入式 Touch ID、独立 PIN、多窗口焦点切换、浏览器会话解锁后零弹窗填充、支付卡/主密码重验及 Passkey 系统确认。
