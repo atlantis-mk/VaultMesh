@@ -843,3 +843,194 @@ describe('global default modes (passkeyGetDefault / passkeyCreateDefault) and pr
     await expect(pending).resolves.toMatchObject({ status: 'cancelled' });
   });
 });
+
+describe('passkey-selection-required recovery & session-locked cancellation (AC-4 & AC-5)', () => {
+  it('re-probes and prompts selection when passkeys.get returns passkey-selection-required with multiple candidates', async () => {
+    await setSitePasskeyMode(origin, 'vaultmesh');
+    let probeCount = 0;
+    const { broker, calls } = make({
+      'passkeys.probe': () => {
+        probeCount += 1;
+        if (probeCount === 1) return { status: 'unknown', rpId: 'example.test', origin, candidates: [] };
+        return {
+          status: 'available',
+          rpId: 'example.test',
+          origin,
+          candidates: [
+            { itemId: item1, credentialId: 'c1', title: 'Personal', account: 'alice@example.test' },
+            { itemId: item2, credentialId: 'c2', title: 'Work', account: 'bob@example.test' },
+          ],
+        };
+      },
+      'passkeys.get': (input) => {
+        if (!input?.itemId) throw new DesktopRpcError('passkey-selection-required', '找到多个可用 Passkey，请先选择要使用的凭证。');
+        return { responseJson: '{"id":"chosen"}' };
+      },
+    });
+
+    const pending = broker.handle(getRequest, page);
+    await flush();
+    const prompt = broker.currentPrompt()!;
+    expect(prompt.stage).toBe('choose');
+    expect(prompt.candidates).toHaveLength(2);
+    expect(broker.choose(prompt.token, 'vaultmesh', false, undefined, item2)).toBe(true);
+    await expect(pending).resolves.toEqual({ status: 'ok', responseJson: '{"id":"chosen"}' });
+    expect(probeCount).toBe(2);
+    expect(calls.filter((call) => call.operation === 'passkeys.get').map((call) => call.input?.itemId)).toEqual([undefined, item2]);
+  });
+
+  it('re-probes and retries directly with single candidate or falls back on zero candidates after passkey-selection-required', async () => {
+    await setSitePasskeyMode(origin, 'vaultmesh');
+    let singleProbeCount = 0;
+    const single = make({
+      'passkeys.probe': () => {
+        singleProbeCount += 1;
+        if (singleProbeCount === 1) return { status: 'unknown', rpId: 'example.test', origin, candidates: [] };
+        return {
+          status: 'available',
+          rpId: 'example.test',
+          origin,
+          candidates: [{ itemId: item1, credentialId: 'c1', title: 'Personal', account: 'alice@example.test' }],
+        };
+      },
+      'passkeys.get': (input) => {
+        if (!input?.itemId) throw new DesktopRpcError('passkey-selection-required', '找到多个可用 Passkey');
+        return { responseJson: '{"id":"single-retry"}' };
+      },
+    });
+    await expect(single.broker.handle(getRequest, page)).resolves.toEqual({ status: 'ok', responseJson: '{"id":"single-retry"}' });
+    expect(single.broker.currentPrompt()).toBeNull();
+    expect(single.calls.filter((call) => call.operation === 'passkeys.get').at(-1)?.input).toMatchObject({ itemId: item1, credentialId: 'c1' });
+
+    let emptyProbeCount = 0;
+    const empty = make({
+      'passkeys.probe': () => {
+        emptyProbeCount += 1;
+        return emptyProbeCount === 1
+          ? { status: 'unknown', rpId: 'example.test', origin, candidates: [] }
+          : { status: 'unavailable', rpId: 'example.test', origin, candidates: [] };
+      },
+      'passkeys.get': () => { throw new DesktopRpcError('passkey-selection-required', '找到多个可用 Passkey'); },
+    });
+    await expect(empty.broker.handle(getRequest, page)).resolves.toEqual(FALLBACK);
+    expect(empty.logs.at(-1)).toContain('desktop-passkey-unavailable');
+  });
+
+  it('handles unlock-required followed by passkey-selection-required in the same invocation', async () => {
+    await setSitePasskeyMode(origin, 'vaultmesh');
+    let unlocked = false;
+    let probeCount = 0;
+    const { broker, calls } = make({
+      'vault.status': () => ({ unlocked, passkeyCancellation: true }),
+      'passkeys.probe': () => {
+        probeCount += 1;
+        if (!unlocked) return { status: 'unknown', rpId: 'example.test', origin, candidates: [] };
+        return {
+          status: 'available',
+          rpId: 'example.test',
+          origin,
+          candidates: [
+            { itemId: item1, credentialId: 'c1', title: 'Personal', account: 'alice@example.test' },
+            { itemId: item2, credentialId: 'c2', title: 'Work', account: 'bob@example.test' },
+          ],
+        };
+      },
+      'passkeys.get': (input) => {
+        if (!unlocked) throw new DesktopRpcError('unlock-required', '请先解锁');
+        if (!input?.itemId) throw new DesktopRpcError('passkey-selection-required', '请选择账号');
+        return { responseJson: '{"id":"unlock-then-select"}' };
+      },
+    });
+
+    const pending = broker.handle(getRequest, page);
+    await flush();
+    expect(broker.currentPrompt()?.stage).toBe('unlock');
+    unlocked = true;
+    await broker.syncUnlockState();
+    await flush();
+
+    const choosePrompt = broker.currentPrompt()!;
+    expect(choosePrompt.stage).toBe('choose');
+    expect(choosePrompt.candidates).toHaveLength(2);
+    expect(broker.choose(choosePrompt.token, 'vaultmesh', false, undefined, item1)).toBe(true);
+    await expect(pending).resolves.toEqual({ status: 'ok', responseJson: '{"id":"unlock-then-select"}' });
+    expect(probeCount).toBe(2);
+    expect(calls.filter((call) => call.operation === 'passkeys.get')).toHaveLength(3);
+  });
+
+  it('cancels an in-flight conditional desktop passkey request when site mode changes to native', async () => {
+    let finishDesktop!: (value: unknown) => void;
+    const { broker, calls } = make({
+      'passkeys.get': () => new Promise((resolve) => { finishDesktop = resolve; }),
+    });
+    const pending = broker.handle(conditionalGetRequest, page);
+    await flush();
+    const resolvePromise = broker.resolveConditional(page, 'rc1', { action: 'vaultmesh', itemId: item1, credentialId: 'c1' });
+    await flush();
+    const getCall = calls.find((call) => call.operation === 'passkeys.get');
+    expect(getCall?.timing?.requestId).toEqual(expect.any(String));
+
+    broker.onSiteModeChanged(origin, 'native');
+    await expect(pending).resolves.toEqual(FALLBACK);
+    await expect(resolvePromise).resolves.toMatchObject({ status: 'cancelled' });
+    expect(calls.find((call) => call.operation === 'passkeys.cancel')?.input).toEqual({ requestId: getCall!.timing!.requestId });
+    finishDesktop({ responseJson: '{"id":"late"}' });
+  });
+
+  it('records desktop-session-locked separately from desktop-confirmation-declined', async () => {
+    await rememberPasskeyChoice('get', origin, 'vaultmesh');
+    const sessionLocked = make({
+      'passkeys.get': () => { throw new DesktopRpcError('cancelled', '会话已锁定，操作已取消。'); },
+    });
+    await expect(sessionLocked.broker.handle(getRequest, page)).resolves.toEqual({
+      status: 'cancelled',
+      message: 'VaultMesh 会话已锁定，通行密钥请求已取消。',
+    });
+    expect(sessionLocked.logs.at(-1)).toContain('desktop-session-locked');
+    expect(sessionLocked.logs.at(-1)).not.toContain('desktop-confirmation-declined');
+
+    const declined = make({
+      'passkeys.get': () => { throw new DesktopRpcError('cancelled', '用户已拒绝通行密钥确认。'); },
+    });
+    await expect(declined.broker.handle(getRequest, page)).resolves.toEqual({
+      status: 'cancelled',
+      message: '已取消 VaultMesh 通行密钥请求。',
+    });
+    expect(declined.logs.at(-1)).toContain('desktop-confirmation-declined');
+  });
+
+  it('honours native fallback or cancel chosen during passkey-selection-required re-probe prompt', async () => {
+    await setSitePasskeyMode(origin, 'vaultmesh');
+    const makeSelectionHandlers = () => {
+      let count = 0;
+      return {
+        'passkeys.probe': () => {
+          count += 1;
+          if (count === 1) return { status: 'unknown', rpId: 'example.test', origin, candidates: [] };
+          return {
+            status: 'available',
+            rpId: 'example.test',
+            origin,
+            candidates: [
+              { itemId: item1, credentialId: 'c1', title: 'Personal', account: 'alice@example.test' },
+              { itemId: item2, credentialId: 'c2', title: 'Work', account: 'bob@example.test' },
+            ],
+          };
+        },
+        'passkeys.get': () => { throw new DesktopRpcError('passkey-selection-required', '请选择账号'); },
+      };
+    };
+
+    const chooseNative = make(makeSelectionHandlers());
+    const nativePending = chooseNative.broker.handle(getRequest, page);
+    await flush();
+    expect(chooseNative.broker.choose(chooseNative.broker.currentPrompt()!.token, 'native')).toBe(true);
+    await expect(nativePending).resolves.toEqual(FALLBACK);
+
+    const chooseCancel = make(makeSelectionHandlers());
+    const cancelPending = chooseCancel.broker.handle(getRequest, page);
+    await flush();
+    expect(chooseCancel.broker.choose(chooseCancel.broker.currentPrompt()!.token, 'cancel')).toBe(true);
+    await expect(cancelPending).resolves.toMatchObject({ status: 'cancelled' });
+  });
+});

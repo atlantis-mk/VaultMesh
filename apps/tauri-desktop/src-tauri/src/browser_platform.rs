@@ -29,8 +29,9 @@ use crate::{
     biometric_service::BiometricQuickUnlockService,
     browser_broker::{
         BrowserBrokerPlatform, BrowserPlatformError, BrowserRepromptRequest,
-        BrowserRepromptWaiter, BrowserSessionUnlockRequest, BrowserSessionUnlockWaiter,
-        BrowserUnlockResolution, PasskeyConfirmationRequest, PasskeyOpKind,
+        BrowserRepromptResolution, BrowserRepromptWaiter, BrowserSessionUnlockRequest,
+        BrowserSessionUnlockWaiter, BrowserUnlockResolution, PasskeyConfirmationRequest,
+        PasskeyOpKind,
     },
     browser_fill::email_otp_assignment,
     browser_pairing::BrowserPairingService,
@@ -674,6 +675,7 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                         .and_then(Value::as_u64)
                         .and_then(|value| u8::try_from(value).ok())
                         .ok_or_else(invalid)?;
+                    runtime.refresh_from_disk().map_err(runtime_error)?;
                     let (path, key) = runtime.quick_unlock_material().map_err(runtime_error)?;
                     self.pin
                         .lock()
@@ -947,8 +949,13 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
     }
 
     fn after_runtime_mutation(&self, operation: &str) -> Result<(), BrowserPlatformError> {
-        if operation == "vault.change-password" {
-            self.disable_all_quick_unlocks()?;
+        if operation == "vault.change-password"
+            && let Some(runtime_state) = self.app.try_state::<crate::RuntimeState>()
+        {
+            crate::desktop_runtime::lock_desktop_and_agent_sessions(
+                Some(&self.app),
+                &runtime_state,
+            );
         }
         Ok(())
     }
@@ -1092,9 +1099,14 @@ impl BrowserBrokerPlatform for TauriBrowserPlatform {
                 None,
                 "主密码确认已超时。",
             )?;
-            resolution.master_password.ok_or_else(|| BrowserPlatformError {
+            let master_password = resolution.master_password.ok_or_else(|| BrowserPlatformError {
                 code: "reprompt",
                 message: "此条目受主密码保护，请使用主密码确认填充。".to_owned(),
+            })?;
+            Ok(BrowserRepromptResolution {
+                vault_path: resolution.vault_path,
+                vault_key: Some(resolution.vault_key),
+                master_password,
             })
         }))
     }

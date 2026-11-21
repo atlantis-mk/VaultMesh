@@ -285,9 +285,12 @@ export default defineBackground(() => {
       if (message.request.operation === "biometric.authentication.poll" && isBiometricUnlockResponse(response)) activeBiometricSession = null;
       if (['vault.create', 'vault.unlock', 'biometric.unlock', 'pin.unlock'].includes(message.request.operation) || (message.request.operation === 'biometric.authentication.poll' && isBiometricUnlockResponse(response))) void passkeyBroker.syncUnlockState();
       if (['vault.create', 'vault.unlock', 'biometric.unlock', 'pin.unlock'].includes(message.request.operation) || (message.request.operation === 'biometric.authentication.poll' && isBiometricUnlockResponse(response))) startEmailOtpPolling();
-      if (message.request.operation === 'vault.lock' || message.request.operation === 'browser.pairing.revoke') {
-        stopEmailOtpPolling();
-    void cancelDeviceAssists();
+      if (
+        message.request.operation === 'vault.lock'
+        || message.request.operation === 'browser.pairing.revoke'
+        || (['vault.change-password', 'pin.enable', 'pin.disable'].includes(message.request.operation) && isSuccessfulRpcResponse(response))
+      ) {
+        clearUnlockedSessionState();
       }
             return response;
     }
@@ -1200,6 +1203,20 @@ function saveCaptureIdForWindow(sender: Browser.runtime.MessageSender): string |
   if (sender.id !== browser.runtime.id || sender.url !== browser.runtime.getURL("/save-confirmation.html")) return null;
   const windowId = sender.tab?.windowId;
   return windowId == null ? null : saveCaptureIdsByWindow.get(windowId) ?? null;
+}
+
+function clearUnlockedSessionState(): void {
+  popupWorkspaceCache.clear();
+  desktopUnlockedHint = false;
+  pendingPluginFill = null;
+  stopEmailOtpPolling();
+  void cancelDeviceAssists();
+}
+
+function isSuccessfulRpcResponse(response: unknown): boolean {
+  if (!response || typeof response !== "object") return false;
+  const value = response as { kind?: unknown; ok?: unknown };
+  return value.kind === "vaultmesh.rpc-result" && value.ok === true;
 }
 
 function isBiometricUnlockResponse(response: unknown): boolean {

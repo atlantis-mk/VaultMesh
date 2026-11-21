@@ -79,6 +79,7 @@ const REASON_TEXT: Array<[RegExp, string]> = [
   [/^user-cancelled-unlock/, '你在解锁等待中点了取消。'],
   [/^unlock-timed-out/, 'VaultMesh 5 分钟内没有解锁，请求已取消。'],
   [/^desktop-confirmation-declined/, '你在桌面端的原生确认框里点了取消。'],
+  [/^desktop-session-locked/, 'VaultMesh 会话已锁定，通行密钥请求已取消。'],
   [/^conditional-pending/, '已挂起条件式通行密钥请求，等待你在输入框内联菜单中选择。'],
   [/^conditional-unavailable/, '当前网站没有可用于条件式内联菜单的通行密钥，交给浏览器。'],
   [/^conditional-confirmation-declined/, '你在桌面端确认中取消了操作，内联菜单中的通行密钥选项已保留供重试。'],

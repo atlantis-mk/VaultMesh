@@ -113,6 +113,21 @@ impl VaultSession {
         Ok(Zeroizing::new(item.secret.clone()))
     }
 
+    pub fn secret_value_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&crate::VerifiedMasterPassword<'_>>,
+    ) -> Result<Zeroizing<String>, VaultError> {
+        let item = self
+            .payload()?
+            .secrets
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or(VaultError::ItemNotFound)?;
+        self.enforce_reprompt_with_proof(item.master_password_reprompt, proof)?;
+        Ok(Zeroizing::new(item.secret.clone()))
+    }
+
     /// Browser-fill access is governed by the browser broker. Unlike copy,
     /// non-card fills do not apply an item-level master-password re-prompt.
     pub fn secret_value_for_fill(&self, id: Uuid) -> Result<Zeroizing<String>, VaultError> {

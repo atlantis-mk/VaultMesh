@@ -2,6 +2,7 @@ fn fill_values(
     runtime: &mut DesktopRuntime,
     kind: &str,
     detail: &Value,
+    require_reprompt: bool,
     password: Option<&str>,
     native_sources: Option<&[NativeItemSource]>,
 ) -> Result<FillValues, BrowserPlatformError> {
@@ -11,22 +12,33 @@ fn fill_values(
     match kind {
         "login" => {
             put(&mut result, "username", detail.get("username"));
-            let secret = runtime
-                .protected_value(
+            let has_totp = detail
+                .get("hasTotpSecret")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mut fields = vec![VAULTMESH_PROTECTED_FIELD_LOGIN_PASSWORD];
+            if has_totp {
+                fields.push(VAULTMESH_PROTECTED_FIELD_LOGIN_TOTP);
+            }
+            let protected = runtime
+                .fill_protected_values(
                     VAULTMESH_ITEM_KIND_LOGIN,
-                    VAULTMESH_PROTECTED_FIELD_LOGIN_PASSWORD,
+                    &fields,
                     &id,
+                    require_reprompt,
                     password,
                 )
                 .map_err(runtime_error)?;
-            result.values.insert("password".into(), secret.to_string());
-            if detail
-                .get("hasTotpSecret")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                let totp = runtime.totp_value(&id, password).map_err(runtime_error)?;
-                put(&mut result, "totpCode", totp.get("code"));
+            for (field, value) in protected {
+                match field {
+                    VAULTMESH_PROTECTED_FIELD_LOGIN_PASSWORD => {
+                        result.values.insert("password".into(), value.to_string());
+                    }
+                    VAULTMESH_PROTECTED_FIELD_LOGIN_TOTP => {
+                        result.values.insert("totpCode".into(), value.to_string());
+                    }
+                    _ => {}
+                }
             }
             if let Some(fields) = detail.get("customFields").and_then(Value::as_array) {
                 for field in fields.iter().take(100) {
@@ -44,17 +56,36 @@ fn fill_values(
         "card" => {
             put(&mut result, "brand", detail.get("network"));
             put(&mut result, "cardholderName", detail.get("cardholderName"));
-            let number = runtime
-                .protected_value(
+            let has_security_code = detail
+                .get("hasSecurityCode")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mut fields = vec![VAULTMESH_PROTECTED_FIELD_CARD_NUMBER];
+            if has_security_code {
+                fields.push(VAULTMESH_PROTECTED_FIELD_CARD_SECURITY_CODE);
+            }
+            let protected = runtime
+                .fill_protected_values(
                     VAULTMESH_ITEM_KIND_PAYMENT_CARD,
-                    VAULTMESH_PROTECTED_FIELD_CARD_NUMBER,
+                    &fields,
                     &id,
+                    require_reprompt,
                     password,
                 )
                 .map_err(runtime_error)?;
-            result
-                .values
-                .insert("cardNumber".into(), number.to_string());
+            for (field, value) in protected {
+                match field {
+                    VAULTMESH_PROTECTED_FIELD_CARD_NUMBER => {
+                        result.values.insert("cardNumber".into(), value.to_string());
+                    }
+                    VAULTMESH_PROTECTED_FIELD_CARD_SECURITY_CODE => {
+                        result
+                            .values
+                            .insert("securityCode".into(), value.to_string());
+                    }
+                    _ => {}
+                }
+            }
             if let Some(month) = detail.get("expirationMonth").and_then(Value::as_u64) {
                 result
                     .values
@@ -74,23 +105,6 @@ fn fill_values(
                     .insert("expiration".into(), format!("{month}/{year}"));
             }
             put(&mut result, "billingAddress", detail.get("billingAddress"));
-            if detail
-                .get("hasSecurityCode")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                let code = runtime
-                    .protected_value(
-                        VAULTMESH_ITEM_KIND_PAYMENT_CARD,
-                        VAULTMESH_PROTECTED_FIELD_CARD_SECURITY_CODE,
-                        &id,
-                        password,
-                    )
-                    .map_err(runtime_error)?;
-                result
-                    .values
-                    .insert("securityCode".into(), code.to_string());
-            }
         }
         "identity" => identity_values(&mut result, detail),
         "secret" => {
@@ -100,17 +114,34 @@ fn fill_values(
                 .get("kind")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            if !requested("secret") || native_sources.is_some_and(|entries| !entries.iter().any(|entry|
-                entry.source.strip_prefix("secret:") == result.secret_kind.as_deref())) { return Ok(result); }
-            let secret = runtime
-                .protected_value(
+            let secret_requested = requested("secret")
+                && native_sources.is_none_or(|entries| {
+                    entries.iter().any(|entry| {
+                        entry.source.strip_prefix("secret:") == result.secret_kind.as_deref()
+                    })
+                });
+            if !secret_requested && !require_reprompt {
+                return Ok(result);
+            }
+            let fields = if secret_requested {
+                vec![VAULTMESH_PROTECTED_FIELD_SECRET_VALUE]
+            } else {
+                Vec::new()
+            };
+            let protected = runtime
+                .fill_protected_values(
                     VAULTMESH_ITEM_KIND_SECRET,
-                    VAULTMESH_PROTECTED_FIELD_SECRET_VALUE,
+                    &fields,
                     &id,
+                    require_reprompt,
                     password,
                 )
                 .map_err(runtime_error)?;
-            result.values.insert("secret".into(), secret.to_string());
+            for (field, value) in protected {
+                if field == VAULTMESH_PROTECTED_FIELD_SECRET_VALUE {
+                    result.values.insert("secret".into(), value.to_string());
+                }
+            }
         }
         "ssh" => {
             put(&mut result, "title", detail.get("title"));
@@ -120,7 +151,7 @@ fn fill_values(
             if let Some(port) = detail.get("port").and_then(Value::as_u64) {
                 result.values.insert("port".into(), port.to_string());
             }
-            for (available, key, field) in [
+            let specs = [
                 (
                     "hasPassword",
                     "password",
@@ -141,16 +172,35 @@ fn fill_values(
                     "keyPassphrase",
                     VAULTMESH_PROTECTED_FIELD_SSH_KEY_PASSPHRASE,
                 ),
-            ] {
-                if requested(key) && detail
-                    .get(available)
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
+            ];
+            let mut fields = Vec::new();
+            let mut field_keys = Vec::new();
+            for (available, key, field) in specs {
+                if requested(key)
+                    && detail
+                        .get(available)
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
                 {
-                    let value = runtime
-                        .protected_value(VAULTMESH_ITEM_KIND_SSH_CREDENTIAL, field, &id, password)
-                        .map_err(runtime_error)?;
-                    result.values.insert(key.into(), value.to_string());
+                    fields.push(field);
+                    field_keys.push((field, key));
+                }
+            }
+            if !fields.is_empty() || require_reprompt {
+                let protected = runtime
+                    .fill_protected_values(
+                        VAULTMESH_ITEM_KIND_SSH_CREDENTIAL,
+                        &fields,
+                        &id,
+                        require_reprompt,
+                        password,
+                    )
+                    .map_err(runtime_error)?;
+                for (field, value) in protected {
+                    if let Some((_, key)) = field_keys.iter().find(|(expected, _)| *expected == field)
+                    {
+                        result.values.insert((*key).into(), value.to_string());
+                    }
                 }
             }
         }

@@ -352,7 +352,7 @@ fn verify_browser_master_password_material(
     let mut temp_runtime = DesktopRuntime::new(vault_path.to_path_buf())
         .map_err(|error| error.public_message().to_owned())?;
     temp_runtime
-        .unlock_for_agent_from(vault_path.to_path_buf(), password.as_str().to_owned())
+        .open_ephemeral_with_password(vault_path.to_path_buf(), password.as_str().to_owned())
         .map_err(|error| error.public_message().to_owned())?;
     let (canonical_vault, vault_key) = temp_runtime
         .quick_unlock_material()

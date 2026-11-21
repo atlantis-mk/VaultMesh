@@ -168,9 +168,12 @@ pub(crate) fn execute_pin_domain_action(
                 .runtime
                 .lock()
                 .map_err(|_| "保险库运行时暂时不可用。".to_owned())?;
+            runtime
+                .refresh_from_disk()
+                .map_err(|_| "请先在桌面端解锁保险库。".to_owned())?;
             let (vault_path, vault_key) = runtime
-                .desktop_pin_setup_material()
-                .map_err(|_| "请先在桌面端使用主密码解锁保险库。".to_owned())?;
+                .quick_unlock_material()
+                .map_err(|_| "请先在桌面端解锁保险库。".to_owned())?;
             let pin = adapter
                 .service(state)
                 .lock()
@@ -453,15 +456,14 @@ mod tests {
             );
         }
         for kind in [PinDomainKind::Desktop, PinDomainKind::Browser, PinDomainKind::Agent] {
-            assert!(
-                execute_pin_domain_action(
-                    &state,
-                    PinDomainFactory::create_for(kind),
-                    PinDomainAction::Enable,
-                    json!({ "pin": "111111", "failureLimit": 5 }),
-                )
-                .is_err()
-            );
+            let err = execute_pin_domain_action(
+                &state,
+                PinDomainFactory::create_for(kind),
+                PinDomainAction::Enable,
+                json!({ "pin": "111111", "failureLimit": 5 }),
+            )
+            .unwrap_err();
+            assert_eq!(err, "请先在桌面端解锁保险库。");
             assert!(
                 execute_pin_domain_action(
                     &state,
@@ -480,22 +482,27 @@ mod tests {
             runtime.lock();
             material
         };
-        for biometric in [false, true] {
+        for (biometric, pin_code) in [(false, "111111"), (true, "222222")] {
             let mut runtime = state.runtime.lock().unwrap();
             if biometric {
-                runtime.unlock_with_biometric_key(vault_path.clone(), quick_key.as_slice()).unwrap();
+                runtime
+                    .unlock_with_biometric_key(vault_path.clone(), quick_key.as_slice())
+                    .unwrap();
             } else {
-                runtime.unlock_with_quick_key(vault_path.clone(), quick_key.as_slice()).unwrap();
+                runtime
+                    .unlock_with_quick_key(vault_path.clone(), quick_key.as_slice())
+                    .unwrap();
             }
             drop(runtime);
             for adapter in PinDomainFactory::all() {
-                let result = execute_pin_domain_action(
+                let status = execute_pin_domain_action(
                     &state,
                     adapter,
                     PinDomainAction::Enable,
-                    json!({ "pin": "111111", "failureLimit": 5 }),
-                );
-                assert_eq!(result.unwrap_err(), "请先在桌面端使用主密码解锁保险库。");
+                    json!({ "pin": pin_code, "failureLimit": 5 }),
+                )
+                .expect("any desktop unlock method can enable all 3 PIN domains");
+                assert_eq!(status["enabled"], true);
             }
             state.runtime.lock().unwrap().lock();
         }

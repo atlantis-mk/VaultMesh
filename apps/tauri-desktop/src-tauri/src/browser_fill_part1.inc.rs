@@ -10,10 +10,11 @@ use vaultmesh_ffi::{
     VAULTMESH_ITEM_KIND_PAYMENT_CARD, VAULTMESH_ITEM_KIND_SECRET,
     VAULTMESH_ITEM_KIND_SSH_CREDENTIAL, VAULTMESH_PROTECTED_FIELD_CARD_NUMBER,
     VAULTMESH_PROTECTED_FIELD_CARD_SECURITY_CODE, VAULTMESH_PROTECTED_FIELD_LOGIN_PASSWORD,
-    VAULTMESH_PROTECTED_FIELD_SECRET_VALUE, VAULTMESH_PROTECTED_FIELD_SSH_KEY_PASSPHRASE,
-    VAULTMESH_PROTECTED_FIELD_SSH_PASSWORD, VAULTMESH_PROTECTED_FIELD_SSH_PRIVATE_KEY,
-    VAULTMESH_PROTECTED_FIELD_SSH_PUBLIC_KEY, VAULTMESH_STATUS_AUTH_FAILED,
-    VAULTMESH_STATUS_INVALID_ARGUMENT, VAULTMESH_STATUS_LOCKED, VAULTMESH_STATUS_REAUTH_REQUIRED,
+    VAULTMESH_PROTECTED_FIELD_LOGIN_TOTP, VAULTMESH_PROTECTED_FIELD_SECRET_VALUE,
+    VAULTMESH_PROTECTED_FIELD_SSH_KEY_PASSPHRASE, VAULTMESH_PROTECTED_FIELD_SSH_PASSWORD,
+    VAULTMESH_PROTECTED_FIELD_SSH_PRIVATE_KEY, VAULTMESH_PROTECTED_FIELD_SSH_PUBLIC_KEY,
+    VAULTMESH_STATUS_AUTH_FAILED, VAULTMESH_STATUS_INVALID_ARGUMENT, VAULTMESH_STATUS_LOCKED,
+    VAULTMESH_STATUS_REAUTH_REQUIRED,
 };
 
 use crate::browser_broker::BrowserPlatformError;
@@ -347,12 +348,15 @@ impl BrowserFillService {
         if selected.kind == "secret" && detail.get("isPasskey").and_then(Value::as_bool).unwrap_or(false) {
             return Err(invalid("Passkey 不能通过普通 Secret 填充。"));
         }
-        if selected.kind == "card"
+        let require_reprompt = selected.kind == "card"
             || detail
                 .get("masterPasswordReprompt")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
+                .unwrap_or(false);
+        if require_reprompt && request.master_password.is_none() {
+            return Err(reprompt("请在插件中输入主密码确认填充。"));
+        }
+        if require_reprompt && selected.kind == "identity" {
             let password = request
                 .master_password
                 .as_deref()
@@ -366,6 +370,7 @@ impl BrowserFillService {
             runtime,
             &selected.kind,
             &detail,
+            require_reprompt,
             request.master_password.as_deref(),
             request.native_item_plan.as_deref(),
         )?;

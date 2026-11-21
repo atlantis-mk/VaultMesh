@@ -200,19 +200,17 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
       if (preference.reason === 'site-mode-ask') {
         log(`[VaultMesh Passkey] ${op} ${ancestry.origin} -> prompt (site-mode-ask)`);
       }
-      const choice = await askPrompt(active, ancestry, op, 'choose', {
-        candidates: op === 'get' ? probe.candidates : undefined,
-      }, remainingMs(deadlineAt));
-      if (choice.result === 'native') {
-        if (choice.remember) await rememberPasskeyChoice(op, ancestry, 'native').catch(() => undefined);
-        return fallback(page, op, 'user-chose-browser');
-      }
-      if (choice.result === 'expired') return cancelled(page, op, 'choice-timed-out', 'VaultMesh 通行密钥请求已超时。');
-      if (choice.result !== 'vaultmesh') return cancelled(page, op, 'user-cancelled-choice', '已取消通行密钥请求。');
-      log(`[VaultMesh Passkey] ${op} ${ancestry.origin} -> VaultMesh (chose-vaultmesh)`);
-      if (choice.remember) await rememberPasskeyChoice(op, ancestry, 'vaultmesh').catch(() => undefined);
-      if (op === 'get' && choice.itemId) {
-        selectedCandidate = probe.candidates.find((candidate) => candidate.itemId === choice.itemId);
+      const promptDecision = await promptForChoice(
+        active,
+        ancestry,
+        page,
+        op,
+        op === 'get' ? probe.candidates : undefined,
+        deadlineAt,
+      );
+      if ('outcome' in promptDecision) return promptDecision.outcome;
+      if (op === 'get' && promptDecision.itemId) {
+        selectedCandidate = probe.candidates.find((candidate) => candidate.itemId === promptDecision.itemId);
       }
     } else if (preference.reason) {
       log(`[VaultMesh Passkey] ${op} ${ancestry.origin} -> VaultMesh (${preference.reason})`);
@@ -305,9 +303,12 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
   ): Promise<PasskeyOutcome> {
     const promptOperation: PasskeyOperation = operation === 'passkeys.create' ? 'create' : 'get';
     const origin = ancestry.origin;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    let requestInput = input;
+    let retriedUnlock = false;
+    let retriedSelection = false;
+    while (true) {
       try {
-        const response = await requestDesktopPasskey(operation, input, active, deadlineAt);
+        const response = await requestDesktopPasskey(operation, requestInput, active, deadlineAt);
         if (active.aborted) return cancelled(page, promptOperation, 'page-aborted-or-navigated', '通行密钥请求已取消。');
         if (typeof response.responseJson !== 'string' || response.responseJson.length > MAX_PASSKEY_RESPONSE_CHARS) {
           throw new Error('Invalid Passkey response');
@@ -316,23 +317,84 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
         return { status: 'ok', responseJson: response.responseJson };
       } catch (error) {
         // Fallback when desktop has no one-shot unlock waiter (returns unlock-required).
-        if (attempt === 0 && error instanceof DesktopRpcError && error.code === 'unlock-required') {
+        if (!retriedUnlock && error instanceof DesktopRpcError && error.code === 'unlock-required') {
+          retriedUnlock = true;
           const result = await waitForUnlock(active, ancestry, promptOperation, remainingMs(deadlineAt));
           if (result === 'native') return fallback(page, promptOperation, 'user-skipped-unlock');
           if (result !== 'unlocked') return cancelled(page, promptOperation, result === 'expired' ? 'unlock-timed-out' : 'user-cancelled-unlock', 'VaultMesh 未解锁，通行密钥请求已取消。');
           continue;
         }
+        if (
+          !retriedSelection
+          && promptOperation === 'get'
+          && error instanceof DesktopRpcError
+          && error.code === 'passkey-selection-required'
+        ) {
+          retriedSelection = true;
+          let reprobe: ParsedProbe;
+          try {
+            reprobe = parseProbeResult(await rpc('passkeys.probe', { requestDetailsJson: requestInput.requestDetailsJson }));
+          } catch (probeError) {
+            if (active.aborted) return cancelled(page, promptOperation, 'page-aborted-or-navigated', '通行密钥请求已取消。');
+            return fallback(page, promptOperation, probeError instanceof DesktopRpcError ? `probe-${probeError.code}` : 'probe-failed');
+          }
+          if (active.aborted) return cancelled(page, promptOperation, 'page-aborted-or-navigated', '通行密钥请求已取消。');
+          if (reprobe.candidates.length === 0) {
+            return fallback(page, promptOperation, 'desktop-passkey-unavailable');
+          }
+          if (reprobe.candidates.length === 1) {
+            const candidate = reprobe.candidates[0]!;
+            requestInput = { ...requestInput, itemId: candidate.itemId, credentialId: candidate.credentialId };
+            continue;
+          }
+          const promptDecision = await promptForChoice(active, ancestry, page, promptOperation, reprobe.candidates, deadlineAt);
+          if ('outcome' in promptDecision) return promptDecision.outcome;
+          const chosen = promptDecision.itemId
+            ? reprobe.candidates.find((candidate) => candidate.itemId === promptDecision.itemId)
+            : undefined;
+          if (!chosen) return fallback(page, promptOperation, 'desktop-passkey-unavailable');
+          requestInput = { ...requestInput, itemId: chosen.itemId, credentialId: chosen.credentialId };
+          continue;
+        }
         throw error;
       }
     }
-    return FALLBACK;
+  }
+
+  async function promptForChoice(
+    active: Active,
+    ancestry: FrameAncestry,
+    page: PasskeyPage,
+    operation: PasskeyOperation,
+    candidates: PasskeyPromptCandidate[] | undefined,
+    deadlineAt: number,
+  ): Promise<{ outcome: PasskeyOutcome } | { itemId?: string }> {
+    const choice = await askPrompt(active, ancestry, operation, 'choose', { candidates }, remainingMs(deadlineAt));
+    if (choice.result === 'native') {
+      if (choice.remember) await rememberPasskeyChoice(operation, ancestry, 'native').catch(() => undefined);
+      return { outcome: fallback(page, operation, 'user-chose-browser') };
+    }
+    if (choice.result === 'expired') {
+      return { outcome: cancelled(page, operation, 'choice-timed-out', 'VaultMesh 通行密钥请求已超时。') };
+    }
+    if (choice.result !== 'vaultmesh') {
+      return { outcome: cancelled(page, operation, 'user-cancelled-choice', '已取消通行密钥请求。') };
+    }
+    log(`[VaultMesh Passkey] ${operation} ${ancestry.origin} -> VaultMesh (chose-vaultmesh)`);
+    if (choice.remember) await rememberPasskeyChoice(operation, ancestry, 'vaultmesh').catch(() => undefined);
+    return { itemId: choice.itemId };
   }
 
   function fallbackOrError(error: unknown, operation: PasskeyOperation, page: PasskeyPage): PasskeyOutcome {
     if (error instanceof DesktopRpcError) {
       if (['passkey-unavailable', 'unpaired', 'desktop-unavailable', 'unlock-required'].includes(error.code)) return fallback(page, operation, `desktop-${error.code}`);
       if (error.code === 'request-expired') return cancelled(page, operation, 'request-timed-out', 'VaultMesh 通行密钥请求已超时。');
-      if (error.code === 'cancelled') return cancelled(page, operation, 'desktop-confirmation-declined', '已取消 VaultMesh 通行密钥请求。');
+      if (error.code === 'cancelled') {
+        if (error.message.includes('会话已锁定')) {
+          return cancelled(page, operation, 'desktop-session-locked', 'VaultMesh 会话已锁定，通行密钥请求已取消。');
+        }
+        return cancelled(page, operation, 'desktop-confirmation-declined', '已取消 VaultMesh 通行密钥请求。');
+      }
     }
     const failure = domException(error);
     log(`[VaultMesh Passkey] ${operation} ${page.origin} -> error (${failure.name}${error instanceof DesktopRpcError ? `, desktop-${error.code}` : ''}: ${failure.message})`);
@@ -521,6 +583,7 @@ export function createPasskeyBroker(options: PasskeyBrokerOptions) {
     for (const [frameKey, pending] of [...conditionals.entries()]) {
       if (pending.ancestry.origin !== origin && pending.ancestry.topOrigin !== origin) continue;
       conditionals.delete(frameKey);
+      pending.active.cancelDesktop?.();
       log(`[VaultMesh Passkey] get ${pending.ancestry.origin} -> browser (site-mode-native)`);
       pending.settle(FALLBACK);
     }

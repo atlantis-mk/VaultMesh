@@ -872,26 +872,12 @@ fn stop_lan_pairing(state: &RuntimeState) {
 }
 
 fn lock_system_authorizations(app: &AppHandle, state: &RuntimeState) {
-    if let Some(listener) = &state._bitwarden_development_listener {
-        listener.lock_vault();
-    }
     if let Ok(mut runtime) = state.runtime.lock() {
         runtime.lock();
     }
     finish_policy_lock(app, state);
     finish_agent_boundary_lock(state);
-    #[cfg(unix)]
-    if let Some(listener) = &state._browser_listener {
-        listener.lock_vault();
-    }
-    #[cfg(unix)]
-    if let Some(listener) = &state._browser_http_listener {
-        listener.lock_vault();
-    }
-    #[cfg(target_os = "windows")]
-    if let Ok(integration) = state.browser_integration.lock() {
-        integration.lock_vault();
-    }
+    lock_all_browser_sessions(state);
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

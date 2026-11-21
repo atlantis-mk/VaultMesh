@@ -47,6 +47,7 @@ pub(crate) mod session_api_environment;
 mod session_api_request;
 #[path = "session_base.rs"]
 mod session_base;
+pub use session_base::VerifiedMasterPassword;
 #[path = "session_card.rs"]
 mod session_card;
 #[path = "session_events.rs"]

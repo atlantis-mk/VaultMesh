@@ -226,6 +226,15 @@ impl VaultSession {
         Ok(item.card_number.as_str())
     }
 
+    pub fn card_number_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&crate::VerifiedMasterPassword<'_>>,
+    ) -> Result<&str, VaultError> {
+        let item = self.card_for_access_with_proof(id, proof)?;
+        Ok(item.card_number.as_str())
+    }
+
     /// Compares a submitted card number inside the unlocked core without
     /// disclosing the stored number or bypassing re-prompt for value access.
     pub fn card_number_matches(&self, id: Uuid, candidate: &str) -> Result<bool, VaultError> {
@@ -265,12 +274,32 @@ impl VaultSession {
             .ok_or(VaultError::CardSecretUnavailable)
     }
 
+    pub fn card_security_code_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&crate::VerifiedMasterPassword<'_>>,
+    ) -> Result<&str, VaultError> {
+        let item = self.card_for_access_with_proof(id, proof)?;
+        item.security_code
+            .as_deref()
+            .ok_or(VaultError::CardSecretUnavailable)
+    }
+
     pub fn card_pin_for_access(
         &self,
         id: Uuid,
         master_password: Option<&str>,
     ) -> Result<&str, VaultError> {
         let item = self.card_for_access(id, master_password)?;
+        item.pin.as_deref().ok_or(VaultError::CardSecretUnavailable)
+    }
+
+    pub fn card_pin_for_access_with_proof(
+        &self,
+        id: Uuid,
+        proof: Option<&crate::VerifiedMasterPassword<'_>>,
+    ) -> Result<&str, VaultError> {
+        let item = self.card_for_access_with_proof(id, proof)?;
         item.pin.as_deref().ok_or(VaultError::CardSecretUnavailable)
     }
 }

@@ -654,6 +654,130 @@ pub(super) fn finish_agent_boundary_lock(state: &RuntimeState) {
     state.agent_vault_access.lock_all();
 }
 
+pub(super) fn lock_production_browser_sessions(state: &RuntimeState) {
+    #[cfg(unix)]
+    if let Some(listener) = &state._browser_listener {
+        listener.lock_vault();
+    }
+    #[cfg(unix)]
+    if let Some(listener) = &state._browser_http_listener {
+        listener.lock_vault();
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(integration) = state.browser_integration.lock() {
+        integration.lock_vault();
+    }
+}
+
+pub(super) fn lock_all_browser_sessions(state: &RuntimeState) {
+    #[cfg(any(unix, target_os = "windows"))]
+    if let Some(listener) = &state._bitwarden_development_listener {
+        listener.lock_vault();
+    }
+    lock_production_browser_sessions(state);
+}
+
+/// Locks only Agent-domain sessions/authorizations without stopping `lan_sync`
+/// and without cancelling a pending `BrowserUnlock` prompt on `agent-unlock`.
+pub(super) fn lock_agent_sessions(app: Option<&AppHandle>, state: &RuntimeState) {
+    if let Ok(mut broker) = state.agent_broker.lock() {
+        broker.suspend_for_vault_lock();
+    }
+    state.agent_vault_access.lock_all();
+    if let Ok(mut request) = state.agent_authorization_window_request.lock() {
+        *request = None;
+    }
+    state
+        .agent_authorization_window_deadline
+        .store(0, std::sync::atomic::Ordering::Release);
+    if let Some(app) = app
+        && let Some(window) =
+            app.get_webview_window(agent_authorization_window::AGENT_AUTHORIZATION_WINDOW_LABEL)
+    {
+        let _ = window.hide();
+    }
+    let took_agent_unlock = state
+        .agent_unlock_window_request
+        .lock()
+        .ok()
+        .is_some_and(|mut slot| {
+            if matches!(slot.as_ref(), Some(DisplayedAgentUnlock::Agent { .. })) {
+                slot.take().is_some()
+            } else {
+                false
+            }
+        });
+    if took_agent_unlock && let Some(app) = app {
+        desktop_authentication::invalidate_window(
+            app,
+            state,
+            agent_unlock_window::AGENT_UNLOCK_WINDOW_LABEL,
+        );
+        let now = unix_millis();
+        let has_next_browser = state
+            .browser_unlocks
+            .lock()
+            .ok()
+            .and_then(|mut queue| queue.peek_oldest(now))
+            .is_some();
+        if has_next_browser {
+            let _ = app.emit_to(
+                agent_unlock_window::AGENT_UNLOCK_WINDOW_LABEL,
+                "agent-unlock-requested",
+                (),
+            );
+        } else {
+            let _ = app.emit_to(
+                agent_unlock_window::AGENT_UNLOCK_WINDOW_LABEL,
+                "agent-unlock-expired",
+                (),
+            );
+            if let Some(window) =
+                app.get_webview_window(agent_unlock_window::AGENT_UNLOCK_WINDOW_LABEL)
+            {
+                let _ = window.hide();
+            }
+        }
+    }
+}
+
+pub(super) fn lock_desktop_sessions(app: Option<&AppHandle>, state: &RuntimeState) {
+    if let Some(app) = app {
+        desktop_authentication::invalidate(app, state);
+    }
+    if let Ok(mut runtime) = state.runtime.lock() {
+        runtime.lock();
+    }
+    if let Some(app) = app {
+        finish_policy_lock(app, state);
+    } else {
+        if let Ok(sync) = state.lan_sync.lock() {
+            sync.lock_sensitive();
+        }
+        if let Ok(mut pairing) = state.lan_pairing.lock() {
+            pairing.stop();
+        }
+        clear_imports(state);
+        clear_privileged_sessions(state);
+        if let Ok(mut requests) = state.api_requests.lock() {
+            requests.clear();
+        }
+    }
+}
+
+/// Locks Desktop and Agent without touching browser broker listeners (safe to call
+/// while a `BrowserBrokerCore` mutex is held).
+pub(super) fn lock_desktop_and_agent_sessions(app: Option<&AppHandle>, state: &RuntimeState) {
+    lock_desktop_sessions(app, state);
+    lock_agent_sessions(app, state);
+}
+
+pub(super) fn lock_all_sessions(app: Option<&AppHandle>, state: &RuntimeState) {
+    lock_desktop_sessions(app, state);
+    lock_all_browser_sessions(state);
+    lock_agent_sessions(app, state);
+}
+
 pub(crate) fn prune_expired_agent_access(
     state: &RuntimeState,
     now_millis: u64,
@@ -762,4 +886,281 @@ pub(super) fn setup_desktop_tray(app: &mut tauri::App) -> tauri::Result<()> {
     #[cfg(target_os = "windows")]
     crate::windows_tray_theme::start_tray_theme_watcher(app.handle().clone());
     Ok(())
+}
+
+#[cfg(test)]
+mod domain_lock_tests {
+    use super::*;
+    use crate::agent_authorization_window::DisplayedAgentAuthorization;
+    use uuid::Uuid;
+
+    #[test]
+    fn per_domain_lock_helpers_isolate_production_browser_agent_and_all_sessions() {
+        let root = std::env::temp_dir().join(format!("vaultmesh-domain-locks-{}", Uuid::new_v4()));
+        let mut state = crate::pin_domain_adapter::test_runtime_state(&root);
+        let password = "correct horse battery staple";
+        let new_password = "new correct horse battery staple";
+        let vault_path = root.join("vaultmesh.vault");
+        state
+            .runtime
+            .lock()
+            .unwrap()
+            .create(password.to_owned())
+            .expect("create vault");
+        let (_, quick_key) = state
+            .runtime
+            .lock()
+            .unwrap()
+            .quick_unlock_material()
+            .expect("key");
+
+        // Configure all 3 PIN domains + desktop biometric.
+        for (kind, pin) in [
+            (
+                crate::pin_domain_adapter::PinDomainKind::Agent,
+                "333333",
+            ),
+            (
+                crate::pin_domain_adapter::PinDomainKind::Browser,
+                "222222",
+            ),
+            (
+                crate::pin_domain_adapter::PinDomainKind::Desktop,
+                "111111",
+            ),
+        ] {
+            crate::pin_domain_adapter::execute_pin_domain_action(
+                &state,
+                crate::pin_domain_adapter::PinDomainFactory::create_for(kind),
+                crate::pin_domain_adapter::PinDomainAction::Enable,
+                json!({ "pin": pin, "failureLimit": 5 }),
+            )
+            .expect("enable pin");
+        }
+        state
+            .biometric
+            .lock()
+            .unwrap()
+            .provision(vault_path.clone(), quick_key.as_slice())
+            .expect("provision biometric");
+
+        // Spin up real production (HTTP + Unix) and dev browser brokers.
+        #[cfg(unix)]
+        let (
+            prod_broker,
+            http_broker,
+            dev_broker,
+            http_listener,
+            prod_sock,
+            dev_sock,
+            unix_listener,
+            dev_listener,
+        ) = {
+            let secret = Zeroizing::new([0x41_u8; 32]);
+            let prod_broker = Arc::new(Mutex::new(
+                BrowserBrokerCore::new(vault_path.clone(), secret.clone()).expect("prod broker"),
+            ));
+            let http_broker = Arc::new(Mutex::new(
+                BrowserBrokerCore::new(vault_path.clone(), secret.clone()).expect("http broker"),
+            ));
+            let dev_broker = Arc::new(Mutex::new(
+                BrowserBrokerCore::new(vault_path.clone(), secret).expect("dev broker"),
+            ));
+
+            let http_listener = Arc::new(
+                BrowserBrokerHttpListener::start_with_port(Arc::clone(&http_broker), 0)
+                    .expect("http listener"),
+            );
+            state._browser_http_listener = Some(Arc::clone(&http_listener));
+
+            let short_id = &Uuid::new_v4().simple().to_string()[..8];
+            let prod_sock = std::env::temp_dir().join(format!("vmb-{short_id}p.sock"));
+            let dev_sock = std::env::temp_dir().join(format!("vmb-{short_id}d.sock"));
+            let unix_listener = Arc::new(
+                BrowserBrokerUnixListener::start(prod_sock.clone(), Arc::clone(&prod_broker))
+                    .expect("unix listener"),
+            );
+            state._browser_listener = Some(Arc::clone(&unix_listener));
+            let dev_listener = Arc::new(
+                BrowserBrokerUnixListener::start(dev_sock.clone(), Arc::clone(&dev_broker))
+                    .expect("dev listener"),
+            );
+            state._bitwarden_development_listener = Some(Arc::clone(&dev_listener));
+            (
+                prod_broker,
+                http_broker,
+                dev_broker,
+                http_listener,
+                prod_sock,
+                dev_sock,
+                unix_listener,
+                dev_listener,
+            )
+        };
+
+        let unlock_all = |state: &RuntimeState| {
+            state
+                .runtime
+                .lock()
+                .unwrap()
+                .unlock(password.to_owned())
+                .expect("desktop unlock");
+            #[cfg(unix)]
+            {
+                prod_broker
+                    .lock()
+                    .unwrap()
+                    .runtime_for_test()
+                    .unlock_for_browser(password.to_owned())
+                    .expect("prod unlock");
+                http_broker
+                    .lock()
+                    .unwrap()
+                    .runtime_for_test()
+                    .unlock_for_browser(password.to_owned())
+                    .expect("http unlock");
+                dev_broker
+                    .lock()
+                    .unwrap()
+                    .runtime_for_test()
+                    .unlock_for_browser(password.to_owned())
+                    .expect("dev unlock");
+            }
+            let cid = Uuid::new_v4();
+            state
+                .agent_vault_access
+                .register_client(cid, "lock-test".into());
+            state
+                .agent_vault_access
+                .unlock_with_password(cid, vault_path.clone(), password.to_owned())
+                .expect("agent unlock");
+            cid
+        };
+
+        // 1. Production browser lock leaves desktop, dev browser, and agent unlocked.
+        let agent_cid = unlock_all(&state);
+        lock_production_browser_sessions(&state);
+        assert!(state.runtime.lock().unwrap().status().unlocked);
+        #[cfg(unix)]
+        {
+            assert!(!http_broker.lock().unwrap().runtime_for_test().is_unlocked());
+            assert!(!prod_broker.lock().unwrap().runtime_for_test().is_unlocked());
+            assert!(dev_broker.lock().unwrap().runtime_for_test().is_unlocked());
+        }
+        assert!(state.agent_vault_access.is_unlocked(agent_cid));
+
+        // 2. Desktop + Agent lock leaves all browser listeners untouched (safe inside broker mutex).
+        #[cfg(unix)]
+        http_broker
+            .lock()
+            .unwrap()
+            .runtime_for_test()
+            .unlock_for_browser(password.to_owned())
+            .expect("http re-unlock");
+        lock_desktop_and_agent_sessions(None, &state);
+        assert!(!state.runtime.lock().unwrap().status().unlocked);
+        assert!(!state.agent_vault_access.is_unlocked(agent_cid));
+        #[cfg(unix)]
+        {
+            assert!(http_broker.lock().unwrap().runtime_for_test().is_unlocked());
+            assert!(dev_broker.lock().unwrap().runtime_for_test().is_unlocked());
+        }
+
+        // 3. `lock_all_sessions` locks desktop + prod + dev + agent, while change-password keeps all quick unlocks.
+        let agent_cid = unlock_all(&state);
+        *state.agent_unlock_window_request.lock().unwrap() =
+            Some(DisplayedAgentUnlock::Agent {
+                unlock_ref: "agent-ref".into(),
+                client_id: agent_cid,
+            });
+        *state.agent_authorization_window_request.lock().unwrap() =
+            Some(DisplayedAgentAuthorization::Permission("perm-ref".into()));
+
+        state
+            .runtime
+            .lock()
+            .unwrap()
+            .execute(
+                "vault.change-password",
+                json!({ "currentPassword": password, "newPassword": new_password }),
+            )
+            .expect("change password");
+        lock_all_sessions(None, &state);
+
+        assert!(!state.runtime.lock().unwrap().status().unlocked);
+        #[cfg(unix)]
+        {
+            assert!(!http_broker.lock().unwrap().runtime_for_test().is_unlocked());
+            assert!(!prod_broker.lock().unwrap().runtime_for_test().is_unlocked());
+            assert!(!dev_broker.lock().unwrap().runtime_for_test().is_unlocked());
+        }
+        assert!(!state.agent_vault_access.is_unlocked(agent_cid));
+        assert!(state.agent_unlock_window_request.lock().unwrap().is_none());
+        assert!(state.agent_authorization_window_request.lock().unwrap().is_none());
+
+        // All 3 PINs + biometric stayed enabled and STILL unlock the vault after password change!
+        assert_eq!(json!(state.pin.lock().unwrap().status())["enabled"], true);
+        assert_eq!(
+            json!(state.browser_pin.lock().unwrap().status())["enabled"],
+            true
+        );
+        assert_eq!(
+            json!(state.agent_pin.lock().unwrap().status())["enabled"],
+            true
+        );
+        let bio_status = json!(state.biometric.lock().unwrap().status());
+        if bio_status["available"] == true {
+            assert_eq!(bio_status["enabled"], true);
+        }
+
+        let d_cred = state.pin.lock().unwrap().unlock("111111").expect("desktop pin still works");
+        state
+            .runtime
+            .lock()
+            .unwrap()
+            .unlock_with_quick_key(d_cred.vault_path, d_cred.vault_key.as_slice())
+            .expect("unlock desktop via retained PIN");
+        let b_cred = state
+            .browser_pin
+            .lock()
+            .unwrap()
+            .unlock("222222")
+            .expect("browser pin still works");
+        assert_eq!(b_cred.vault_key.as_slice(), d_cred.vault_key.as_slice());
+        #[cfg(unix)]
+        http_broker
+            .lock()
+            .unwrap()
+            .runtime_for_test()
+            .unlock_for_browser_with_quick_key(b_cred.vault_path, b_cred.vault_key.as_slice())
+            .expect("unlock browser via retained PIN");
+        let a_cred = state
+            .agent_pin
+            .lock()
+            .unwrap()
+            .unlock("333333")
+            .expect("agent pin still works");
+        assert_eq!(a_cred.vault_key.as_slice(), d_cred.vault_key.as_slice());
+        let (bio_path, bio_key) = state
+            .biometric
+            .lock()
+            .unwrap()
+            .credential_after_authentication()
+            .expect("biometric credential still works");
+        assert_eq!(
+            bio_path.canonicalize().unwrap(),
+            vault_path.canonicalize().unwrap()
+        );
+        assert_eq!(bio_key.as_slice(), quick_key.as_slice());
+
+        #[cfg(unix)]
+        {
+            http_listener.stop();
+            unix_listener.stop();
+            dev_listener.stop();
+            let _ = std::fs::remove_file(&prod_sock);
+            let _ = std::fs::remove_file(&dev_sock);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

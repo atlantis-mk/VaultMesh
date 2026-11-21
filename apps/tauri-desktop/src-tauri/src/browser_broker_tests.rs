@@ -1059,7 +1059,7 @@ struct MockBrowserUnlockPlatform {
     reprompt_handler: Mutex<
         Option<
             Box<
-                dyn FnMut(&BrowserRepromptRequest) -> Result<Zeroizing<String>, BrowserPlatformError>
+                dyn FnMut(&BrowserRepromptRequest) -> Result<BrowserRepromptResolution, BrowserPlatformError>
                     + Send,
             >,
         >,
@@ -1419,10 +1419,14 @@ fn ct_browser_002_one_shot_fill_enforces_master_password_reprompt_and_lock_free_
         seen_requests: Mutex::new(Vec::new()),
         seen_reprompts: Mutex::new(Vec::new()),
         handler: Mutex::new(None),
-        reprompt_handler: Mutex::new(Some(Box::new(move |_| {
+        reprompt_handler: Mutex::new(Some(Box::new(move |req| {
             reprompt_attempts += 1;
             let password = if reprompt_attempts == 1 { "incorrect synthetic password" } else { PASSWORD };
-            Ok(Zeroizing::new(password.to_owned()))
+            Ok(BrowserRepromptResolution {
+                vault_path: req.vault_path.clone(),
+                vault_key: None,
+                master_password: Zeroizing::new(password.to_owned()),
+            })
         }))),
     });
 
@@ -1539,10 +1543,11 @@ fn ct_browser_002_one_shot_fill_enforces_master_password_reprompt_and_lock_free_
         }
         fn begin_master_password_reprompt(
             &self,
-            _request: BrowserRepromptRequest,
+            request: BrowserRepromptRequest,
         ) -> Option<BrowserRepromptWaiter> {
             let entered_tx = self.entered_tx.clone();
             let release_rx = Arc::clone(&self.release_rx);
+            let vault_path = request.vault_path;
             Some(BrowserRepromptWaiter::new(move || {
                 let _ = entered_tx.send(());
                 release_rx
@@ -1550,7 +1555,11 @@ fn ct_browser_002_one_shot_fill_enforces_master_password_reprompt_and_lock_free_
                     .expect("rx lock")
                     .recv_timeout(std::time::Duration::from_secs(5))
                     .expect("release signal");
-                Ok(Zeroizing::new(PASSWORD.to_owned()))
+                Ok(BrowserRepromptResolution {
+                    vault_path,
+                    vault_key: None,
+                    master_password: Zeroizing::new(PASSWORD.to_owned()),
+                })
             }))
         }
     }
@@ -2421,7 +2430,7 @@ fn ct_passkey_002_lock_free_deferred_confirmation_and_one_shot_unlock() {
         &broker,
         &make_live_envelope("passkeys.get", json!({ "requestDetailsJson": make_get(false) })),
     );
-    assert_eq!(ambiguous["error"]["code"], "passkey-unavailable");
+    assert_eq!(ambiguous["error"]["code"], "passkey-selection-required");
 
     let (uc_entered_tx, uc_entered_rx) = std::sync::mpsc::sync_channel(1);
     let (uc_release_tx, uc_release_rx) = std::sync::mpsc::sync_channel(1);
@@ -2459,6 +2468,7 @@ fn ct_passkey_002_lock_free_deferred_confirmation_and_one_shot_unlock() {
     uc_release_tx.send(()).expect("release unlocked confirm");
     let get_after_lock = worker2.join().expect("join worker2");
     assert_eq!(get_after_lock["error"]["code"], "cancelled");
+    assert_eq!(get_after_lock["error"]["message"], "会话已锁定，操作已取消。");
     let _ = BrowserBrokerCore::handle_line_shared(
         &broker,
         &make_live_envelope("vault.lock", json!({ "userGestureId": Uuid::new_v4() })),
@@ -2650,6 +2660,7 @@ fn ct_passkey_002_declined_confirmation_and_pre_or_post_confirm_expiry_leave_vau
     );
     let cancel_create_resp = BrowserBrokerCore::handle_line_shared(&broker, &cancel_create_line);
     assert_eq!(cancel_create_resp["error"]["code"], "cancelled");
+    assert_eq!(cancel_create_resp["error"]["message"], "用户已拒绝通行密钥确认。");
     assert!(broker.lock().unwrap().runtime.is_unlocked());
     let (probe_after_cancel_create, _) = make_live_envelope_with_ttl(
         "passkeys.probe",
@@ -2677,6 +2688,7 @@ fn ct_passkey_002_declined_confirmation_and_pre_or_post_confirm_expiry_leave_vau
     );
     let cancel_get_resp = BrowserBrokerCore::handle_line_shared(&broker, &cancel_get_line);
     assert_eq!(cancel_get_resp["error"]["code"], "cancelled");
+    assert_eq!(cancel_get_resp["error"]["message"], "用户已拒绝通行密钥确认。");
     assert!(broker.lock().unwrap().runtime.is_unlocked());
 
     // 3. Pre-confirm expiry: lock first, unlock finishes after expiresAt -> request-expired, confirm_passkey skipped, vault remains locked and bytes unchanged.
@@ -2769,7 +2781,9 @@ fn ct_passkey_002_declined_confirmation_and_pre_or_post_confirm_expiry_leave_vau
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(BrowserBrokerCore::handle_line_shared(&broker, &cancel_line)["ok"], true);
     release_tx.send(()).unwrap();
-    assert_eq!(worker.join().unwrap()["error"]["code"], "cancelled");
+    let cancelled_resp = worker.join().unwrap();
+    assert_eq!(cancelled_resp["error"]["code"], "cancelled");
+    assert_eq!(cancelled_resp["error"]["message"], "操作已取消。");
     assert_eq!(fs::read(&vault_path).unwrap(), unlocked_baseline_vault_bytes);
 
     let (probe_line, _) = make_live_envelope_with_ttl(
@@ -2789,6 +2803,782 @@ fn ct_passkey_002_declined_confirmation_and_pre_or_post_confirm_expiry_leave_vau
     assert_eq!(events_after["result"]["sequence"].as_u64(), Some(seq_before_post_exp));
     let _ = baseline_vault_bytes;
     let _ = baseline_seq;
+
+    drop(broker);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn ct_browser_pin_and_change_password_lock_scope_without_deadlock() {
+    struct SharedStatePlatform {
+        state: crate::RuntimeState,
+        preview: crate::browser_preauth_preview::BrowserPreAuthPreviewStore,
+    }
+    impl BrowserBrokerPlatform for SharedStatePlatform {
+        fn dispatch(
+            &self,
+            runtime: &mut DesktopRuntime,
+            operation: &str,
+            input: &Map<String, Value>,
+            _now_millis: i64,
+        ) -> Option<Result<Value, BrowserPlatformError>> {
+            match operation {
+                "pin.enable" => Some((|| -> Result<Value, BrowserPlatformError> {
+                    let pin = input
+                        .get("pin")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| BrowserPlatformError {
+                            code: "invalid-request",
+                            message: "pin required".into(),
+                        })?;
+                    let limit = input
+                        .get("failureLimit")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| u8::try_from(v).ok())
+                        .ok_or_else(|| BrowserPlatformError {
+                            code: "invalid-request",
+                            message: "limit required".into(),
+                        })?;
+                    runtime.refresh_from_disk().map_err(|e| BrowserPlatformError {
+                        code: "unlock-required",
+                        message: e.public_message().to_owned(),
+                    })?;
+                    let (path, key) = runtime.quick_unlock_material().map_err(|e| BrowserPlatformError {
+                        code: "unlock-required",
+                        message: e.public_message().to_owned(),
+                    })?;
+                    let service = self.state.browser_pin.lock().unwrap();
+                    service
+                        .enable(path, key.as_slice(), pin, limit)
+                        .map(|s| json!(s))
+                        .map_err(|m| BrowserPlatformError {
+                            code: "operation-failed",
+                            message: m,
+                        })
+                })()),
+                "pin.disable" => Some((|| -> Result<Value, BrowserPlatformError> {
+                    let service = self.state.browser_pin.lock().unwrap();
+                    service.disable().map_err(|m| BrowserPlatformError {
+                        code: "operation-failed",
+                        message: m,
+                    })?;
+                    Ok(json!(service.status()))
+                })()),
+                "pin.unlock" => Some((|| -> Result<Value, BrowserPlatformError> {
+                    let pin = input.get("pin").and_then(Value::as_str).unwrap_or("");
+                    let cred = self
+                        .state
+                        .browser_pin
+                        .lock()
+                        .unwrap()
+                        .unlock(pin)
+                        .map_err(|m| BrowserPlatformError {
+                            code: "operation-failed",
+                            message: m,
+                        })?;
+                    let status = runtime
+                        .unlock_for_browser_with_quick_key(cred.vault_path, cred.vault_key.as_slice())
+                        .map_err(|e| BrowserPlatformError {
+                            code: "operation-failed",
+                            message: e.public_message().to_owned(),
+                        })?;
+                    Ok(json!({ "cancelled": false, "status": status }))
+                })()),
+                _ => None,
+            }
+        }
+
+        fn after_runtime_mutation(&self, operation: &str) -> Result<(), BrowserPlatformError> {
+            if operation == "vault.change-password" {
+                crate::desktop_runtime::lock_desktop_and_agent_sessions(None, &self.state);
+            }
+            Ok(())
+        }
+
+        fn preauth_preview_store(
+            &self,
+        ) -> Option<crate::browser_preauth_preview::BrowserPreAuthPreviewStore> {
+            Some(self.preview.clone())
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("vaultmesh-browser-pin-locks-{}", Uuid::new_v4()));
+    let mut state = crate::pin_domain_adapter::test_runtime_state(&root);
+    let vault_path = root.join("vaultmesh.vault");
+    let new_password = "new browser lifecycle test password";
+
+    state
+        .runtime
+        .lock()
+        .unwrap()
+        .create(PASSWORD.into())
+        .expect("create");
+    for (kind, pin) in [
+        (
+            crate::pin_domain_adapter::PinDomainKind::Agent,
+            "333333",
+        ),
+        (
+            crate::pin_domain_adapter::PinDomainKind::Desktop,
+            "111111",
+        ),
+    ] {
+        crate::pin_domain_adapter::execute_pin_domain_action(
+            &state,
+            crate::pin_domain_adapter::PinDomainFactory::create_for(kind),
+            crate::pin_domain_adapter::PinDomainAction::Enable,
+            json!({ "pin": pin, "failureLimit": 5 }),
+        )
+        .expect("enable other pins");
+    }
+
+    let agent_cid = Uuid::new_v4();
+    state
+        .agent_vault_access
+        .register_client(agent_cid, "browser-lock-scope-agent".into());
+    state
+        .agent_vault_access
+        .unlock_with_password(agent_cid, vault_path.clone(), PASSWORD.into())
+        .expect("agent unlock");
+
+    let secret = [0x61_u8; 32];
+    let preview = state.browser_preauth_preview.clone();
+    let platform = Arc::new(SharedStatePlatform {
+        state: state.clone(),
+        preview: preview.clone(),
+    });
+    let broker = Arc::new(Mutex::new(
+        BrowserBrokerCore::new_with_platform(
+            vault_path.clone(),
+            Zeroizing::new(secret),
+            platform,
+        )
+        .expect("broker"),
+    ));
+    let http_listener = Arc::new(
+        crate::BrowserBrokerHttpListener::start_with_port(Arc::clone(&broker), 0)
+            .expect("http listener"),
+    );
+    state._browser_http_listener = Some(Arc::clone(&http_listener));
+
+    let make_live_envelope = |operation: &str, input: Value| -> Vec<u8> {
+        let now = Utc::now();
+        let rpc = json!({
+            "kind": "vaultmesh.rpc",
+            "version": RPC_VERSION,
+            "requestId": Uuid::new_v4(),
+            "issuedAt": now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "expiresAt": (now + chrono::Duration::seconds(30)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            "operation": operation,
+            "input": input,
+        });
+        envelope(&rpc, &secret)
+    };
+
+    // 1. Unlock browser with PIN/master -> browser `pin.enable` locks ONLY browser.
+    assert_eq!(
+        BrowserBrokerCore::handle_line_shared(
+            &broker,
+            &make_live_envelope(
+                "vault.unlock",
+                json!({ "masterPassword": PASSWORD, "userGestureId": Uuid::new_v4() }),
+            ),
+        )["ok"],
+        true
+    );
+    let enable_resp = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope(
+            "pin.enable",
+            json!({ "pin": "222222", "failureLimit": 5, "userGestureId": Uuid::new_v4() }),
+        ),
+    );
+    assert_eq!(enable_resp["ok"], true, "{enable_resp}");
+    assert!(!broker.lock().unwrap().runtime.is_unlocked());
+    assert!(state.runtime.lock().unwrap().status().unlocked);
+    assert!(state.agent_vault_access.is_unlocked(agent_cid));
+
+    // Unlock browser via new PIN (also proves AC-1 for browser PIN reuse!), then `pin.disable` locks ONLY browser.
+    let pin_unlock_resp = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope(
+            "pin.unlock",
+            json!({ "pin": "222222", "userGestureId": Uuid::new_v4() }),
+        ),
+    );
+    assert_eq!(pin_unlock_resp["ok"], true, "{pin_unlock_resp}");
+    // Re-enable using quick-unlock (PIN unlock) to prove AC-1!
+    let re_enable_resp = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope(
+            "pin.enable",
+            json!({ "pin": "444444", "failureLimit": 5, "userGestureId": Uuid::new_v4() }),
+        ),
+    );
+    assert_eq!(re_enable_resp["ok"], true, "{re_enable_resp}");
+    assert!(!broker.lock().unwrap().runtime.is_unlocked());
+    assert_eq!(
+        BrowserBrokerCore::handle_line_shared(
+            &broker,
+            &make_live_envelope(
+                "pin.unlock",
+                json!({ "pin": "444444", "userGestureId": Uuid::new_v4() }),
+            ),
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        BrowserBrokerCore::handle_line_shared(
+            &broker,
+            &make_live_envelope("pin.disable", json!({ "userGestureId": Uuid::new_v4() })),
+        )["ok"],
+        true
+    );
+    assert!(!broker.lock().unwrap().runtime.is_unlocked());
+    assert!(state.runtime.lock().unwrap().status().unlocked);
+    assert!(state.agent_vault_access.is_unlocked(agent_cid));
+
+    // Re-enable browser PIN before testing `vault.change-password` across all 3 ends.
+    assert_eq!(
+        BrowserBrokerCore::handle_line_shared(
+            &broker,
+            &make_live_envelope(
+                "vault.unlock",
+                json!({ "masterPassword": PASSWORD, "userGestureId": Uuid::new_v4() }),
+            ),
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        BrowserBrokerCore::handle_line_shared(
+            &broker,
+            &make_live_envelope(
+                "pin.enable",
+                json!({ "pin": "555555", "failureLimit": 5, "userGestureId": Uuid::new_v4() }),
+            ),
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        BrowserBrokerCore::handle_line_shared(
+            &broker,
+            &make_live_envelope(
+                "pin.unlock",
+                json!({ "pin": "555555", "userGestureId": Uuid::new_v4() }),
+            ),
+        )["ok"],
+        true
+    );
+
+    // Clear preview so we verify `vault.change-password` refreshes preview BEFORE locking.
+    preview.clear();
+    let seq_before = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope("events.poll", json!({ "after": 0 })),
+    )["result"]["sequence"]
+        .as_u64()
+        .unwrap();
+
+    // 2. Browser `vault.change-password`: zero deadlock even with `_browser_http_listener` attached!
+    let change_gesture = Uuid::new_v4();
+    let confirmation = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope(
+            "confirmation.request",
+            json!({ "operation": "vault.change-password", "userGestureId": change_gesture }),
+        ),
+    );
+    let confirmation_token = confirmation["result"]["confirmationToken"]
+        .as_str()
+        .expect("confirmation token")
+        .to_owned();
+    let changed = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope(
+            "vault.change-password",
+            json!({
+                "currentPassword": PASSWORD,
+                "newPassword": new_password,
+                "userGestureId": change_gesture,
+                "confirmationToken": confirmation_token,
+            }),
+        ),
+    );
+    assert_eq!(changed["ok"], true, "{changed}");
+    assert!(!broker.lock().unwrap().runtime.is_unlocked());
+    assert!(!state.runtime.lock().unwrap().status().unlocked);
+    assert!(!state.agent_vault_access.is_unlocked(agent_cid));
+    assert!(preview.load_verified_snapshot(&vault_path).is_some());
+
+    let events_after = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope("events.poll", json!({ "after": seq_before })),
+    );
+    let event_types: Vec<&str> = events_after["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["type"].as_str())
+        .collect();
+    assert!(event_types.contains(&"vault-changed"), "{event_types:?}");
+    assert!(event_types.contains(&"vault-locked"), "{event_types:?}");
+
+    // All 3 PIN domains remain enabled and unlock cleanly after browser password change.
+    assert_eq!(json!(state.pin.lock().unwrap().status())["enabled"], true);
+    assert_eq!(
+        json!(state.browser_pin.lock().unwrap().status())["enabled"],
+        true
+    );
+    assert_eq!(
+        json!(state.agent_pin.lock().unwrap().status())["enabled"],
+        true
+    );
+    assert_eq!(
+        BrowserBrokerCore::handle_line_shared(
+            &broker,
+            &make_live_envelope(
+                "pin.unlock",
+                json!({ "pin": "555555", "userGestureId": Uuid::new_v4() }),
+            ),
+        )["ok"],
+        true
+    );
+
+    http_listener.stop();
+    drop(broker);
+    drop(state);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ct_locked_reprompt_with_vault_key_rebuilds_preview_fills_multifield_and_skips_sync_and_history() {
+    let root = std::env::temp_dir().join(format!("vaultmesh-reprompt-key-opt-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).expect("test root");
+    let vault_path = root.join("browser.vault");
+    let preview = crate::browser_preauth_preview::BrowserPreAuthPreviewStore::in_memory();
+
+    let (login_id, card_id, quick_key, history_before) = {
+        let mut creator = DesktopRuntime::new(vault_path.clone()).expect("creator");
+        creator.create(PASSWORD.into()).expect("create");
+        let login = creator
+            .execute(
+                "items.add",
+                json!({
+                    "title": "Reprompt Login + TOTP",
+                    "username": "ada@bank.test",
+                    "password": "reprompt-login-pw",
+                    "url": "https://bank.example.com/login",
+                    "notes": null,
+                    "folder": null,
+                    "favorite": false,
+                    "totpSecret": "JBSWY3DPEHPK3PXP",
+                    "recoveryCodes": [],
+                    "additionalUrls": [],
+                    "autofillOnPageLoad": false,
+                    "masterPasswordReprompt": true,
+                    "customFields": [],
+                }),
+            )
+            .expect("login");
+        let card = creator
+            .execute(
+                "cards.add",
+                json!({
+                    "title": "Bank Card",
+                    "cardholderName": "Ada",
+                    "cardNumber": "4111111111119999",
+                    "expirationMonth": 11,
+                    "expirationYear": 2029,
+                    "securityCode": "888",
+                    "pin": null,
+                    "issuer": null,
+                    "network": "Visa",
+                    "billingAddress": null,
+                    "notes": null,
+                    "folder": null,
+                    "favorite": false,
+                    "masterPasswordReprompt": false,
+                }),
+            )
+            .expect("card");
+        let (_, key) = creator.quick_unlock_material().expect("key");
+        let history_len = creator
+            .execute("vault.unlock-history", json!({}))
+            .expect("history")
+            .as_array()
+            .unwrap()
+            .len();
+        creator.lock();
+        (
+            login["id"].as_str().unwrap().to_owned(),
+            card["id"].as_str().unwrap().to_owned(),
+            key,
+            history_len,
+        )
+    };
+
+    // Intentionally leave `preauth_preview` EMPTY before locked reprompt!
+    assert!(preview.load_verified_snapshot(&vault_path).is_none());
+
+    let wrong_password_next = Arc::new(Mutex::new(false));
+    let wrong_flag = Arc::clone(&wrong_password_next);
+    let key_for_handler = quick_key.clone();
+    let platform = Arc::new(MockBrowserUnlockPlatform {
+        preview: preview.clone(),
+        seen_requests: Mutex::new(Vec::new()),
+        seen_reprompts: Mutex::new(Vec::new()),
+        handler: Mutex::new(None),
+        reprompt_handler: Mutex::new(Some(Box::new(move |req| {
+            let mut flag = wrong_flag.lock().unwrap();
+            let pw = if *flag {
+                *flag = false;
+                "wrong-password"
+            } else {
+                PASSWORD
+            };
+            Ok(BrowserRepromptResolution {
+                vault_path: req.vault_path.clone(),
+                vault_key: Some(Zeroizing::new(key_for_handler.to_vec())),
+                master_password: Zeroizing::new(pw.to_owned()),
+            })
+        }))),
+    });
+
+    let secret = [0x71_u8; 32];
+    let broker = Arc::new(Mutex::new(
+        BrowserBrokerCore::new_with_platform(
+            vault_path.clone(),
+            Zeroizing::new(secret),
+            platform.clone(),
+        )
+        .expect("broker"),
+    ));
+    let make_live_envelope = |operation: &str, input: Value| -> Vec<u8> {
+        let now = Utc::now();
+        let rpc = json!({
+            "kind": "vaultmesh.rpc",
+            "version": RPC_VERSION,
+            "requestId": Uuid::new_v4(),
+            "issuedAt": now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "expiresAt": (now + chrono::Duration::seconds(30)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            "operation": operation,
+            "input": input,
+        });
+        envelope(&rpc, &secret)
+    };
+
+    // 1. Multi-field Login + TOTP reprompt using `vault_key: Some(key)` rebuilds missing preview.
+    let now = Utc::now();
+    let issued = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let expires = (now + chrono::Duration::seconds(30)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let login_exec = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope(
+            "browser.autofill.execute",
+            json!({
+                "mode": "selection",
+                "discovery": {
+                    "version": 1,
+                    "requestId": Uuid::new_v4(),
+                    "issuedAt": issued,
+                    "expiresAt": expires,
+                    "tabId": 7,
+                    "topOrigin": "https://bank.example.com",
+                    "targetOrigin": "https://bank.example.com",
+                    "targetPageUrl": "https://bank.example.com/login",
+                    "selectedItem": { "kind": "login", "id": login_id, "title": "Reprompt Login + TOTP" },
+                    "frames": [{
+                        "frameId": 0,
+                        "documentId": Uuid::new_v4(),
+                        "frameOrigin": "https://bank.example.com",
+                        "fields": [
+                            { "handle": Uuid::new_v4(), "control": "input", "inputType": "text", "isEmpty": true, "autocomplete": ["username"], "label": "User", "name": "user", "id": "user", "placeholder": "", "context": "login" },
+                            { "handle": Uuid::new_v4(), "control": "input", "inputType": "password", "isEmpty": true, "autocomplete": ["current-password"], "label": "Pass", "name": "pass", "id": "pass", "placeholder": "", "context": "login" },
+                            { "handle": Uuid::new_v4(), "control": "input", "inputType": "text", "isEmpty": true, "autocomplete": ["one-time-code"], "label": "TOTP", "name": "otp", "id": "otp", "placeholder": "", "context": "login" }
+                        ]
+                    }]
+                }
+            }),
+        ),
+    );
+    assert_eq!(login_exec["ok"], true, "{login_exec}");
+    let assignments = login_exec["result"]["frames"][0]["assignments"].as_array().unwrap();
+    assert_eq!(assignments[0]["value"], "ada@bank.test");
+    assert_eq!(assignments[1]["value"], "reprompt-login-pw");
+    assert_eq!(assignments[2]["value"].as_str().map(str::len), Some(6));
+    assert!(preview.load_verified_snapshot(&vault_path).is_some());
+    assert!(!broker.lock().unwrap().runtime.is_unlocked());
+
+    // 2. Card (number + CVC) succeeds while locked with `vault_key: Some(key)`.
+    let card_exec = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope(
+            "browser.autofill.execute",
+            json!({
+                "mode": "selection",
+                "discovery": {
+                    "version": 1,
+                    "requestId": Uuid::new_v4(),
+                    "issuedAt": issued,
+                    "expiresAt": expires,
+                    "tabId": 7,
+                    "topOrigin": "https://bank.example.com",
+                    "targetOrigin": "https://bank.example.com",
+                    "targetPageUrl": "https://bank.example.com/pay",
+                    "selectedItem": { "kind": "card", "id": card_id, "title": "Bank Card" },
+                    "frames": [{
+                        "frameId": 0,
+                        "documentId": Uuid::new_v4(),
+                        "frameOrigin": "https://bank.example.com",
+                        "fields": [
+                            { "handle": Uuid::new_v4(), "control": "input", "inputType": "text", "isEmpty": true, "autocomplete": ["cc-number"], "label": "Card", "name": "cc", "id": "cc", "placeholder": "", "context": "checkout" },
+                            { "handle": Uuid::new_v4(), "control": "input", "inputType": "text", "isEmpty": true, "autocomplete": ["cc-csc"], "label": "CVC", "name": "cvc", "id": "cvc", "placeholder": "", "context": "checkout" }
+                        ]
+                    }]
+                }
+            }),
+        ),
+    );
+    assert_eq!(card_exec["ok"], true, "{card_exec}");
+    let card_assignments = card_exec["result"]["frames"][0]["assignments"].as_array().unwrap();
+    assert_eq!(card_assignments[0]["value"], "4111111111119999");
+    assert_eq!(card_assignments[1]["value"], "888");
+    assert!(!broker.lock().unwrap().runtime.is_unlocked());
+
+    // 3. Even when `vault_key` is Some, wrong `master_password` fails closed!
+    *wrong_password_next.lock().unwrap() = true;
+    let bad_pw_exec = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope(
+            "browser.autofill.execute",
+            json!({
+                "mode": "selection",
+                "discovery": {
+                    "version": 1,
+                    "requestId": Uuid::new_v4(),
+                    "issuedAt": issued,
+                    "expiresAt": expires,
+                    "tabId": 7,
+                    "topOrigin": "https://bank.example.com",
+                    "targetOrigin": "https://bank.example.com",
+                    "targetPageUrl": "https://bank.example.com/pay",
+                    "selectedItem": { "kind": "card", "id": card_id, "title": "Bank Card" },
+                    "frames": [{
+                        "frameId": 0,
+                        "documentId": Uuid::new_v4(),
+                        "frameOrigin": "https://bank.example.com",
+                        "fields": [
+                            { "handle": Uuid::new_v4(), "control": "input", "inputType": "text", "isEmpty": true, "autocomplete": ["cc-number"], "label": "Card", "name": "cc", "id": "cc", "placeholder": "", "context": "checkout" }
+                        ]
+                    }]
+                }
+            }),
+        ),
+    );
+    assert_eq!(bad_pw_exec["error"]["code"], "operation-failed");
+    assert_eq!(bad_pw_exec["error"]["message"], "主密码不正确。");
+
+    // 4. Ephemeral reprompt operations never add `unlock-history` events.
+    let mut verifier = DesktopRuntime::new(vault_path.clone()).expect("verifier");
+    verifier
+        .open_ephemeral_with_key(vault_path, quick_key.as_slice())
+        .expect("ephemeral read");
+    let history_after = verifier
+        .execute("vault.unlock-history", json!({}))
+        .expect("history")
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(history_after, history_before);
+    verifier.lock();
+
+    drop(broker);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn ct_passkey_multi_candidate_selection_and_cancel_diagnostics() {
+    struct MultiPasskeyPlatform {
+        preview: crate::browser_preauth_preview::BrowserPreAuthPreviewStore,
+        quick_key: Zeroizing<[u8; 32]>,
+        unlock_calls: Mutex<usize>,
+        confirm_calls: Mutex<usize>,
+        approve_confirm: Mutex<bool>,
+        unlock_gate: Mutex<Option<(std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>)>>,
+    }
+    impl BrowserBrokerPlatform for MultiPasskeyPlatform {
+        fn dispatch(
+            &self,
+            _runtime: &mut DesktopRuntime,
+            _operation: &str,
+            _input: &Map<String, Value>,
+            _now_millis: i64,
+        ) -> Option<Result<Value, BrowserPlatformError>> {
+            None
+        }
+        fn begin_browser_session_unlock(
+            &self,
+            request: BrowserSessionUnlockRequest,
+        ) -> Option<BrowserSessionUnlockWaiter> {
+            *self.unlock_calls.lock().unwrap() += 1;
+            let key = self.quick_key.clone();
+            let gate = self.unlock_gate.lock().unwrap().take();
+            Some(BrowserSessionUnlockWaiter::new(move || {
+                if let Some((entered, release)) = gate {
+                    let _ = entered.send(());
+                    let _ = release.recv_timeout(Duration::from_secs(2));
+                }
+                Ok(BrowserUnlockResolution {
+                    factor: BrowserUnlockFactor::Pin,
+                    vault_path: request.vault_path,
+                    vault_key: Zeroizing::new(key.to_vec()),
+                    master_password: None,
+                })
+            }))
+        }
+        fn confirm_passkey(
+            &self,
+            _request: &PasskeyConfirmationRequest,
+        ) -> Result<bool, BrowserPlatformError> {
+            *self.confirm_calls.lock().unwrap() += 1;
+            Ok(*self.approve_confirm.lock().unwrap())
+        }
+        fn preauth_preview_store(
+            &self,
+        ) -> Option<crate::browser_preauth_preview::BrowserPreAuthPreviewStore> {
+            Some(self.preview.clone())
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("vaultmesh-passkey-multi-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).expect("test root");
+    let vault_path = root.join("browser.vault");
+    let preview = crate::browser_preauth_preview::BrowserPreAuthPreviewStore::in_memory();
+
+    let create_req = |user_id: &[u8], user_name: &str| {
+        json!({
+            "rp": { "id": "multi.example.test", "name": "Multi" },
+            "user": { "id": URL_SAFE_NO_PAD.encode(user_id), "name": user_name, "displayName": user_name },
+            "challenge": URL_SAFE_NO_PAD.encode(b"reg-challenge"),
+            "pubKeyCredParams": [{ "type": "public-key", "alg": -7 }],
+            "excludeCredentials": [],
+            "extensions": { "remoteDesktopClientOverride": { "origin": "https://multi.example.test", "sameOriginWithAncestors": true } }
+        })
+        .to_string()
+    };
+    let get_req = |rp_id: &str| {
+        json!({
+            "challenge": URL_SAFE_NO_PAD.encode(b"assertion challenge"),
+            "rpId": rp_id,
+            "allowCredentials": [],
+            "userVerification": "preferred",
+            "extensions": { "remoteDesktopClientOverride": { "origin": format!("https://{rp_id}"), "sameOriginWithAncestors": true } }
+        })
+        .to_string()
+    };
+
+    let quick_key = {
+        let mut creator = DesktopRuntime::new(vault_path.clone()).expect("creator");
+        creator.create(PASSWORD.into()).expect("create");
+        creator
+            .create_passkey(&create_req(b"u-1", "alice@multi.example.test"), None, "2027-01-15T08:00:00.000Z")
+            .expect("pk1");
+        creator
+            .create_passkey(&create_req(b"u-2", "bob@multi.example.test"), None, "2027-01-15T08:00:01.000Z")
+            .expect("pk2");
+        preview.sync_from_runtime(&mut creator).expect("sync");
+        let (_, key) = creator.quick_unlock_material().expect("key");
+        creator.lock();
+        key
+    };
+
+    let platform = Arc::new(MultiPasskeyPlatform {
+        preview: preview.clone(),
+        quick_key,
+        unlock_calls: Mutex::new(0),
+        confirm_calls: Mutex::new(0),
+        approve_confirm: Mutex::new(true),
+        unlock_gate: Mutex::new(None),
+    });
+    let secret = [0x91_u8; 32];
+    let broker = Arc::new(Mutex::new(
+        BrowserBrokerCore::new_with_platform(vault_path, Zeroizing::new(secret), platform.clone())
+            .expect("broker"),
+    ));
+    let make_live_envelope = |operation: &str, input: Value| -> Vec<u8> {
+        let now = Utc::now();
+        let rpc = json!({
+            "kind": "vaultmesh.rpc",
+            "version": RPC_VERSION,
+            "requestId": Uuid::new_v4(),
+            "issuedAt": now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "expiresAt": (now + chrono::Duration::seconds(30)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            "operation": operation,
+            "input": cancellable_passkey_input(operation, input),
+        });
+        envelope(&rpc, &secret)
+    };
+
+    // 1. Locked preauth preview with 2 candidates -> immediately `passkey-selection-required` WITHOUT opening unlock window!
+    let preview_multi = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope("passkeys.get", json!({ "requestDetailsJson": get_req("multi.example.test") })),
+    );
+    assert_eq!(preview_multi["error"]["code"], "passkey-selection-required");
+    assert_eq!(*platform.unlock_calls.lock().unwrap(), 0);
+    assert!(!broker.lock().unwrap().runtime.is_unlocked());
+
+    // 2. Unknown RP in preauth preview -> `passkey-unavailable` without opening unlock window!
+    let preview_none = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope("passkeys.get", json!({ "requestDetailsJson": get_req("missing.example.test") })),
+    );
+    assert_eq!(preview_none["error"]["code"], "passkey-unavailable");
+    assert_eq!(*platform.unlock_calls.lock().unwrap(), 0);
+
+    // 3. Absent preview -> unlocks -> `commit_browser_passkey_unlock` rejects 2 candidates with `passkey-selection-required` without calling confirm!
+    preview.clear();
+    let commit_multi = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope("passkeys.get", json!({ "requestDetailsJson": get_req("multi.example.test") })),
+    );
+    assert_eq!(commit_multi["error"]["code"], "passkey-selection-required");
+    assert_eq!(*platform.unlock_calls.lock().unwrap(), 1);
+    assert_eq!(*platform.confirm_calls.lock().unwrap(), 0);
+    assert!(broker.lock().unwrap().runtime.is_unlocked());
+
+    // 4. Distinct diagnostics check: unlocked ambiguous -> `passkey-selection-required`, lock mid-flight -> `"会话已锁定，操作已取消。"`, explicit cancel -> `"操作已取消。"`, decline -> `"用户已拒绝通行密钥确认。"`.
+    let unlocked_multi = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope("passkeys.get", json!({ "requestDetailsJson": get_req("multi.example.test") })),
+    );
+    assert_eq!(unlocked_multi["error"]["code"], "passkey-selection-required");
+
+    assert_eq!(
+        BrowserBrokerCore::handle_line_shared(
+            &broker,
+            &make_live_envelope("vault.lock", json!({ "userGestureId": Uuid::new_v4() })),
+        )["result"]["unlocked"],
+        false
+    );
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    *platform.unlock_gate.lock().unwrap() = Some((entered_tx, release_rx));
+    let create_line = make_live_envelope(
+        "passkeys.create",
+        json!({ "requestDetailsJson": create_req(b"u-lock-cancel", "lockcancel@multi.example.test") }),
+    );
+    let worker_broker = Arc::clone(&broker);
+    let worker = std::thread::spawn(move || BrowserBrokerCore::handle_line_shared(&worker_broker, &create_line));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let _ = BrowserBrokerCore::handle_line_shared(
+        &broker,
+        &make_live_envelope("vault.lock", json!({ "userGestureId": Uuid::new_v4() })),
+    );
+    release_tx.send(()).unwrap();
+    let locked_cancel = worker.join().unwrap();
+    assert_eq!(locked_cancel["error"]["code"], "cancelled");
+    assert_eq!(locked_cancel["error"]["message"], "会话已锁定，操作已取消。");
 
     drop(broker);
     fs::remove_dir_all(root).expect("cleanup");
