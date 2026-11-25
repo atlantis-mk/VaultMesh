@@ -559,7 +559,7 @@ mod tests {
             if b.id == "chrome" {
                 assert!(b.store_url.contains("chromewebstore.google.com"));
             } else {
-                assert!(b.store_url.contains("github.com/atlantis-mk/VaultMesh/releases/tag/v0.1.8-review"));
+                assert!(b.store_url.contains("github.com/atlantis-mk/VaultMesh/releases/tag/v0.1.9-review"));
             }
         }
     }
