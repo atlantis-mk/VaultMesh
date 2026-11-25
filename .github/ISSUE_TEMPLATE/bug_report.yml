@@ -1,0 +1,83 @@
+name: 🐛 Bug 反馈 / Bug Report
+description: 提交缺陷报告，帮助我们定位和修复问题 / Report a bug to help us improve VaultMesh
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢您反馈问题！为保护您的隐私与资产安全，**切勿在内容、日志或截图中包含主密码、Vault 文件、恢复密钥、私钥、OTP 或任何明文凭据**。
+        Thanks for reporting! For your security, **NEVER include master passwords, vault files, recovery secrets, private keys, OTPs, or plaintext credentials** in logs or screenshots.
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: 受影响客户端 / Affected Client
+      description: 问题发生在哪个端或模块？ / Which client or component is affected?
+      options:
+        - macOS Desktop (Tauri)
+        - Windows Desktop (Tauri)
+        - Android App (Compose)
+        - Chromium Extension (MV3)
+        - Firefox Extension (MV2)
+        - 局域网同步 / LAN Sync & Device Assist
+        - Core / 其他 (Core / Other)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本与系统环境 / Version & OS
+      description: 请填写应用/扩展版本号及操作系统版本 / App or extension version and OS version
+      placeholder: 例如 / e.g. v0.2.0, macOS 15.2 / Android 15 / Chrome 131
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述 / Description
+      description: 请简明描述发生了什么异常 / Clearly and concisely describe what happened
+      placeholder: 例如：点击解锁后扩展未同步状态... / e.g. Extension state does not update after unlocking...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 / Steps to Reproduce
+      description: 请提供可稳定复现的操作步骤 / Detailed steps to reproduce the issue
+      placeholder: |
+        1. 打开桌面端并解锁 Vault / Open desktop app and unlock vault
+        2. 在浏览器扩展中点击... / Click ... in browser extension
+        3. 出现报错或异常... / Observe error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为 / Expected Behavior
+      description: 正常情况下应该发生什么？ / What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志或截图 / Redacted Logs or Screenshots
+      description: 请先对敏感信息脱敏后再粘贴日志或拖入截图 / Paste redacted error logs or drag-and-drop screenshots
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认 / Pre-submission Checklist
+      options:
+        - label: 我已确认在现有 Issues 中没有重复的反馈 / I have searched existing issues for duplicates
+          required: true
+        - label: 我已确认日志和截图中不包含任何密码、密钥或 Vault 敏感数据 / I confirm no passwords, keys, or vault secrets are included
+          required: true

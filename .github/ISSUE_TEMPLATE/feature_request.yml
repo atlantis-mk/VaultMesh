@@ -1,0 +1,49 @@
+name: 💡 功能建议 / Feature Request
+description: 提出新功能想法或体验改进建议 / Suggest a new feature or enhancement for VaultMesh
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢为 VaultMesh 提出建议！请注意 VaultMesh 坚持**本地优先、无账号、无云端服务器**的设计原则。
+        Thank you for your suggestion! Please keep in mind that VaultMesh is **local-first, with no accounts or cloud servers**.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 适用范围 / Target Scope
+      multiple: true
+      options:
+        - Desktop (Tauri - macOS / Windows)
+        - Android App
+        - Browser Extension (Chromium / Firefox)
+        - LAN Sync / Device Assist
+        - CLI / Core / Docs
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景与痛点 / Problem & Use Case
+      description: 您希望解决什么问题？目前遇到了什么不便？ / What problem does this solve or what pain point do you face?
+      placeholder: 当我在...场景下使用时，目前无法... / When using VaultMesh for..., I currently cannot...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望的解决方案 / Proposed Solution
+      description: 请描述您希望该功能如何交互或工作 / Describe how you would like this feature to work
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案或补充参考 / Alternatives & Context
+      description: 是否有其他替代做法、参考设计或截图？ / Any alternative workarounds, references, or mockups?
+    validations:
+      required: false

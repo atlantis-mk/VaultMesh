@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 安全漏洞报告 / Report a Security Vulnerability
+    url: https://github.com/atlantis-mk/VaultMesh/security/advisories/new
+    about: 如发现加密、鉴权或数据泄露等安全问题，请通过私密渠道提交，勿公开在 Issue 中 / Please report security issues privately instead of opening a public issue
+  - name: 💬 使用问答与社区讨论 / Questions & Discussions
+    url: https://github.com/atlantis-mk/VaultMesh/discussions
+    about: 使用咨询、配置问题或开放性想法请前往 Discussions / Ask questions or share general ideas in Discussions
+  - name: 📖 贡献指南与安全政策 / Contributing & Security Policy
+    url: https://github.com/atlantis-mk/VaultMesh/blob/main/CONTRIBUTING.md
+    about: 提交 PR 或参与开发前请先阅读贡献指南 / Please read our contributing guidelines before submitting PRs
